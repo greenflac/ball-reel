@@ -205,10 +205,28 @@ def body_metrics(photo: str | Path) -> dict:
     if len(leg) == 2:
         prop["leg_length"] = round(sum(leg), 4)  # already in torso lengths
     out["proportions"] = {k: v for k, v in prop.items() if v is not None}
-    missing = [k for k, v in prop.items() if v is None]
-    if missing:
-        out["notes"].append(f"{len(missing)} segment(s) occluded or out of "
-                            f"frame: {', '.join(missing)}.")
+    occluded = [k for k, v in prop.items() if v is None]
+    if occluded:
+        out["notes"].append(f"{len(occluded)} segment(s) occluded or out of "
+                            f"frame: {', '.join(occluded)}.")
+
+    # Whether these numbers describe the BODY or merely its projection. A
+    # three-quarter or side-on photo foreshortens shoulder width toward zero
+    # while the hips, being rounder, hold up — so the ratio collapses and reads
+    # as a completely different build. Measured on two real photos of different
+    # people: frontal gave shoulder 1.02 and shoulder/hip 1.50, a turned pose
+    # gave 0.14 and 0.96. Reporting the second as build would hand the
+    # generator a body nobody has.
+    turned = shoulders is not None and hips and shoulders < hips * 1.1
+    mostly_hidden = len(occluded) >= len(prop) / 2
+    out["reliable"] = not (turned or mostly_hidden)
+    if turned:
+        out["notes"].append(
+            f"shoulders ({shoulders}) are no wider than the hips ({hips}): the "
+            f"subject is turned away from camera, so these proportions are a "
+            f"PROJECTION, not this person's build. Use a front-on photo.")
+    if mostly_hidden:
+        out["notes"].append("over half the body is occluded: build not usable.")
     return out
 
 
@@ -228,4 +246,8 @@ def subject_package(photo: str | Path, **kw) -> dict:
         missing.append("face geometry")
     if not body.get("proportions"):
         missing.append("build (no body in frame — supply a body reference)")
+    elif not body.get("reliable", True):
+        missing.append("build (body measurable but TURNED/occluded — the "
+                       "proportions are a projection, supply a front-on "
+                       "reference)")
     return {"face": face, "body": body, "missing": missing}
