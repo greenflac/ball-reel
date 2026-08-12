@@ -37,8 +37,14 @@ from pathlib import Path
 
 from .brief import DEMO_BRIEF, Brief
 from .gen import STRATEGIES, Strategy
-from .motion import LOOP_MOTION, PHYSICAL_MOTION
+from .motion import (LOOP_MOTION, PHYSICAL_MOTION, loop_seam, motion_quality,
+                     trim_to_loop)
 from .subject import UNSPECIFIED, Subject
+
+#: Frame-extraction rate for every gate. One constant because the loop trimmer
+#: converts a frame index back into a timestamp with it — a mismatch here would
+#: cut the clip in the wrong place.
+FRAME_FPS = 6
 
 #: Stack, as named in the vacancy. Override per bench via env at call sites.
 START_MODEL = "kontext"        # Flux Kontext — face-conditioned still
@@ -99,6 +105,11 @@ class Attempt:
     reason: str = ""
     clip_path: str = ""
     identity: dict = field(default_factory=dict)
+    #: Loop seam as a multiple of a typical frame step; None if unmeasurable.
+    loop_ratio: float | None = None
+    seamless: bool = False
+    #: Largest frame-to-frame step over the median — a teleport/morph detector.
+    worst_jump: float | None = None
 
 
 @dataclass
@@ -125,6 +136,8 @@ def produce(
     brief: Brief = DEMO_BRIEF,
     *,
     strategy: Strategy | None = None,
+    subject: Subject = UNSPECIFIED,
+    loop: bool = True,
     attempts: int = 4,
     max_identity_drift: float | None = None,
     min_motion: float = 0.02,
@@ -150,14 +163,21 @@ def produce(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    still_prompt = (
-        f"{strat.lead} {brief.subject} Keep this exact person's face and identity."
-        f" {FRAMING}"
-    )
-    base_motion = (
-        f"{strat.lead} The person jumps on the fitness ball: it compresses and "
-        f"rebounds, they leave and land back on it. Keep the same person, same face."
-    )
+    # The subject is what stops the model inventing a stranger's body: its text
+    # half goes in the prompt, its reference images (build, pose) go in as extra
+    # inputs — and having any of those switches the start-frame model, since the
+    # single-reference editor cannot take them at all.
+    start_model = subject.start_model(start_model)
+    still_prompt = " ".join(p for p in (
+        strat.lead, brief.subject,
+        "Keep this exact person's face and identity.",
+        subject.to_prompt(), subject.reference_clause(), FRAMING) if p)
+    base_motion = " ".join(p for p in (
+        strat.lead,
+        "The person bounces on the fitness ball, one continuous take.",
+        PHYSICAL_MOTION,
+        "Keep the same person, same face, same clothing.",
+        LOOP_MOTION if loop else "") if p)
 
     tries: list[Attempt] = []
     best: Attempt | None = None
@@ -173,11 +193,22 @@ def produce(
         #    verified live, no media host needed for the still). seed is folded
         #    into the prompt because /v1/images/edits takes no seed param.
         try:
-            start = pollinations.images_edit(
-                f"{still_prompt} (variation {seed})", face_photo,
-                out_dir / f"start_{n:02d}.png",
-                model=start_model, width=brief.width, height=brief.height,
-            )
+            refs = subject.reference_roles
+            if len(refs) > 1:
+                # Multi-reference: every reference must be a public URL, and the
+                # ORDER has to match reference_clause()'s "FIRST/SECOND/THIRD".
+                urls = [pollinations.upload(face_photo if p == "__face__" else p)
+                        for p, _ in refs]
+                start = pollinations.compose(
+                    f"{still_prompt} (variation {seed})", urls,
+                    out_dir / f"start_{n:02d}.png", model=start_model,
+                    width=brief.width, height=brief.height, seed=seed % 2147483647)
+            else:
+                start = pollinations.images_edit(
+                    f"{still_prompt} (variation {seed})", face_photo,
+                    out_dir / f"start_{n:02d}.png",
+                    model=start_model, width=brief.width, height=brief.height,
+                )
         except Exception as e:  # noqa: BLE001 — a refused/failed still costs one
             tries.append(Attempt(   # attempt, not the run; the loop is the point
                 n, strat.id, "", [], 1.0, 0.0, False,
@@ -209,12 +240,29 @@ def produce(
         #    that dies on one 422 is not the "reliable" this module claims.
         try:
             start_url = pollinations.upload(start)
+            # For a loop, the start frame goes in as BOTH keyframes, so the
+            # model has to bring the subject back to where it began.
             mp4 = pollinations.video(
                 motion_prompt, out_dir / f"video_{n:02d}.mp4",
-                model=video_model, image_url=start_url,
+                model=video_model,
+                image_url=[start_url, start_url] if loop else start_url,
                 duration=brief.duration, aspect_ratio=brief.aspect_ratio,
             )
-            frames = pollinations.extract_frames(mp4, out_dir / f"frames_{n:02d}")
+            frames = pollinations.extract_frames(mp4, out_dir / f"frames_{n:02d}",
+                                                 fps=FRAME_FPS)
+            if loop:
+                # end_frame is declared by more models than honour it (wan and
+                # happyhorse ignored it live), so close the loop locally when
+                # the model did not. Costs one decode and no tokens.
+                seam = loop_seam(frames)
+                if seam["ratio"] is not None and not seam["seamless"]:
+                    cut = trim_to_loop(mp4, frames,
+                                       out_dir / f"video_{n:02d}_loop.mp4",
+                                       fps=FRAME_FPS)
+                    if cut.get("seamless") or (cut.get("ratio") or 9) < seam["ratio"]:
+                        mp4 = cut["out"]
+                        frames = pollinations.extract_frames(
+                            mp4, out_dir / f"frames_{n:02d}_loop", fps=FRAME_FPS)
         except Exception as e:  # noqa: BLE001 — see above
             tries.append(Attempt(
                 n, strat.id, start, [], 1.0, 0.0, False,
@@ -231,6 +279,8 @@ def produce(
         #    `coverage` stops "too small to verify" from passing by default.
         drift = arcface_drift(frames, face_photo)
         motion = motion_presence(frames)["motion"]
+        quality = motion_quality(frames)
+        seam = loop_seam(frames)
         median = drift["median"]
         p90 = drift["p90"]
         coverage = drift["coverage"]
@@ -241,7 +291,8 @@ def produce(
         else:
             score = median
             passed = (median <= bar and p90 <= HARD_DRIFT_MAX
-                      and motion >= min_motion)
+                      and motion >= min_motion and quality["smooth"]
+                      and (seam["seamless"] or not loop))
             if passed:
                 reason = ""
             elif median > bar:
@@ -249,11 +300,17 @@ def produce(
             elif p90 > HARD_DRIFT_MAX:
                 reason = (f"identity unstable: p90 {p90:.2f} > "
                           f"{HARD_DRIFT_MAX:.2f} (drifts inside the clip)")
-            else:
+            elif motion < min_motion:
                 reason = f"motion {motion:.3f} < {min_motion:.2f}"
+            elif not quality["smooth"]:
+                reason = f"motion not physical: {quality['note']}"
+            else:
+                reason = f"does not loop: {seam['note']}"
         att = Attempt(n, strat.id, start, frames, round(score, 4),
                       round(motion, 4), passed, reason, clip_path=mp4,
-                      identity=_identity_summary(drift))
+                      identity=_identity_summary(drift),
+                      loop_ratio=seam["ratio"], seamless=bool(seam["seamless"]),
+                      worst_jump=quality["worst_jump"])
         tries.append(att)
         if best is None or att.worst_identity_drift < best.worst_identity_drift:
             best = att
@@ -319,16 +376,19 @@ def render(res: Result) -> str:
             f"{'PASSED' if res.passed else 'NOT PASSED'}")
     lines = [head, res.note, "",
              f"{'try':<4}{'drift(med)':<12}{'p90':<8}{'cover':<8}{'face px':<10}"
-             f"{'motion':<8}{'ok':<5}reason", "-" * 96]
+             f"{'motion':<8}{'loop':<8}{'jump':<7}{'ok':<5}reason", "-" * 112]
     for a in res.attempts:
         i = a.identity or {}
         p90 = f"{i['p90']:.3f}" if i.get("p90") is not None else "-"
         cov = f"{i['coverage']:.0%}" if i.get("coverage") is not None else "-"
         lo, hi = i.get("face_px_min"), i.get("face_px_max")
         px = f"{lo}-{hi}" if lo is not None else "-"
+        lp = f"{a.loop_ratio:.2f}{'*' if a.seamless else ''}" if a.loop_ratio is not None else "-"
+        jm = f"{a.worst_jump:.1f}x" if a.worst_jump is not None else "-"
         lines.append(f"{a.n:<4}{a.worst_identity_drift:<12.3f}{p90:<8}{cov:<8}"
-                     f"{px:<10}{a.motion:<8.3f}"
+                     f"{px:<10}{a.motion:<8.3f}{lp:<8}{jm:<7}"
                      f"{'yes' if a.passed else 'no':<5}{a.reason}")
+    lines.append("(loop = seam as a multiple of a typical frame step; * = seamless)")
     if res.passed:
         lines += ["", f"clip: {res.clip_path}  ({len(res.clip_frames)} frames)"]
     return "\n".join(lines)
@@ -343,10 +403,33 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--face", required=True, help="path to the person's face photo")
     ap.add_argument("--attempts", type=int, default=4)
     ap.add_argument("--start-model", default=START_MODEL)
-    ap.add_argument("--video-model", default=VIDEO_MODEL)
+    ap.add_argument("--video-model", default=VIDEO_MODEL,
+                    help="seedance-2.0 refuses some references outright; "
+                         "wan/veo/happyhorse-1.1 accepted the same inputs")
     ap.add_argument("--out", default="produce_out")
+    ap.add_argument("--no-loop", action="store_true",
+                    help="do not ask for (or gate on) a seamless loop")
+    # The subject: what the face photo cannot carry.
+    ap.add_argument("--body-ref", default="",
+                    help="photo to copy BUILD and CLOTHING from (text cannot "
+                         "set build; switches to a multi-reference model)")
+    ap.add_argument("--pose-ref", default="",
+                    help="photo to copy the POSE from (face still comes only "
+                         "from --face)")
+    for f in ("gender", "age", "build", "hair", "outfit", "footwear", "posture"):
+        ap.add_argument(f"--{f}", default="")
+    ap.add_argument("--from-photo", action="store_true",
+                    help="fill unset gender/age from the face photo itself")
     args = ap.parse_args(argv)
-    res = produce(args.face, attempts=args.attempts,
+
+    spec = {f: getattr(args, f) for f in
+            ("gender", "age", "build", "hair", "outfit", "footwear", "posture")}
+    spec.update(body_ref=args.body_ref, pose_ref=args.pose_ref)
+    subject = (Subject.from_photo(args.face, **{k: v or None for k, v in spec.items()})
+               if args.from_photo else Subject(**spec))
+
+    res = produce(args.face, attempts=args.attempts, subject=subject,
+                  loop=not args.no_loop,
                   start_model=args.start_model, video_model=args.video_model,
                   out_dir=args.out)
     print(render(res))
