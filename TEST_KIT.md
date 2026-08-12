@@ -44,10 +44,24 @@ export POLLINATIONS_API_KEY=sk_...           # нужен только на ша
 Зависимости под карту:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install diffusers>=0.27 transformers accelerate safetensors
-pip install insightface onnxruntime-gpu opencv-python-headless mediapipe pillow numpy requests
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+pip install "diffusers>=0.27" transformers accelerate safetensors peft
+pip install insightface onnxruntime mediapipe pillow numpy requests huggingface_hub
 ```
+
+Версию CUDA в индексе подбирать под свой Python: индексы pytorch.org собраны
+под конкретные интерпретаторы, и `cu121` на Python 3.13+ отдаёт «No matching
+distribution» — сообщение, по которому не догадаться, что дело в версии
+интерпретатора, а не в CUDA. Актуальный индекс — на
+https://pytorch.org/get-started/locally/
+
+`onnxruntime`, а не `onnxruntime-gpu`: он нужен только для распознавания лица
+на десятке картинок, и gpu-версия под Windows тянет за собой возню с cuDNN.
+
+**В PowerShell** кавычки вокруг `"diffusers>=0.27"` обязательны: `>` там —
+оператор перенаправления, и без кавычек pip создаст файл вместо установки.
+Там же `%USERPROFILE%` не раскрывается (нужно `$env:USERPROFILE`), а `curl` —
+псевдоним `Invoke-WebRequest` и флагов настоящего curl не понимает.
 
 `insightface` тут не опционален: FaceID обусловливается вектором ArcFace, и
 берётся он у того же анализатора, которым лицо потом проверяется.

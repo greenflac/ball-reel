@@ -34,8 +34,18 @@ def check_torch() -> tuple:
     try:
         import torch  # type: ignore
     except ImportError:
-        return _fail("torch", "не установлен: pip install torch --index-url "
-                              "https://download.pytorch.org/whl/cu121")
+        # Версию CUDA здесь не называем. Индексы pytorch.org живут и умирают:
+        # cu121 собран под cp39-cp312, и на Python 3.13+ он отдаёт пустоту с
+        # сообщением «No matching distribution», по которому не догадаться, что
+        # дело в версии интерпретатора. Поэтому — своя версия и селектор.
+        return _fail("torch",
+                     f"не установлен. Python {sys.version_info.major}."
+                     f"{sys.version_info.minor}: взять индекс под него на "
+                     f"https://pytorch.org/get-started/locally/ "
+                     f"(pip install torch --index-url "
+                     f"https://download.pytorch.org/whl/cuXXX). Если pip "
+                     f"пишет 'No matching distribution' — колёс под ЭТУ "
+                     f"версию Python в том индексе нет, брать новее.")
     if not torch.cuda.is_available():
         return _fail("torch.cuda",
                      f"torch {torch.__version__} не видит карту. Обычно это "
