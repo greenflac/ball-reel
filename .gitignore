@@ -20,3 +20,5 @@ wiretest/
 **/start_*.png
 survey/
 driving_spec.json
+face_in/
+subject_motion_package.json

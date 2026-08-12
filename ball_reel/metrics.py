@@ -107,7 +107,27 @@ def face_metrics(photo: str | Path, *, face_model: str | Path | None = None) -> 
 
     landmarker = _face_mesh(model)
     with Image.open(photo) as im:
-        rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
+        im = im.convert("RGB")
+        # The mesh runs on the WHOLE image and finds nothing when the face is a
+        # small part of a full-body frame — measured: a 110px face in a
+        # 1067x1690 photo returned no mesh at all, losing both geometry and all
+        # 52 expression coefficients. ArcFace already located the face, so crop
+        # to it (with margin for chin and forehead) and enlarge. This is the
+        # difference between "no face data from a full-body shot" and the same
+        # data a portrait gives.
+        if det.get("bbox"):
+            x0, y0, x1, y1 = det["bbox"]
+            pad = 0.6 * max(x1 - x0, y1 - y0)
+            box = (max(0, int(x0 - pad)), max(0, int(y0 - pad)),
+                   min(im.width, int(x1 + pad)), min(im.height, int(y1 + pad)))
+            crop = im.crop(box)
+            if crop.width >= 16 and crop.height >= 16:
+                if crop.width < 512:
+                    factor = 512 / crop.width
+                    crop = crop.resize((512, max(16, int(crop.height * factor))),
+                                       Image.BICUBIC)
+                im = crop
+        rgb = np.asarray(im, dtype=np.uint8)
         w, h = im.size
     res = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
     if not res.face_landmarks:

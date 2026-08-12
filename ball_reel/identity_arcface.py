@@ -115,7 +115,10 @@ def face_detail(path: str | Path) -> dict | None:
     x0, y0, x1, y1 = (float(v) for v in f.bbox)
     out = {"embedding": f.normed_embedding,
            "face_px": round(min(x1 - x0, y1 - y0)),
-           "det_score": round(float(f.det_score), 3)}
+           "det_score": round(float(f.det_score), 3),
+           # Kept so a caller can go back to the pixels — the face mesh needs a
+           # crop when the face is small inside a full-body frame.
+           "bbox": (x0, y0, x1, y1)}
     sex, age = getattr(f, "sex", None), getattr(f, "age", None)
     if sex is not None:
         out["sex"] = sex
