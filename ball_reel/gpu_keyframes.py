@@ -223,11 +223,23 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
 
     cfg = cfg or plan()
     dtype = getattr(torch, cfg.dtype)
-    controlnet = ControlNetModel.from_pretrained(cfg.controlnet,
-                                                 torch_dtype=dtype)
-    pipe = StableDiffusionControlNetPipeline.from_pretrained(
-        cfg.base_model, controlnet=controlnet, torch_dtype=dtype,
-        safety_checker=None)
+
+    # variant="fp16" — не микрооптимизация. Без него diffusers качает веса
+    # полной точности, то есть вдвое больше и байтов, и места на диске, а
+    # считать всё равно будет в fp16: карта на 4 ГБ другого не выдержит. На
+    # арендованной машине это лишние минуты, на ноутбуке — лишние гигабайты.
+    # Оба репозитория fp16-варианты публикуют (проверено по HF API), но если
+    # у какого-то его не окажется, падать нельзя — откатываемся на полные.
+    def _load(cls, repo, **kw):
+        try:
+            return cls.from_pretrained(repo, torch_dtype=dtype,
+                                       variant="fp16", **kw)
+        except Exception:  # noqa: BLE001 — нет fp16-варианта, берём полный
+            return cls.from_pretrained(repo, torch_dtype=dtype, **kw)
+
+    controlnet = _load(ControlNetModel, cfg.controlnet)
+    pipe = _load(StableDiffusionControlNetPipeline, cfg.base_model,
+                 controlnet=controlnet, safety_checker=None)
 
     try:
         # subfolder=None: файл лежит в корне репозитория FaceID.
