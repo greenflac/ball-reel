@@ -164,5 +164,114 @@ class MotionQualitySeesNearlyStaticClips(unittest.TestCase):
         self.assertTrue(q["moving"])
 
 
+
+class GarmentDriftSeesClothesNotLighting(unittest.TestCase):
+    """Одежду задаёт промт кейфрейма, поэтому она может плыть между узлами.
+
+    Метрика калибрована на двух реальных опорах: одна съёмка (одежда заведомо
+    постоянна) дала 0.0245, смесь кадров двух разных съёмок — 0.1799.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from ball_reel import garment
+
+        self.g = garment
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _pose(self):
+        return {"l_shoulder": (0.35, 0.30, 1.0), "r_shoulder": (0.65, 0.30, 1.0),
+                "l_hip": (0.40, 0.60, 1.0), "r_hip": (0.60, 0.60, 1.0),
+                "l_knee": (0.40, 0.85, 1.0), "r_knee": (0.60, 0.85, 1.0)}
+
+    def _frames(self, colours):
+        from PIL import Image
+
+        out = []
+        for i, c in enumerate(colours):
+            p = self.dir / f"{i:02d}.png"
+            Image.new("RGB", (200, 300), c).save(p)
+            out.append(str(p))
+        return out
+
+    def _skip_without_deps(self):
+        try:
+            import numpy  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy/Pillow not installed")
+
+    def test_the_same_outfit_across_frames_is_stable(self):
+        self._skip_without_deps()
+        frames = self._frames([(40, 60, 180)] * 5)
+        r = self.g.garment_drift(frames, [self._pose()] * 5)
+        self.assertTrue(r["stable"], r["note"])
+
+    def test_brightness_changes_alone_do_not_read_as_a_new_outfit(self):
+        self._skip_without_deps()
+        # Тот же цвет, разная освещённость — ровно тот случай, на котором
+        # сырой RGB объявлял эталон плывущим.
+        frames = self._frames([(20, 30, 90), (40, 60, 180), (60, 90, 255),
+                               (30, 45, 135), (50, 75, 225)])
+        r = self.g.garment_drift(frames, [self._pose()] * 5)
+        self.assertTrue(r["stable"], r["note"])
+
+    def test_a_changed_colour_is_caught(self):
+        self._skip_without_deps()
+        frames = self._frames([(40, 60, 180), (40, 60, 180), (180, 40, 40),
+                               (180, 40, 40), (40, 60, 180)])
+        r = self.g.garment_drift(frames, [self._pose()] * 5)
+        self.assertFalse(r["stable"])
+        self.assertIn("ПЛЫВЁТ", r["note"])
+
+    def test_frames_without_a_torso_are_not_judged(self):
+        self._skip_without_deps()
+        hidden = {**self._pose(), "l_shoulder": (0.35, 0.30, 0.0)}
+        frames = self._frames([(40, 60, 180)] * 4)
+        r = self.g.garment_drift(frames, [self._pose(), hidden,
+                                          self._pose(), self._pose()])
+        self.assertEqual(r["unmeasured"], 1)
+
+    def test_too_little_evidence_is_not_verified_rather_than_stable(self):
+        self._skip_without_deps()
+        frames = self._frames([(40, 60, 180)] * 2)
+        r = self.g.garment_drift(frames, [self._pose()] * 2)
+        self.assertFalse(r["stable"])
+        self.assertIn("НЕ ПРОВЕРЕНА", r["note"])
+
+    def test_mismatched_inputs_are_refused(self):
+        self._skip_without_deps()
+        with self.assertRaises(ValueError):
+            self.g.garment_drift(self._frames([(1, 2, 3)] * 3), [self._pose()])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class VerdictAlsoJudgesTheGarment(unittest.TestCase):
+    def setUp(self):
+        from ball_reel.produce import verdict
+
+        self.v = verdict
+
+    def test_a_stable_garment_does_not_block(self):
+        self.assertTrue(self.v(**_good(garment={"stable": True, "note": "ok"}))[0])
+
+    def test_no_garment_check_does_not_block(self):
+        self.assertTrue(self.v(**_good(garment=None))[0])
+
+    def test_a_drifting_garment_is_named(self):
+        passed, _, reason = self.v(
+            **_good(garment={"stable": False, "note": "ПЛЫВЁТ на «torso»"}))
+        self.assertFalse(passed)
+        self.assertIn("garment drifts", reason)
+
+    def test_identity_still_outranks_the_garment(self):
+        _, _, reason = self.v(**_good(drift=_drift(median=0.9),
+                                      garment={"stable": False, "note": "x"}))
+        self.assertIn("identity drift", reason)

@@ -40,3 +40,7 @@ face.jpg
 payload.tar.gz
 conditions_dw/
 cond_thr*/
+dryrun/
+run_out/
+newref/
+ref_frames/

@@ -357,7 +357,7 @@ def produce(
 
 def verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
             limbs: dict, wander: dict | None, bar: float, min_motion: float,
-            loop: bool) -> tuple:
+            loop: bool, garment: dict | None = None) -> tuple:
     """Свести измерения в один вердикт: (прошло, оценка, причина).
 
     Вынесено из `produce` отдельной чистой функцией не ради красоты. Пока эта
@@ -394,6 +394,8 @@ def verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
          lambda: f"not anatomical: {limbs.get('note', '')}"),
         (wander is None or wander.get("held"),
          lambda: f"pose wandered off the reference: {wander.get('note', '')}"),
+        (garment is None or garment.get("stable"),
+         lambda: f"garment drifts between keyframes: {garment.get('note', '')}"),
         (seam.get("seamless") or not loop,
          lambda: f"does not loop: {seam.get('note', '')}"),
     )

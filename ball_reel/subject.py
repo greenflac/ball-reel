@@ -76,6 +76,14 @@ class Subject:
     #: MULTI_REF_MODEL, because the single-reference editor cannot accept it.
     body_ref: str = ""
 
+    #: Photo of the CLOTHING to hold constant across the whole chain.
+    #: Clothing is set by the prompt, and prompts are re-rolled per keyframe —
+    #: measured on real footage, mixing two shoots gives a chromaticity spread
+    #: of 0.18 against 0.02 within one shoot, and that is what drifting garments
+    #: look like. One reference image shared by every keyframe pins it without
+    #: costing a second pass.
+    garment_ref: str = ""
+
     #: Path to a photo showing the POSE to reproduce — limb positions, weight,
     #: camera angle. Same reasoning as `body_ref`: a pose is geometry, and
     #: geometry does not survive being described in adjectives.
@@ -127,6 +135,8 @@ class Subject:
         roles = [("__face__", "the person's face and identity")]
         if self.body_ref:
             roles.append((self.body_ref, "the person's body build and clothing"))
+        if self.garment_ref:
+            roles.append((self.garment_ref, "the clothing only"))
         if self.pose_ref:
             roles.append((self.pose_ref, "the pose and camera angle only"))
         return tuple(roles)
