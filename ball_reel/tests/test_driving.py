@@ -215,5 +215,60 @@ class PromptRendersOnlyMeasuredExpression(unittest.TestCase):
         self.assertIn("even pace", self.d.to_prompt(s))
 
 
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class SurveyFindsWhereTheMovementIs(unittest.TestCase):
+    """Обзор длинного ролика: где какое движение, до дорогой нарезки.
+
+    Реальный референс — программа из разных упражнений: на живом 112-секундном
+    ролике размах по окнам разошёлся от 0.12 до 1.11. Один extract() на всю
+    длину усреднил бы их в число, не описывающее ни одно.
+    """
+
+    def setUp(self):
+        from ball_reel import driving
+
+        self.d = driving
+        self.heights = []
+        self._saved = (driving._sample_frames, None)
+        driving._sample_frames = lambda v, d, **kw: [
+            str(i) for i in range(len(self.heights))]
+
+        import ball_reel.pose as pose
+
+        self._real_landmarks = pose.landmarks
+        pose.landmarks = lambda p: (None if self.heights[int(p)] is None
+                                    else {"h": self.heights[int(p)]})
+        driving._hip_raw = lambda pts: (None if pts is None
+                                        else (pts["h"], 0.25))
+
+        def restore():
+            driving._sample_frames = self._saved[0]
+            pose.landmarks = self._real_landmarks
+
+        self.addCleanup(restore)
+        self._real_hip_raw = driving._hip_raw
+
+    def test_a_lively_window_reads_higher_than_a_quiet_one(self):
+        # окно 0: качается; окно 1: почти стоит
+        self.heights = [0.2, 0.6, 0.2, 0.6] + [0.4, 0.41, 0.4, 0.41]
+        rows = self.d.survey("v.mp4", fps=2, window=2.0)
+        self.assertEqual(len(rows), 2)
+        self.assertGreater(rows[0]["hip_range"], rows[1]["hip_range"] * 5)
+
+    def test_windows_are_stamped_with_their_start_time(self):
+        self.heights = [0.3] * 8
+        rows = self.d.survey("v.mp4", fps=2, window=2.0)
+        self.assertEqual([r["start"] for r in rows], [0.0, 2.0])
+
+    def test_frames_without_a_body_lower_coverage(self):
+        self.heights = [0.3, None, 0.5, 0.4]
+        rows = self.d.survey("v.mp4", fps=2, window=2.0)
+        self.assertLess(rows[0]["coverage"], 1.0)
+
+    def test_a_video_with_no_body_at_all_surveys_to_nothing(self):
+        self.heights = [None] * 6
+        self.assertEqual(self.d.survey("v.mp4", fps=2, window=2.0), [])
+
+
 if __name__ == "__main__":
     unittest.main()

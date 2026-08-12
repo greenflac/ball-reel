@@ -250,6 +250,63 @@ def _cadence(series: list[float], fps: int) -> float | None:
     return round(crossings / 2.0 / seconds, 3) if seconds > 0 else None
 
 
+def survey(video_path: str | Path, *, fps: int = 2, window: float = 8.0,
+           work_dir: str | Path | None = None) -> list:
+    """Пройти видео целиком по-дешёвому и показать, где что происходит.
+
+    Реальный референс — это ПРОГРАММА, а не одно движение: на присланном
+    112-секундном ролике участки различались от почти статики до пиков втрое
+    выше. Один `extract()` на всю длину усреднит несовместимые упражнения и
+    выдаст амплитуду и каденс, которые не описывают ни одно из них.
+
+    Поэтому сначала обзор на низкой частоте (2 кадра/с против 12 — в шесть раз
+    дешевле по времени), а `extract()` потом на выбранном окне. Возвращает по
+    словарю на окно: ``start``, ``coverage``, ``hip_range``, ``std`` — размах и
+    разброс высоты бедра в единицах тела, то есть «сколько там движения».
+
+    Высота считается тем же способом, что и в `extract`: один масштаб на всё
+    видео, а не на кадр (см. `_segment_scale`).
+    """
+    import tempfile
+
+    import numpy as np
+
+    from .pose import landmarks
+
+    tmp = None
+    if work_dir is None:
+        tmp = tempfile.TemporaryDirectory()
+        work_dir = tmp.name
+    try:
+        frames = _sample_frames(video_path, work_dir, fps=fps)
+        raw = []
+        for f in frames:
+            pts = landmarks(f)
+            raw.append(_hip_raw(pts) if pts is not None else None)
+        scale = _segment_scale([r[1] for r in raw if r])
+        if scale is None:
+            return []
+        per_window = max(1, int(window * fps))
+        out = []
+        for s in range(0, len(raw) - 1, per_window):
+            chunk = [r for r in raw[s:s + per_window] if r]
+            if not chunk:
+                out.append({"start": round(s / fps, 1), "coverage": 0.0,
+                            "hip_range": None, "std": None})
+                continue
+            h = [r[0] / scale for r in chunk]
+            out.append({
+                "start": round(s / fps, 1),
+                "coverage": round(len(chunk) / per_window, 3),
+                "hip_range": round(float(max(h) - min(h)), 4),
+                "std": round(float(np.std(h)), 4),
+            })
+        return out
+    finally:
+        if tmp is not None:
+            tmp.cleanup()
+
+
 def extract(video_path: str | Path, *, fps: int = SPEC_FPS,
             start: float = 0.0, length: float | None = None,
             work_dir: str | Path | None = None,
