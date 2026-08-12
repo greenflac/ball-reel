@@ -15,7 +15,7 @@
 
 ЧТО ДЕЛАЕТ, по шагам:
   1. предполёт (карта, веса, условия, лицо) — не начинать на сломанной машине;
-  2. ОДИН кейфрейм на дым, с проверкой лица и позы против его же условия;
+  2. ОДИН кейфрейм на дым, с проверкой лица и позы против driving-кадра;
   3. остальные кейфреймы, каждый — с проверкой, негодные перерисовываются;
   4. одежда: не поплыла ли она между узлами;
   5. сшивка сегментов через шлюз (start|end), склейка, луп;
@@ -70,13 +70,42 @@ def main(argv: list) -> int:
                     help="остановиться после одного кейфрейма")
     ap.add_argument("--no-loop", action="store_true")
     ap.add_argument("--garment-ref", default="",
-                    help="одна картинка одежды на всю цепочку: одежду задаёт "
-                         "промт, а он перекатывается на каждом узле, поэтому "
-                         "без общего референса ткань плывёт между кейфреймами")
+                    help="НЕ РЕАЛИЗОВАНО на GPU-ветке: единственный адаптер "
+                         "занят лицом. Флаг оставлен, чтобы прогон отказал "
+                         "внятно, а не сделал вид, что учёл одежду")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    # 0 ------------------------------------------------- проверки аргументов
+    # До предполёта и до единой секунды на карте. Модель видео раньше
+    # проверялась только внутри generate_chain, то есть на пятом шаге — после
+    # предполёта, дыма и всех кейфреймов. Опечатка в имени стоила бы всего
+    # прогона ради ValueError, который виден отсюда.
+    from .chain import END_FRAME_POLLEN
+
+    if args.video_model not in END_FRAME_POLLEN:
+        _say("модель видео", False,
+             f"{args.video_model} не умеет end_frame — цепочку нечем сшивать")
+        return _stop(f"выбрать из {', '.join(END_FRAME_POLLEN)} "
+                     f"(pollen/с: {END_FRAME_POLLEN}). Именно end_frame "
+                     f"держит каждый сегмент за оба конца, без него узлы "
+                     f"перестают что-либо закреплять.")
+    if args.garment_ref:
+        # Раньше этот флаг только дописывал в промт «одежда как на референсе»,
+        # а сам файл не открывался и в рендерер не передавался: модель получала
+        # ссылку на изображение, которого ей не дали. Это не помогало, а мешало
+        # — и при этом шаг 4 честно докладывал «одежда плывёт» и советовал
+        # задать флаг, который уже задан.
+        _say("--garment-ref", False,
+             "не подключён к рендереру на этой ветке")
+        return _stop("одежда в GPU-ветке задаётся только текстом промта: в "
+                     "пайплайне один адаптер, и он занят лицом (FaceID). "
+                     "Второй референс требует второго IP-Adapter'а — это "
+                     "отдельная задача, и она не проверена на железе. Пока: "
+                     "держать формулировку одежды побуквенно одинаковой и "
+                     "фиксировать сид, а дрейф ловить шагом 4.")
 
     # 1 -------------------------------------------------------------- предполёт
     from .preflight_gpu import (check_conditions, check_disk, check_face,
@@ -98,14 +127,40 @@ def main(argv: list) -> int:
 
     import glob
 
-    from .gpu_keyframes import plan, render_keyframes
+    from .gpu_keyframes import load_pipeline, plan, render_keyframes
     from .identity import arcface_drift
     from .identity_arcface import START_MIN_FACE_PX
     from .pose import landmarks, pose_delta
 
     conditions = sorted(glob.glob(str(Path(args.conditions) / "*.png")))
     nodes = conditions[::args.every]
-    cfg = plan(vram_gb=args.vram)
+
+    # Чем сверять позу сгенерированного кадра. НЕ условием: условие — это
+    # цветные палки на чёрном фоне, и детектор поз на нём не находит ничего
+    # (проверено: landmarks() на условии возвращает None во всех кадрах).
+    # Пока сравнение шло с условием, `delta` был None всегда, блок с числами
+    # не печатался, а `pose_ok` вычислялся как `delta is None or ...`, то есть
+    # был истиной при любой позе. Единственная проверка, ради которой взят
+    # ControlNet, не выполнялась ни разу и при этом рапортовала «в норме».
+    #
+    # Сверять надо с исходным driving-кадром — он настоящая фотография, на нём
+    # детектор работает, и он же то, что условие кодирует. Соответствие
+    # «условие -> driving-кадр» пишет render_sequence в manifest.json рядом
+    # с условиями.
+    manifest_path = Path(args.conditions) / "manifest.json"
+    driving_of: dict = {}
+    if manifest_path.exists():
+        driving_of = json.loads(manifest_path.read_text()).get("driving_frames") or {}
+    if not driving_of:
+        _say("манифест", False,
+             f"нет {manifest_path} с картой условие->driving-кадр — позу "
+             f"сверять не с чем")
+        return _stop("без манифеста проверка позы невозможна, а без неё прогон "
+                     "не отличит воспроизведённое движение от выдуманного. "
+                     "Перерендерить условия текущим skeleton.render_sequence — "
+                     "он пишет манифест сам.")
+
+    cfg = plan(vram_gb=args.vram, keyframes=len(nodes))
     print(f"\nусловий {len(conditions)}, узлов {len(nodes)}, "
           f"кадр {cfg.width}x{cfg.height}, шагов {cfg.steps}, "
           f"оценка VRAM {cfg.estimated_vram_gb} ГБ")
@@ -115,7 +170,9 @@ def main(argv: list) -> int:
     def measure(keyframe: str, condition: str) -> tuple:
         ident = arcface_drift([keyframe], args.face,
                               min_face_px=START_MIN_FACE_PX)["median"]
-        a, b = landmarks(condition), landmarks(keyframe)
+        driving = driving_of.get(Path(condition).stem)
+        a = landmarks(driving) if driving else None
+        b = landmarks(keyframe)
         delta = pose_delta(a, b) if (a and b) else None
         return ident, delta
 
@@ -124,10 +181,6 @@ def main(argv: list) -> int:
     from .gpu_keyframes import fit_prompt
 
     prompt = args.prompt
-    if args.garment_ref:
-        # Одежда задаётся текстом, поэтому текст обязан быть побуквенно одним
-        # и тем же на всех узлах: расхождение формулировки = расхождение ткани.
-        prompt = f"{prompt} Clothing exactly as in the garment reference."
     # Порядок важности, а не вкуса: SD1.5 режет хвост по 77 токенам молча,
     # и реальный промт этого пайплайна выходит примерно на 89. Кадрирование
     # сюда не входит намеренно — позу и композицию уже держит ControlNet.
@@ -138,19 +191,33 @@ def main(argv: list) -> int:
              f"сократить, иначе часть описания просто не применится")
         return _stop("промт длиннее текстового энкодера; обрезанная одежда "
                      "потом читается как дрейф ткани в клипе")
+    # Пайплайн собирается ОДИН раз на прогон и передаётся дальше: дым и полный
+    # прогон — два вызова render_keyframes, и загрузка весов заново означала бы
+    # вторую полную загрузку UNet + ControlNet + адаптера и второй пик памяти
+    # сразу после первого. На 4 ГБ с offload это и минуты, и риск.
+    pipe = load_pipeline(cfg)
     smoke = render_keyframes(nodes[:1], args.face, prompt,
-                             out / "smoke", cfg=cfg, negative=args.negative)
+                             out / "smoke", cfg=cfg, negative=args.negative,
+                             pipe=pipe)
     if not smoke.get("keyframes"):
         return _stop("кейфрейм не отрисовался — смотреть ошибку выше")
     ident, delta = measure(smoke["keyframes"][0], nodes[0])
     _say("лицо", ident is not None and ident <= 0.35,
          f"дрифт {ident} (бар 0.35; выше — поднять ip_adapter_scale до 0.85)")
+    face_ok = ident is not None and ident <= 0.35
     if delta:
-        _say("поза", delta["mean"] <= 0.25,
+        pose_ok = delta["mean"] <= 0.25
+        _say("поза", pose_ok,
              f"среднее {delta['mean']}, худший сустав {delta['worst']} "
              f"(бары 0.25/0.40; выше — controlnet_scale до 1.2)")
-    face_ok = ident is not None and ident <= 0.35
-    pose_ok = delta is None or delta["mean"] <= 0.25
+    else:
+        # «Не измерено» — это не «в норме». Раньше здесь стояло
+        # `delta is None or ...`, и непроверенная поза шла как пройденная.
+        pose_ok = False
+        _say("поза", False,
+             f"НЕ ИЗМЕРЕНА: на driving-кадре "
+             f"{driving_of.get(Path(nodes[0]).stem)} или на кейфрейме тело не "
+             f"найдено. Считать это провалом, а не пропуском.")
     if args.smoke:
         if face_ok and pose_ok:
             print("\n--smoke: числа в норме. Запускать без --smoke.")
@@ -165,7 +232,7 @@ def main(argv: list) -> int:
     # 3 ------------------------------------------------------- все кейфреймы
     print(f"\n--- кейфреймы: {len(nodes)} ---")
     made = render_keyframes(nodes, args.face, prompt, out / "kf",
-                            cfg=cfg, negative=args.negative)
+                            cfg=cfg, negative=args.negative, pipe=pipe)
     keyframes = made.get("keyframes") or []
     if len(keyframes) < 2:
         return _stop(f"отрисовано {len(keyframes)} кейфрейм(ов) — цепочку не из "
@@ -196,12 +263,12 @@ def main(argv: list) -> int:
     # 5 --------------------------------------------------------------- сшивка
     from . import pollinations
     from .chain import Keyframe, generate_chain
-    rate = {"wan-fast": 0.01, "veo": 0.08, "wan-pro": 0.1,
-            "seedance-2.0": 0.18}.get(args.video_model)
+    # Цена берётся из той же таблицы, что и допустимость модели, — иначе они
+    # расходятся, и «оценка» показывает не то, за что придёт счёт.
+    rate = END_FRAME_POLLEN[args.video_model]
     segs = len(keyframes) if not args.no_loop else len(keyframes) - 1
-    if rate:
-        print(f"\n--- сшивка: {segs} сегмент(ов) x {args.seconds} c на "
-              f"{args.video_model} = {rate * segs * args.seconds:.2f} pollen ---")
+    print(f"\n--- сшивка: {segs} сегмент(ов) x {args.seconds} c на "
+          f"{args.video_model} = {rate * segs * args.seconds:.2f} pollen ---")
     kfs = []
     for i, p in enumerate(keyframes):
         k = Keyframe(index=i, t=float(i), driving_frame=nodes[i], rendered=p)

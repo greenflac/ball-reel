@@ -24,10 +24,17 @@ MEMORY BUDGET at 512x768, fp16, on a 4 GB card:
 default and not a tuning knob. Attention slicing, VAE slicing and tiling, and
 model CPU offload are what keep the peak under the card rather than over it.
 
-Nothing here runs without a GPU, and this module was written but NOT executed —
-there is no GPU in the environment it was authored in. `plan()` exists so the
-configuration can be reviewed and tested on CPU; anything that actually loads
-weights says plainly that it is unverified until it runs on real hardware.
+Nothing here runs without a GPU, and the generating half was written but NOT
+executed — there is no GPU in the environment it was authored in. `plan()`
+exists so the configuration can be reviewed and tested on CPU; anything that
+actually loads weights says plainly that it is unverified until it runs on real
+hardware.
+
+Что из этого УЖЕ проверено без карты, потому что проверялось не исполнением:
+имена весов и раскладка репозиториев сверены с живым HuggingFace API, и три
+дефекта загрузки, найденных адверсарным ревью, исправлены — репозиторий
+FaceID, отсутствующий `image_encoder`, и порядок offload относительно загрузки
+адаптера. Все три роняли бы первый же прогон ПОСЛЕ скачивания ~7 ГБ весов.
 """
 
 from __future__ import annotations
@@ -44,8 +51,18 @@ CONTROLNET_OPENPOSE = "lllyasviel/control_v11p_sd15_openpose"
 #: Identity by ADAPTER, not fine-tuning. A LoRA per user does not scale and
 #: creates an artefact indistinguishable from real identity at verification
 #: time; an adapter conditions on the embedding and leaves the gate meaningful.
-IP_ADAPTER_REPO = "h94/IP-Adapter"
+#:
+#: Репозиторий именно этот, и это не мелочь: FaceID лежит ОТДЕЛЬНО от обычных
+#: IP-Adapter'ов. Проверено по HF API — в `h94/IP-Adapter` файлов со словом
+#: faceid нет вообще (там ip-adapter_sd15.bin и родня), а в
+#: `h94/IP-Adapter-FaceID` они лежат в КОРНЕ, без подпапки `models`. Здесь
+#: раньше стояла пара «первый репозиторий + subfolder=models», то есть первый
+#: же вызов на арендованной карте упал бы EntryNotFoundError — после того, как
+#: скачаны ~7 ГБ весов SD1.5 и ControlNet.
+IP_ADAPTER_REPO = "h94/IP-Adapter-FaceID"
 IP_ADAPTER_FACEID = "ip-adapter-faceid_sd15.bin"
+#: FaceID — это адаптер ПЛЮС LoRA; без неё лицо обусловлено наполовину.
+IP_ADAPTER_LORA = "ip-adapter-faceid_sd15_lora.safetensors"
 
 #: 512x768 is the largest 2:3 frame that stays inside the budget above. The reel
 #: is finished at 9:16 by the video step, and upscaling happens AFTER the gate —
@@ -103,8 +120,9 @@ def plan(vram_gb: float = 4.0, keyframes: int = 5) -> GPUPlan:
         f"keyframes tighten the bound and cost proportionally more.")
     p.notes.append(
         "UNVERIFIED: written against the documented diffusers API, never "
-        "executed — there was no GPU in the authoring environment. Treat the "
-        "first real run as the test, and expect the memory numbers to move.")
+        "executed — there was no GPU in the authoring environment. Weight "
+        "names and repo layout ARE verified against the live HF API; the "
+        "memory numbers are not. Treat the first real run as the test.")
     return p
 
 
@@ -151,45 +169,75 @@ def fit_prompt(parts: list, tokenizer=None,
     return text, dropped
 
 
-def render_keyframes(condition_images: list, face_photo: str, prompt: str,
-                     out_dir: str | Path, *, cfg: GPUPlan | None = None,
-                     negative: str = "", seed: int = 0) -> dict:
-    """Generate one image per condition skeleton, holding the face fixed.
+def face_embeds(face_photo: str, dtype: str = "float16", device: str = "cuda"):
+    """Лицо как ЭМБЕДДИНГ, в той форме, которую ждёт FaceID.
 
-    `condition_images` come from `skeleton.render_sequence` — already retargeted
-    to the target's proportions, so the skeleton describes the client's body
-    performing the driving motion rather than the donor's.
+    FaceID обусловливается не картинкой: у него на входе не CLIP-эмбеддинг
+    изображения, а 512-мерный вектор ArcFace. Передать сюда `ip_adapter_image`
+    (как здесь было) — не ошибка типов и не падение: адаптер получит не тот
+    сигнал, кадр отрисуется, а лицо будет чужим. Именно такой промах гейт потом
+    и поймает, но объяснит невнятно — «дрейф идентичности» вместо «адаптеру
+    дали не то».
 
-    Returns the same manifest shape `chain.render_keyframes` returns, so the
-    downstream chain and gate do not care which renderer produced the nodes.
+    Вектор берётся у того же анализатора, которым лицо потом ПРОВЕРЯЕТСЯ. Это
+    сознательно: если бы обуславливающий эмбеддинг считался другой моделью,
+    расхождение двух моделей читалось бы как дрейф личности.
+
+    Форма — [2, 1, 512]: первый ряд нулевой (негативная ветка CFG), второй сам
+    вектор. Тип обязан совпасть с типом пайплайна, иначе torch скажет
+    "expected scalar type Half but found Float" уже внутри UNet.
+    """
+    import torch  # type: ignore
+
+    from .identity_arcface import face_detail
+
+    d = face_detail(face_photo)
+    if d is None:
+        raise RuntimeError(
+            f"в {face_photo} не найдено лицо: FaceID нечем обуславливать. "
+            f"Это должен был поймать intake ещё дома.")
+    ref = torch.from_numpy(d["embedding"]).unsqueeze(0)          # [1, 512]
+    both = torch.cat([torch.zeros_like(ref), ref])               # [2, 512]
+    return both.unsqueeze(1).to(dtype=getattr(torch, dtype), device=device)
+
+
+def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
+    """Собрать пайплайн один раз.
+
+    Отдельной функцией, потому что `render_keyframes` вызывается дважды за
+    прогон (дым, потом все узлы), и собирать веса заново на каждый вызов — это
+    вторая полная загрузка UNet + ControlNet + адаптера и второй пик памяти
+    сразу после первого. На арендованной карте это прямые минуты.
+
+    ПОРЯДОК ВЫЗОВОВ ЗДЕСЬ — ЧАСТЬ КОНТРАКТА diffusers, а не стиль:
+    from_pretrained -> load_ip_adapter -> LoRA -> экономии -> offload ПОСЛЕДНИМ.
+    Если offload включить раньше загрузки адаптера, хуки уже расставлены, и
+    догруженная проекция остаётся на CPU, пока UNet считает на карте — первый
+    же `pipe(...)` падает на "Expected all tensors to be on the same device".
+    Раньше здесь было именно так, и `except` вокруг загрузки объяснял бы это
+    как «IP-Adapter failed to load», то есть чинили бы не то.
     """
     import torch  # type: ignore
     from diffusers import (ControlNetModel,  # type: ignore
                            StableDiffusionControlNetPipeline)
-    from PIL import Image
 
     cfg = cfg or plan()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    controlnet = ControlNetModel.from_pretrained(
-        cfg.controlnet, torch_dtype=torch.float16)
+    dtype = getattr(torch, cfg.dtype)
+    controlnet = ControlNetModel.from_pretrained(cfg.controlnet,
+                                                 torch_dtype=dtype)
     pipe = StableDiffusionControlNetPipeline.from_pretrained(
-        cfg.base_model, controlnet=controlnet, torch_dtype=torch.float16,
+        cfg.base_model, controlnet=controlnet, torch_dtype=dtype,
         safety_checker=None)
-    # Order matters: slicing and tiling must be enabled BEFORE offload, or the
-    # pipeline is moved to the device first and the peak happens anyway.
-    pipe.enable_attention_slicing()
-    pipe.enable_vae_slicing()
-    pipe.enable_vae_tiling()
-    pipe.enable_model_cpu_offload()
 
     try:
-        pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder="models",
-                             weight_name=cfg.ip_adapter)
+        # subfolder=None: файл лежит в корне репозитория FaceID.
+        # image_encoder_folder=None: у FaceID энкодера изображений НЕТ, а
+        # diffusers по умолчанию идёт искать папку `image_encoder` и падает.
+        pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder=None,
+                             weight_name=cfg.ip_adapter,
+                             image_encoder_folder=None)
+        pipe.load_lora_weights(IP_ADAPTER_REPO, weight_name=IP_ADAPTER_LORA)
         pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
-        face = Image.open(face_photo).convert("RGB")
-        ip_kwargs = {"ip_adapter_image": face}
     except Exception as e:  # noqa: BLE001
         # Identity is load-bearing: losing the adapter silently would produce a
         # stranger in the right pose, which the gate would then reject with a
@@ -197,6 +245,51 @@ def render_keyframes(condition_images: list, face_photo: str, prompt: str,
         raise RuntimeError(
             f"IP-Adapter failed to load ({e}). Without it the face is not "
             f"conditioned at all and every keyframe will be a stranger.") from e
+
+    # Экономии — те, что назвал план, а не все подряд. План печатается перед
+    # прогоном и потому читается как описание того, что произойдёт; пока сюда
+    # был зашит фиксированный набор, на карте >=8 ГБ план говорил одно,
+    # а исполнялось другое.
+    savings = {
+        "attention_slicing": pipe.enable_attention_slicing,
+        "vae_slicing": pipe.enable_vae_slicing,
+        "vae_tiling": pipe.enable_vae_tiling,
+    }
+    for name in cfg.optimisations:
+        if name in savings:
+            savings[name]()
+    if "model_cpu_offload" in cfg.optimisations:
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to(device)
+    return pipe
+
+
+def render_keyframes(condition_images: list, face_photo: str, prompt: str,
+                     out_dir: str | Path, *, cfg: GPUPlan | None = None,
+                     negative: str = "", seed: int = 0, pipe=None,
+                     device: str = "cuda") -> dict:
+    """Generate one image per condition skeleton, holding the face fixed.
+
+    `condition_images` come from `skeleton.render_sequence` — already retargeted
+    to the target's proportions, so the skeleton describes the client's body
+    performing the driving motion rather than the donor's.
+
+    `pipe` — уже собранный пайплайн (см. `load_pipeline`); передавать его между
+    вызовами дешевле, чем грузить веса заново.
+
+    Returns the same manifest shape `chain.render_keyframes` returns, so the
+    downstream chain and gate do not care which renderer produced the nodes.
+    """
+    import torch  # type: ignore
+    from PIL import Image
+
+    cfg = cfg or plan()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pipe = pipe or load_pipeline(cfg, device=device)
+    embeds = face_embeds(face_photo, dtype=cfg.dtype, device=device)
 
     made = []
     for i, cond_path in enumerate(condition_images):
@@ -207,11 +300,12 @@ def render_keyframes(condition_images: list, face_photo: str, prompt: str,
             num_inference_steps=cfg.steps, guidance_scale=cfg.guidance,
             controlnet_conditioning_scale=cfg.controlnet_scale,
             generator=torch.Generator(device="cpu").manual_seed(seed + i),
-            width=cfg.width, height=cfg.height, **ip_kwargs).images[0]
+            width=cfg.width, height=cfg.height,
+            ip_adapter_image_embeds=[embeds]).images[0]
         path = out_dir / f"kf_{i:04d}.png"
         image.save(path)
         made.append(str(path))
-        if hasattr(torch, "cuda"):
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
     return {"keyframes": made, "config": cfg.to_dict(),
             "count": len(made), "source": "gpu"}

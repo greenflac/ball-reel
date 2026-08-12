@@ -39,7 +39,19 @@ from pathlib import Path
 #: Models whose `video_capabilities` include `end_frame`, cheapest first.
 #: A model without it silently ignores the second keyframe and the whole scheme
 #: degrades to unconstrained generation — so the choice is not cosmetic.
-END_FRAME_MODELS = ("wan-fast", "veo", "wan-pro", "seedance-2.0")
+#: Модели с end_frame и их цена, pollen за секунду. ОДНА таблица на проект:
+#: раньше список моделей жил в трёх местах (здесь, в прайс-таблице прогона и в
+#: докстринге `pollinations.video_loop`), и они разошлись — докстринг называл
+#: `wan`, у которого end_frame нет, и умалчивал про `wan-fast`, на котором всё
+#: и считается. Оператор, поверивший докстрингу, получил бы ValueError после
+#: предполёта, дыма и всех кейфреймов.
+#:
+#: Снято с GET /video/models 2026-08-12 [проверено live]. end_frame есть ровно
+#: у четырёх, и у всех четырёх max_reference_images=2 — то есть цепочка
+#: start|end физически возможна только на них.
+END_FRAME_POLLEN = {"wan-fast": 0.01, "veo": 0.08, "wan-pro": 0.1,
+                    "seedance-2.0": 0.18}
+END_FRAME_MODELS = tuple(END_FRAME_POLLEN)
 
 #: Keyframes per chain by default. Enough to pin a bounce at its extremes
 #: (top, bottom, top) plus the return to the start.
@@ -250,11 +262,17 @@ def _concat(paths: list[str], out_mp4: str | Path) -> str:
     produces a file that plays only sometimes."""
     import subprocess
 
-    out_mp4 = Path(out_mp4)
+    # Всё абсолютное и без cwd. Раньше здесь было наоборот: имена внутри
+    # segments.txt писались относительно cwd, а сам segments.txt и выходной
+    # файл передавались относительными путями ВМЕСТЕ с cwd=каталог склейки —
+    # то есть ffmpeg искал run_out/chain/segments.txt внутри run_out/chain и
+    # падал всегда. Падал он при этом ПОСЛЕ того, как все платные сегменты уже
+    # сгенерированы, и трейсбек летел наружу мимо отчёта.
+    out_mp4 = Path(out_mp4).resolve()
     listing = out_mp4.parent / "segments.txt"
-    listing.write_text("".join(f"file '{Path(p).name}'\n" for p in paths))
+    listing.write_text(
+        "".join(f"file '{Path(p).resolve()}'\n" for p in paths))
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                     "-i", str(listing), "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                    str(out_mp4)], check=True, capture_output=True,
-                   cwd=str(out_mp4.parent))
+                    str(out_mp4)], check=True, capture_output=True)
     return str(out_mp4)

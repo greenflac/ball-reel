@@ -181,11 +181,15 @@ EOF
 python3 - <<'EOF'
 from ball_reel.identity_arcface import arcface_drift, START_MIN_FACE_PX
 from ball_reel.pose import pose_delta, landmarks
-import glob
+import glob, json, pathlib
 kf = sorted(glob.glob("kf_smoke/*.png"))[0]
-cond = sorted(glob.glob("conditions/*.png"))[0]
+cond = pathlib.Path(sorted(glob.glob("conditions/*.png"))[0])
+# Позу сверяем с DRIVING-КАДРОМ, а не с условием: условие — это палки на
+# чёрном фоне, детектор поз на нём не находит ничего, и сравнение молча
+# превращается в None. Карту "условие -> driving-кадр" пишет render_sequence.
+driving = json.loads(pathlib.Path("conditions/manifest.json").read_text())["driving_frames"][cond.stem]
 print("identity:", arcface_drift([kf], "face.jpg", min_face_px=START_MIN_FACE_PX)["median"])
-print("pose vs условие:", pose_delta(landmarks(cond), landmarks(kf)))
+print("pose vs driving:", pose_delta(landmarks(driving), landmarks(kf)))
 EOF
 ```
 

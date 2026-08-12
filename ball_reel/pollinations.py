@@ -251,22 +251,56 @@ def video_loop(prompt: str, out_mp4: str | Path, start_url: str, **kwargs) -> st
     frame cut back to the first cleanly — rather than fading or freezing, which
     is what "make it loop" in the prompt text alone tends to produce.
 
-    Only for models whose `video_capabilities` include `end_frame`: seedance-2.0,
-    wan, wan-pro, veo (`seedance-pro` and `grok` are start-frame only, and pass
-    max_reference_images=1). Check /video/models before switching model.
+    Only for models whose `video_capabilities` include `end_frame`. Снято с
+    GET /video/models [проверено live]: wan-fast, veo, wan-pro, seedance-2.0 —
+    и только они, у всех четырёх max_reference_images=2. Здесь раньше был
+    назван `wan`, у которого end_frame НЕТ (maxref=1), и не был назван
+    `wan-fast`, на котором прогон считается по умолчанию.
+
+    Канонический список — `chain.END_FRAME_POLLEN`; этот абзац его повторяет
+    для чтения, а проверяет вызов `chain.generate_chain`.
     """
     return video(prompt, out_mp4, image_url=[start_url, start_url], **kwargs)
 
 
+#: Шаблон имени кадра. Число знаков — не косметика, см. `extract_frames`:
+#: кадры собираются обратно сортировкой ИМЁН, и ширины поля должно хватать на
+#: весь клип, иначе порядок ломается молча.
+FRAME_PATTERN = "%04d.png"
+
+
+def frame_names_sort_correctly(count: int, pattern: str = FRAME_PATTERN) -> bool:
+    """Совпадает ли лексикографический порядок имён с порядком кадров.
+
+    Существует затем, чтобы это утверждение можно было проверить тестом, а не
+    держать в голове: ровно его нарушение и было дефектом.
+    """
+    names = [pattern % i for i in range(1, count + 1)]
+    return sorted(names) == names
+
+
 def extract_frames(mp4_path: str | Path, out_dir: str | Path, *, fps: int = 6) -> list[str]:
-    """mp4 -> NN.png sequence via ffmpeg, so identity/motion can be measured."""
+    """mp4 -> NNNN.png sequence via ffmpeg, so identity/motion can be measured.
+
+    Четыре знака, а не два, и это не запас на будущее. Кадры собираются обратно
+    лексикографической сортировкой имён, и при `%02d` сотый кадр называется
+    `100.png`, что встаёт между `10.png` и `11.png`. Клипы до сих пор были
+    короткими (4-8 с при fps=6 — меньше сотни кадров), поэтому это не срабатывало
+    ни разу; штатный прогон из GPU_RUNBOOK даёт 32 с, то есть 192 кадра.
+
+    Последствие было бы тихим и хуже, чем падение: `loop_seam` мерил бы стык
+    не с последним кадром клипа, а с серединой, а `motion_quality` считал бы
+    шаги по перемешанной последовательности. На заведомо гладком клипе это
+    воспроизводимо даёт «16 телепортов конечностей» — то есть гейт отправил бы
+    чинить движение, с которым всё в порядке.
+    """
     import subprocess
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y", "-i", str(mp4_path), "-vf", f"fps={fps}",
-         str(out_dir / "%02d.png")],
+         str(out_dir / FRAME_PATTERN)],
         check=True, capture_output=True,
     )
     return sorted(str(p) for p in out_dir.glob("*.png"))

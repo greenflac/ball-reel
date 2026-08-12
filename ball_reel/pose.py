@@ -280,6 +280,20 @@ def pose_delta(a: dict, b: dict) -> dict | None:
     """
     import numpy as np
 
+    # `landmarks()` по контракту возвращает None, когда тела в кадре нет, и
+    # ровно этот None сюда и приезжает — из сниппетов рунбука, из ноутбуков,
+    # отовсюду, где вызов не обёрнут проверкой. Раньше он превращался в
+    # AttributeError из глубины _normalise ('NoneType' has no attribute 'get'),
+    # то есть в сообщение, по которому не видно ни причины, ни что чинить.
+    if a is None or b is None:
+        which = " и ".join(n for n, v in (("первой", a), ("второй", b))
+                           if v is None)
+        raise ValueError(
+            f"pose_delta: в {which} позе тела не нашли (landmarks вернул None). "
+            f"Сравнивать нечего. Частая причина — сравнение с УСЛОВИЕМ "
+            f"ControlNet: это рисунок скелета на чёрном фоне, детектор поз на "
+            f"нём ничего не находит. Сверять надо с driving-кадром "
+            f"(см. manifest.json рядом с условиями).")
     na, nb = _normalise(a), _normalise(b)
     if na is None or nb is None:
         return None

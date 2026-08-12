@@ -80,8 +80,12 @@ def start_frame_live(
         raise RuntimeError("no face found in the reference photo for conditioning")
     face_emb = faces[0].normed_embedding
 
+    # image_encoder_folder=None обязателен: у репозитория FaceID НЕТ папки
+    # `image_encoder` (проверено по HF API), а diffusers по умолчанию идёт её
+    # искать и падает ещё до первого кадра.
     pipe.load_ip_adapter(
-        "h94/IP-Adapter-FaceID", subfolder="", weight_name="ip-adapter-faceid_sdxl.bin"
+        "h94/IP-Adapter-FaceID", subfolder=None,
+        weight_name="ip-adapter-faceid_sdxl.bin", image_encoder_folder=None,
     )
     pipe.set_ip_adapter_scale(ip_adapter_scale)
 
@@ -90,15 +94,24 @@ def start_frame_live(
         pipe.fuse_lora(lora_scale=lora_scale)
 
     generator = torch.Generator(device=device).manual_seed(int(seed))
+    # Форма [2, 1, 512] и ТИП пайплайна. normed_embedding — float32, а пайплайн
+    # на карте создан в float16: без приведения torch скажет "expected scalar
+    # type Half but found Float" уже внутри UNet. Первый ряд нулевой — это
+    # негативная ветка CFG, без неё форма не та, что ждёт diffusers.
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    ref = torch.from_numpy(face_emb).unsqueeze(0)
+    embeds = torch.cat([torch.zeros_like(ref), ref]).unsqueeze(1).to(
+        dtype=dtype, device=device)
     image = pipe(
         prompt=prompt,
-        ip_adapter_image_embeds=[torch.from_numpy(face_emb).unsqueeze(0).to(device)],
+        ip_adapter_image_embeds=[embeds],
         width=width, height=height, generator=generator,
         num_inference_steps=30, guidance_scale=5.0,
     ).images[0]
-    out_path = str(out_path)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(out_path)
-    return out_path
+    return str(out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +155,12 @@ def video_live(start_frame: str, prompt: str, out_dir: str | Path,
 
 def _extract_frames(mp4_path: Path, out_dir: Path) -> None:  # pragma: no cover - live
     import subprocess
+
+    from .pollinations import FRAME_PATTERN
+
     subprocess.run(
         ["ffmpeg", "-y", "-i", str(mp4_path), "-vf", "fps=6",
-         str(out_dir / "%02d.png")],
+         str(out_dir / FRAME_PATTERN)],
         check=True, capture_output=True,
     )
 
@@ -178,6 +194,7 @@ def voice_live(start_frame: str, script_ru: str, out_path: str | Path) -> str:
         r2 = requests.post(ls_url, headers={"Authorization": f"Bearer {ls_key}"},
                            files={"image": face, "audio": audio}, timeout=600)
     r2.raise_for_status()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(r2.content)
     return str(out_path)
 

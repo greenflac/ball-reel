@@ -274,6 +274,9 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
     made, missing = [], []
     drawn_joints = []
+    # Какой исходный кадр стоит за каждым условием — собирается здесь же,
+    # иначе после пропусков соответствие уже не восстановить.
+    driving: dict = {}
     extract = source or pose_points
     for i, f in enumerate(frames):
         pts = extract(f)
@@ -291,6 +294,7 @@ def render_sequence(frames: list, out_dir: str | Path, *,
                                 if pts.get(n) and pts[n][2] >= 0.5))
         made.append(draw(pts, out_dir / f"{i:04d}.png",
                          width=width, height=height))
+        driving[f"{i:04d}"] = str(f)
     coverage = round(len(made) / len(frames), 3) if frames else 0.0
     joint_cover = (round(sum(drawn_joints) / (len(drawn_joints) * len(COCO18)), 3)
                    if drawn_joints else 0.0)
@@ -300,6 +304,12 @@ def render_sequence(frames: list, out_dir: str | Path, *,
         "joint_coverage": joint_cover, "partial_frames": partial,
         "size": [width, height], "retargeted": bool(proportions),
         "source": "mediapipe" if from_mediapipe else "dwpose",
+        # Какой исходный кадр стоит за каждым условием. Без этой карты условия
+        # — набор палок на чёрном фоне, по которому уже не восстановить, ЧТО
+        # они кодируют. А восстанавливать нужно: сгенерированный кейфрейм
+        # сверяется по позе не с условием (детектор поз на рисунке скелета
+        # ничего не находит — проверено), а с тем самым driving-кадром.
+        "driving_frames": driving,
         "warnings": [],
     }
     if partial:
@@ -322,4 +332,13 @@ def render_sequence(frames: list, out_dir: str | Path, *,
         manifest["warnings"].append(
             "not retargeted: these are the DRIVING person's proportions, so "
             "the output will carry their body, not the target's.")
+    # Манифест кладётся РЯДОМ С УСЛОВИЯМИ, а не только возвращается. Условия
+    # рендерятся дома, а используются на другой машине через несколько часов;
+    # всё, что осталось в возвращённом словаре, к тому моменту потеряно, и
+    # папка с png перестаёт объяснять саму себя. Здесь же лежат предупреждения,
+    # ради которых её и стоит открыть.
+    import json
+
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False))
     return manifest
