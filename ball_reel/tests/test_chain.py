@@ -92,5 +92,42 @@ class ChainRefusesToPretend(unittest.TestCase):
                          {"wan-fast", "veo", "wan-pro", "seedance-2.0"})
 
 
+
+class GPUPlanFitsTheCard(unittest.TestCase):
+    """The 4 GB configuration, checkable without a GPU."""
+
+    def setUp(self):
+        from ball_reel import gpu_keyframes
+
+        self.g = gpu_keyframes
+
+    def test_the_default_plan_fits_four_gigabytes(self):
+        p = self.g.plan(vram_gb=4.0)
+        self.assertLess(p.estimated_vram_gb, 4.0)
+        # Every saving must be on: at this size they are not optional tuning.
+        for opt in ("attention_slicing", "vae_slicing", "vae_tiling",
+                    "model_cpu_offload"):
+            self.assertIn(opt, p.optimisations)
+
+    def test_a_smaller_card_is_told_so_rather_than_left_to_crash(self):
+        p = self.g.plan(vram_gb=3.0)
+        self.assertTrue(any("below" in n for n in p.notes))
+
+    def test_a_bigger_card_is_offered_continuous_control(self):
+        # Keyframes are a workaround for small VRAM; on a card that fits a video
+        # model the honest advice is to stop working around it.
+        p = self.g.plan(vram_gb=12.0)
+        self.assertTrue(any("CONTINUOUS" in n for n in p.notes))
+        self.assertGreater(p.width, 512)
+
+    def test_every_plan_admits_it_has_never_been_executed(self):
+        # This module was written without a GPU. That has to travel with it.
+        self.assertTrue(any("UNVERIFIED" in n for n in self.g.plan().notes))
+
+    def test_keyframe_count_is_reported_as_the_accuracy_dial(self):
+        p = self.g.plan(keyframes=9)
+        self.assertTrue(any("9 keyframes" in n for n in p.notes))
+
+
 if __name__ == "__main__":
     unittest.main()
