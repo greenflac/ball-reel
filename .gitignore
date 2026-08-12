@@ -23,3 +23,6 @@ driving_spec.json
 face_in/
 subject_motion_package.json
 face_own/
+cond_*/
+chain_frames/
+chain_out/

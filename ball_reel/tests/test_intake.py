@@ -64,11 +64,24 @@ class IntakeSaysWhatAPhotoCanSupport(unittest.TestCase):
         self.assertTrue(got.can("identity"))
         self.assertTrue(any("not verifiable" in w for w in got.warnings))
 
-    def test_a_portrait_cannot_supply_build(self):
+    def test_a_portrait_gets_an_assumed_build_rather_than_a_rejection(self):
+        # Product decision: only a missing FACE stops a job. Most people have
+        # portraits, not full-length photos, and a typical body passes unnoticed
+        # where a wrong face never would.
         self.pkg = _pkg(has_body=False)
         got = self.i.inspect("x.jpg")
-        self.assertFalse(got.can("build"))
-        self.assertIn("body reference", got.blocked["build"])
+        self.assertTrue(got.can("build"))
+        self.assertIn("build", got.assumed)
+        self.assertEqual(got.measurements["build_source"], "assumed")
+        self.assertTrue(any("assumed" in w for w in got.warnings))
+
+    def test_an_assumed_build_is_never_shown_as_measured(self):
+        self.pkg = _pkg(has_body=False)
+        self.assertIn("build (assumed)", self.i.inspect("x.jpg").render())
+        self.pkg = _pkg()
+        got = self.i.inspect("x.jpg")
+        self.assertEqual(got.assumed, [])
+        self.assertEqual(got.measurements["build_source"], "measured")
 
     def test_a_turned_subject_still_supplies_build(self):
         # 3D landmarks survive the turn; blocking here would throw away a photo
@@ -78,10 +91,11 @@ class IntakeSaysWhatAPhotoCanSupport(unittest.TestCase):
         self.assertTrue(got.can("build"))
         self.assertTrue(any("turned" in w for w in got.warnings))
 
-    def test_a_mostly_hidden_body_does_not(self):
+    def test_a_mostly_hidden_body_also_falls_back_rather_than_blocking(self):
         self.pkg = _pkg(reliable=False)
         got = self.i.inspect("x.jpg")
-        self.assertFalse(got.can("build"))
+        self.assertTrue(got.can("build"))
+        self.assertIn("build", got.assumed)
 
     def test_no_mesh_means_no_expression_claim(self):
         self.pkg = _pkg(geometry=False, expression=False)
@@ -117,8 +131,10 @@ class ReportPicksTheBestPhotoPerCapability(unittest.TestCase):
         self.assertIn("build <- fullbody.jpg", text)
 
     def test_an_unusable_set_says_so(self):
+        # Only a missing face makes a photo unusable now, so this is the case.
         self.by_path = {"a.jpg": _pkg(face_px=None, has_body=False)}
-        self.assertIn("nothing usable", self.i.report(["a.jpg"]))
+        text = self.i.report(["a.jpg"])
+        self.assertIn("cannot identity", text)
 
 
 if __name__ == "__main__":

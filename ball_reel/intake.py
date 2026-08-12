@@ -42,6 +42,10 @@ MIN_DETECTOR_SCORE = 0.6
 class Intake:
     photo: str
     supports: list = field(default_factory=list)
+    #: Capabilities present only because a default was substituted, never
+    #: because they were measured. Kept apart so a caller cannot mistake one
+    #: for the other.
+    assumed: list = field(default_factory=list)
     blocked: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     measurements: dict = field(default_factory=dict)
@@ -54,8 +58,10 @@ class Intake:
         return "identity" in self.supports
 
     def render(self) -> str:
+        shown = [s + (" (assumed)" if s in self.assumed else "")
+                 for s in self.supports]
         lines = [f"{Path(self.photo).name}: "
-                 + (", ".join(self.supports) if self.supports else "UNUSABLE")]
+                 + (", ".join(shown) if shown else "UNUSABLE")]
         for cap, why in self.blocked.items():
             lines.append(f"  cannot {cap}: {why}")
         for w in self.warnings:
@@ -124,19 +130,35 @@ def inspect(photo: str | Path) -> Intake:
 
 
 def _check_build(got: Intake, body: dict) -> None:
-    """Whether build is measurable, given that 3D landmarks survive a turn."""
+    """Build, measured if the photo allows and assumed if it does not.
+
+    Deliberately NOT a blocker. The face is the part that has to be real —
+    that is the person the viewer recognises — while a body can be typical
+    without anyone noticing, and turning users away for sending a portrait
+    would reject most of the photos people actually have. So a missing build
+    falls back to ASSUMED_PROPORTIONS and is flagged `assumed`; only a missing
+    face stops the job.
+
+    The honesty requirement survives intact: an assumed body is never reported
+    as a measured one.
+    """
+    from .metrics import ASSUMED_PROPORTIONS
+
     prop = body.get("proportions") or {}
-    if not prop:
-        got.blocked["build"] = (
-            "no body in frame. Send a photo showing at least head to hips, or "
-            "supply a separate body reference — build cannot be described in "
-            "words to an image model, it has to be shown.")
-        return
-    if not body.get("reliable", True):
-        got.blocked["build"] = (
-            "over half the body is hidden. Send a less occluded photo.")
+    unusable = (not prop) or (not body.get("reliable", True))
+    if unusable:
+        got.supports.append("build")
+        got.assumed.append("build")
+        got.measurements["build_source"] = "assumed"
+        got.warnings.append(
+            "build could not be read from this photo, so typical proportions "
+            "are assumed. Identity is unaffected — the face is real — but the "
+            "body is a stand-in. Send a photo showing head to hips, or a "
+            "separate body reference, if the build matters.")
+        got.measurements["shoulder_to_hip"] = ASSUMED_PROPORTIONS["shoulder_to_hip"]
         return
     got.supports.append("build")
+    got.measurements["build_source"] = "measured"
     got.measurements["shoulder_to_hip"] = prop.get("shoulder_to_hip")
     if body.get("turned"):
         got.warnings.append(
@@ -159,6 +181,11 @@ def report(photos: list) -> str:
         havers = [r for r in results if r.can(cap)]
         if cap == "identity":
             havers.sort(key=lambda r: -(r.measurements.get("face_px") or 0))
+        else:
+            # A photo that MEASURED the capability beats one that only fell
+            # back to a default — otherwise the assumed build would win purely
+            # by being listed first, and a real body in the set would go unused.
+            havers.sort(key=lambda r: cap in r.assumed)
         if havers:
             best[cap] = Path(havers[0].photo).name
     lines.append("")

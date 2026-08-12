@@ -30,6 +30,27 @@ from __future__ import annotations
 from pathlib import Path
 
 
+#: Fallback build, used when the photo cannot supply one. Population-typical
+#: proportions in torso lengths, cross-checked against the two subjects measured
+#: in 3D during development (shoulder width 0.638 and 0.643, shoulder/hip 1.58
+#: and 1.48) — the closeness of two unrelated people is what makes a default
+#: defensible at all.
+#:
+#: It is a STAND-IN, not a measurement, and every consumer is told so via
+#: `assumed: True`. Rejecting a user for sending a head-and-shoulders photo
+#: would be worse: the face is the part that must be real, and the body can be
+#: typical without anyone noticing. What must never happen is a typical body
+#: being reported as if it had been measured.
+ASSUMED_PROPORTIONS = {
+    "shoulder_width": 0.64, "hip_width": 0.43, "shoulder_to_hip": 1.49,
+    "l_shoulder->l_elbow": 0.62, "l_elbow->l_wrist": 0.55,
+    "r_shoulder->r_elbow": 0.62, "r_elbow->r_wrist": 0.55,
+    "l_hip->l_knee": 0.92, "l_knee->l_ankle": 0.86,
+    "r_hip->r_knee": 0.92, "r_knee->r_ankle": 0.86,
+    "leg_length": 1.78,
+}
+
+
 def _dist(a, b) -> float:
     import numpy as np
 
