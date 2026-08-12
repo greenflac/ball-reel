@@ -14,3 +14,7 @@ frametest/
 attrtest/
 looptest/
 poseloop/
+# any live-run output dir: they all hold generated media, never source
+wiretest/
+**/frames_*/
+**/start_*.png
