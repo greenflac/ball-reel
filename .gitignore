@@ -18,3 +18,5 @@ poseloop/
 wiretest/
 **/frames_*/
 **/start_*.png
+survey/
+driving_spec.json
