@@ -207,3 +207,53 @@ class WeightsAreRequiredLoudly(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/Pillow not installed (live extra)")
+class TheCropKeepsRoomForLimbs(unittest.TestCase):
+    """Запас вокруг бокса — не косметика.
+
+    Детектор обводит человека вплотную, и кисти со стопами регулярно оказываются
+    на самом краю. Кроп без запаса срезает их, а срезанный сустав — это сустав,
+    которого не будет в условии, то есть неограниченная конечность в кадре.
+    """
+
+    def setUp(self):
+        from ball_reel import dwpose
+
+        self.d = dwpose
+
+    def test_the_box_grows_by_the_padding(self):
+        # Литерал 1.25, не BOX_PADDING: иначе тест поедет вместе с константой.
+        x0, y0, x1, y1 = self.d.expand_box((0, 0, 300, 400), aspect=0.75, pad=1.25)
+        self.assertAlmostEqual(x1 - x0, 300 * 1.25, places=3)
+        self.assertAlmostEqual(y1 - y0, 400 * 1.25, places=3)
+
+    def test_the_default_leaves_a_real_but_bounded_margin(self):
+        # Три теста рядом дёргают pad явным аргументом, и поэтому ни один из
+        # них не трогает саму константу: мутационный аудит снял BOX_PADDING
+        # до 1.0, и всё осталось зелёным. Здесь pad НЕ передаётся — судится
+        # значение по умолчанию, то есть то, с которым поедет живой прогон.
+        # Границы литеральные и широкие: запас обязан быть заметным (иначе
+        # детектор отрежет кисти и стопы у края бокса) и не обязан быть
+        # ровно 1.25 — подкрутить его в этих пределах можно, выключить нельзя.
+        x0, _, x1, _ = self.d.expand_box((0, 0, 300, 400), aspect=0.75)
+        self.assertGreater(x1 - x0, 300 * 1.15)
+        self.assertLess(x1 - x0, 300 * 1.60)
+
+    def test_no_padding_leaves_the_box_touching_the_body(self):
+        x0, y0, x1, y1 = self.d.expand_box((0, 0, 300, 400), aspect=0.75, pad=1.0)
+        self.assertAlmostEqual(x1 - x0, 300.0, places=3)
+
+    def test_the_box_is_reshaped_to_the_model_aspect(self):
+        # Плоский resize прямоугольника в 288x384 сжал бы одну ось и сместил
+        # все точки; поэтому бокс сначала приводится к пропорциям входа.
+        x0, y0, x1, y1 = self.d.expand_box((0, 0, 400, 400), aspect=0.75, pad=1.0)
+        self.assertAlmostEqual((x1 - x0) / (y1 - y0), 0.75, places=3)
+
+    def test_the_centre_does_not_move(self):
+        for pad in (1.0, 1.25, 2.0):
+            x0, y0, x1, y1 = self.d.expand_box((100, 50, 400, 450),
+                                               aspect=0.75, pad=pad)
+            self.assertAlmostEqual((x0 + x1) / 2, 250.0, places=3)
+            self.assertAlmostEqual((y0 + y1) / 2, 250.0, places=3)

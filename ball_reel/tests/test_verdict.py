@@ -275,3 +275,53 @@ class VerdictAlsoJudgesTheGarment(unittest.TestCase):
         _, _, reason = self.v(**_good(drift=_drift(median=0.9),
                                       garment={"stable": False, "note": "x"}))
         self.assertIn("identity drift", reason)
+
+
+class GarmentIgnoresTheBackgroundAtTheEdges(unittest.TestCase):
+    """Область одежды сжимается к центру: край ловит фон и руки.
+
+    Без сжатия цвет «одежды» смешивается со стеной, и метрика начинает мерить
+    комнату. Мутационный аудит поймал это: снятое CORE_FRACTION не роняло
+    тестов, потому что все они шли на одноцветных картинках.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from ball_reel import garment
+
+        self.g = garment
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _pose(self):
+        return {"l_shoulder": (0.30, 0.20, 1.0), "r_shoulder": (0.70, 0.20, 1.0),
+                "l_hip": (0.30, 0.80, 1.0), "r_hip": (0.70, 0.80, 1.0)}
+
+    def _frame(self, name, garment_rgb, edge_rgb):
+        """Одежда в центре области, чужой цвет по её краям."""
+        from PIL import Image, ImageDraw
+
+        im = Image.new("RGB", (200, 300), edge_rgb)
+        d = ImageDraw.Draw(im)
+        d.rectangle([70, 100, 130, 200], fill=garment_rgb)
+        p = self.dir / name
+        im.save(p)
+        return str(p)
+
+    def test_a_changing_background_is_not_a_changing_outfit(self):
+        try:
+            import numpy  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except ImportError:
+            self.skipTest("numpy/Pillow not installed")
+        # Одежда неизменна, фон вокруг неё гуляет. Сжатие к центру обязано
+        # оставить вердикт «держится».
+        frames = [self._frame(f"{i}.png", (30, 40, 200), edge)
+                  for i, edge in enumerate([(220, 30, 30), (30, 220, 30),
+                                            (220, 220, 30), (30, 30, 30),
+                                            (220, 30, 220)])]
+        r = self.g.garment_drift(frames, [self._pose()] * 5)
+        self.assertTrue(r["stable"], r["note"])

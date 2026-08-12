@@ -95,10 +95,29 @@ class VerdictRestsOnTheJudgeableMass(unittest.TestCase):
         self.faces["start"] = (91, 0.1386)
         at_video_floor = self.mod.arcface_drift(["start"], "ref")
         self.assertIsNone(at_video_floor["median"])  # what went wrong
-        at_still_floor = self.mod.arcface_drift(
-            ["start"], "ref", min_face_px=self.mod.START_MIN_FACE_PX)
+        # Литерал 70, а не START_MIN_FACE_PX: тест, берущий вход из константы,
+        # которую сторожит, двигается вместе с ней и никогда не падает.
+        # Ровно так этот мутант и выживал.
+        at_still_floor = self.mod.arcface_drift(["start"], "ref", min_face_px=70)
         self.assertIsNotNone(at_still_floor["median"])
         self.assertLessEqual(at_still_floor["median"], self.mod.SAME_PERSON_MAX)
+
+    def test_the_still_floor_sits_between_a_readable_and_an_unreadable_face(self):
+        # Тест выше проверяет, что функция УМЕЕТ судить по другому полу, но
+        # передаёт 70 руками — поэтому сама константа там не участвует, и
+        # мутационный аудит снял START_MIN_FACE_PX до нуля незамеченным.
+        # Здесь порог берётся из модуля, а входы литеральные и зажимают его
+        # с двух сторон: 91px — это измеренный старт-кадр, который дал полностью
+        # прошедший клип, и он обязан судиться; 40px — лицо, на котором
+        # расстояние уже ничего не доказывает, и оно судиться не должно.
+        self.faces["good"] = (91, 0.1386)
+        self.faces["thumbnail"] = (40, 0.1386)
+        floor = self.mod.START_MIN_FACE_PX
+        judged = self.mod.arcface_drift(["good"], "ref", min_face_px=floor)
+        self.assertIsNotNone(judged["median"])
+        unjudged = self.mod.arcface_drift(["thumbnail"], "ref", min_face_px=floor)
+        self.assertIsNone(unjudged["median"])
+        self.assertEqual(unjudged["too_small"], ["thumbnail"])
 
     def test_a_reference_photo_too_small_to_identify_from_says_so(self):
         self.faces["ref"] = (40, 0.0)

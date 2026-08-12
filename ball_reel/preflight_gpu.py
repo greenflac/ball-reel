@@ -45,6 +45,20 @@ def check_torch() -> tuple:
                              f"torch {torch.__version__}")
 
 
+def vram_verdict(total_gb: float) -> tuple:
+    """Хватает ли карты. Отдельно от чтения карты, чтобы решение проверялось.
+
+    Пока порог сравнивался прямо внутри check_vram, тронуть его было нечем:
+    функция требует torch, а его в среде разработки нет, и мутационный аудит
+    показал это — снятый MIN_VRAM_GB не ронял ни одного теста.
+    """
+    if total_gb < MIN_VRAM_GB:
+        return False, (f"{total_gb:.1f} ГБ — меньше {MIN_VRAM_GB} ГБ, нужных "
+                       f"даже на 512x768 со всеми экономиями. Взять карту "
+                       f"больше или уйти на 448x640.")
+    return True, f"{total_gb:.1f} ГБ"
+
+
 def check_vram() -> tuple:
     try:
         import torch  # type: ignore
@@ -54,11 +68,8 @@ def check_vram() -> tuple:
         total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
     except Exception as e:  # noqa: BLE001
         return _fail("vram", f"не прочитать: {e}")
-    if total < MIN_VRAM_GB:
-        return _fail("vram", f"{total:.1f} ГБ — меньше {MIN_VRAM_GB} ГБ, "
-                             f"нужных даже на 512x768 со всеми экономиями. "
-                             f"Взять карту больше или уйти на 448x640.")
-    return _ok("vram", f"{total:.1f} ГБ")
+    ok, detail = vram_verdict(total)
+    return (_ok if ok else _fail)("vram", detail)
 
 
 def check_disk(path: str = ".") -> tuple:
@@ -97,7 +108,22 @@ def check_pose_model() -> tuple:
 
 
 def check_conditions(conditions: str) -> tuple:
-    """Условия должны существовать, быть непустыми и одного размера."""
+    """Условия должны существовать, читаться, быть одного размера, непустыми
+    и идти подряд.
+
+    Пустота меряется содержимым, а не размером файла. Раньше здесь стоял порог
+    в 500 байт, и он не срабатывал никогда: чёрный png 512x768 весит 1224 байта,
+    то есть ровно тот случай, ради которого проверка написана, проходил её
+    насквозь. Скелет рисуется цветными линиями по чёрному, поэтому одноцветный
+    кадр — это буквально «скелета нет», и это видно по экстремумам яркости.
+
+    Пропуски в нумерации — отдельная беда. `render_sequence` не пишет кадр,
+    в котором позу не нашли, но нумерует по индексу исходного кадра, так что
+    дырка выглядит как 0002 -> 0004. Прогон берёт каждый N-й файл из
+    отсортированного списка и считает, что между ними одинаковое время; после
+    дырки это перестаёт быть правдой, и клип дёргается там, где никто не
+    ошибался.
+    """
     d = Path(conditions)
     files = sorted(d.glob("*.png")) if d.is_dir() else []
     if not files:
@@ -106,12 +132,20 @@ def check_conditions(conditions: str) -> tuple:
     from PIL import Image
 
     sizes = set()
-    empty = []
+    empty, broken = [], []
     for f in files:
-        with Image.open(f) as im:
-            sizes.add(im.size)
-        if f.stat().st_size < 500:
+        try:
+            with Image.open(f) as im:
+                sizes.add(im.size)
+                lo, hi = im.convert("L").getextrema()
+        except Exception as e:  # noqa: BLE001 — битый файл называем, а не падаем
+            broken.append(f"{f.name} ({type(e).__name__})")
+            continue
+        if lo == hi:
             empty.append(f.name)
+    if broken:
+        return _fail("conditions", f"{len(broken)} файл(ов) не читаются "
+                                   f"({broken[:3]}): докопировать условия.")
     if len(sizes) > 1:
         return _fail("conditions", f"разные размеры {sizes}: ControlNet ждёт "
                                    f"один размер на всю последовательность.")
@@ -119,7 +153,24 @@ def check_conditions(conditions: str) -> tuple:
         return _fail("conditions",
                      f"{len(empty)} пустых условия ({empty[:3]}): в этих кадрах "
                      f"скелет не найден, генератор там не ограничен.")
+    gaps = _numbering_gaps([f.stem for f in files])
+    if gaps:
+        return _fail("conditions",
+                     f"пропуски в нумерации после {gaps[:3]}: в этих кадрах "
+                     f"позы не нашли, и шаг по времени между условиями больше "
+                     f"не одинаковый — цепочка поедет неровно. Перерендерить "
+                     f"сегмент без дырок или резать по ним на куски.")
     return _ok("conditions", f"{len(files)} шт., {sizes.pop()}")
+
+
+def _numbering_gaps(stems: list) -> list:
+    """Имена, после которых номер прыгнул. Ненумерованные имена не трогаем."""
+    nums = []
+    for s in stems:
+        if not s.isdigit():
+            return []
+        nums.append((int(s), s))
+    return [name for (a, name), (b, _) in zip(nums, nums[1:]) if b != a + 1]
 
 
 def check_face(face: str) -> tuple:
