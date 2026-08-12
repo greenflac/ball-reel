@@ -261,7 +261,8 @@ def draw(points: dict, out_path: str | Path, *, width: int = 512,
 
 def render_sequence(frames: list, out_dir: str | Path, *,
                     proportions: dict | None = None, width: int = 512,
-                    height: int = 768, from_mediapipe: bool = True) -> dict:
+                    height: int = 768, from_mediapipe: bool = True,
+                    source=None) -> dict:
     """A whole driving segment -> a folder of condition images.
 
     Returns the manifest a GPU run consumes, including `coverage` — the share of
@@ -273,8 +274,9 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
     made, missing = [], []
     drawn_joints = []
+    extract = source or pose_points
     for i, f in enumerate(frames):
-        pts = pose_points(f)
+        pts = extract(f)
         if pts is None:
             missing.append(i)
             continue
