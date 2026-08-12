@@ -27,3 +27,8 @@ cond_*/
 chain_frames/
 chain_out/
 recheck/
+.coverage
+mutants/
+cond_*/
+chain_out/
+kf*/
