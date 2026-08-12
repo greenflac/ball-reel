@@ -56,6 +56,36 @@ class TheCardIsJudgedBeforeAnythingIsRented(unittest.TestCase):
         self.assertLess(floor, 4.0)
 
 
+class TheTorchBuildIsJudgedByItsName(unittest.TestCase):
+    """CPU-сборка и мёртвый драйвер — разные беды, чинятся по-разному."""
+
+    def setUp(self):
+        from ball_reel import preflight_gpu
+
+        self.p = preflight_gpu
+
+    def test_a_working_build_reports_the_card(self):
+        ok, detail = self.p.torch_verdict("2.13.0+cu126", True, "RTX 3050")
+        self.assertTrue(ok)
+        self.assertIn("RTX 3050", detail)
+
+    def test_a_cpu_build_is_named_as_such_not_blamed_on_the_driver(self):
+        # Живой случай: `torch>=2.6` в requirements без индекса даёт на Windows
+        # именно это, молча перекрывая правильную установку. Совет «проверить
+        # драйвер» здесь уводит в сторону — никакой драйвер CPU-сборку не
+        # оживит, её надо переставить.
+        ok, detail = self.p.torch_verdict("2.13.0+cpu", False, "")
+        self.assertFalse(ok)
+        self.assertIn("CPU-сборка", detail)
+        self.assertIn("uninstall", detail)
+
+    def test_a_cuda_build_without_a_card_points_at_the_driver(self):
+        ok, detail = self.p.torch_verdict("2.13.0+cu126", False, "")
+        self.assertFalse(ok)
+        self.assertIn("драйвер", detail)
+        self.assertNotIn("CPU-сборка", detail)
+
+
 @unittest.skipUnless(HAVE_PIL, "Pillow not installed (live extra)")
 class BrokenConditionsAreCaughtAtHome(unittest.TestCase):
     """Условия рендерятся на CPU дома — значит и проверяются дома."""

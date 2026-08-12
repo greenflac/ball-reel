@@ -46,13 +46,35 @@ def check_torch() -> tuple:
                      f"https://download.pytorch.org/whl/cuXXX). Если pip "
                      f"пишет 'No matching distribution' — колёс под ЭТУ "
                      f"версию Python в том индексе нет, брать новее.")
-    if not torch.cuda.is_available():
-        return _fail("torch.cuda",
-                     f"torch {torch.__version__} не видит карту. Обычно это "
-                     f"сборка под другой CUDA: переустановить под драйвер "
-                     f"(nvidia-smi покажет версию).")
-    return _ok("torch.cuda", f"{torch.cuda.get_device_name(0)}, "
-                             f"torch {torch.__version__}")
+    ok, detail = torch_verdict(torch.__version__, torch.cuda.is_available(),
+                               torch.cuda.get_device_name(0)
+                               if torch.cuda.is_available() else "")
+    return (_ok if ok else _fail)("torch.cuda", detail)
+
+
+def torch_verdict(version: str, cuda_available: bool, device: str) -> tuple:
+    """Годится ли эта сборка torch. Отдельно от импорта, чтобы проверялось.
+
+    Различает два разных провала, потому что чинятся они по-разному. `+cpu`
+    в версии — это CPU-сборка, и никакой драйвер её не оживит; отсутствие
+    карты при CUDA-сборке — это уже про драйвер или про саму машину.
+
+    Первый случай не гипотетический: `torch>=2.6` в requirements-файле без
+    индекса даёт на Windows именно его, молча перекрывая правильную установку.
+    """
+    if cuda_available:
+        return True, f"{device}, torch {version}"
+    if "+cpu" in version:
+        return False, (
+            f"torch {version} — это CPU-сборка, карты она не увидит никогда. "
+            f"Поставить из индекса под свою CUDA: pip uninstall -y torch, "
+            f"затем pip install torch --index-url "
+            f"https://download.pytorch.org/whl/cu126 (версию индекса подобрать "
+            f"на pytorch.org). Внимание: pip install -r с обычной строкой "
+            f"torch вернёт CPU-колесо обратно.")
+    return False, (
+        f"torch {version} собран с CUDA, но карту не видит. Смотреть драйвер "
+        f"(nvidia-smi покажет версию) и совпадает ли он с CUDA сборки.")
 
 
 def vram_verdict(total_gb: float) -> tuple:
