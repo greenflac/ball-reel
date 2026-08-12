@@ -3,8 +3,10 @@
 #   python3 -m ball_reel.produce --face <photo>
 doctor_out/
 produce_out/
-standin_out/
+standin*_out/
+*_out/
 *.mp4
 *.mp3
 __pycache__/
 *.pyc
+frametest/

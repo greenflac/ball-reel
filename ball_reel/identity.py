@@ -67,7 +67,7 @@ def _agreement(a: tuple[bool, ...] | None, b: tuple[bool, ...] | None) -> float:
     return sum(1 for x, y in zip(a, b) if x == y) / len(a)
 
 
-def arcface_drift(frame_paths, reference_path):
+def arcface_drift(frame_paths, reference_path, **kwargs):
     """The real measure, at live time: 1 - cosine(embed(frame), embed(reference)).
 
     Delegates to ``identity_arcface`` (guarded import), which needs insightface +
@@ -76,10 +76,14 @@ def arcface_drift(frame_paths, reference_path):
     those deps are absent it raises a clear install message rather than silently
     falling back to the proxy — a proxy dressed as the instrument is the failure
     this seam exists to prevent.
+
+    ``kwargs`` pass straight through (e.g. ``min_face_px``), so callers can pick
+    the right measurability floor for what they are judging — a sharp still and
+    a motion-blurred video frame are not the same measurement.
     """
     from . import identity_arcface
 
-    return identity_arcface.arcface_drift(frame_paths, reference_path)
+    return identity_arcface.arcface_drift(frame_paths, reference_path, **kwargs)
 
 
 def identity_drift(frame_paths, reference_path) -> dict:

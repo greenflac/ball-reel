@@ -29,9 +29,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: Cosine-distance starting point for "still the same person". Chosen, to be
-#: calibrated on real crops; see module docstring.
+#: Cosine-distance bar for "still the same person", on JUDGEABLE frames.
+#: Calibrated on live clips (2026-08-12): a true-identity clip sat at 0.18-0.22
+#: on its steady frames, so 0.35 leaves real headroom above that band.
 SAME_PERSON_MAX = 0.35
+
+#: A single frame may exceed SAME_PERSON_MAX (blur, extreme pose) without the
+#: clip being a different person — but nothing should ever get this far out.
+HARD_DRIFT_MAX = 0.6
+
+#: Minimum detected-face size (shorter bbox side, px) for an embedding to be
+#: TRUSTED. Not a taste call: the ArcFace recognizer takes a 112x112 crop, so a
+#: smaller detection is mostly upsampled pixels and its distances inflate.
+#: Confirmed on two live clips — faces at 111-114 px produced a 0.18-0.22
+#: same-person band, while faces at 64-86 px never dropped below 0.36 even
+#: frame-to-frame within one continuous shot. Below this we report "cannot
+#: verify", which is NOT the same claim as "different person".
+MIN_FACE_PX = 100
+
+#: Floor for a single SHARP STILL (the start frame), which is a different
+#: measurement from a video frame and must not borrow MIN_FACE_PX. A still has
+#: no motion blur, so a smaller crop still yields a usable number: measured
+#: live, start frames at 72/78/91/98 px scored 0.253/0.179/0.139/0.130 — a tight
+#: band, and the 91 px one is the still that went on to produce a fully passing
+#: clip. Judging stills at MIN_FACE_PX would have rejected that known-good frame
+#: (a bug this constant exists to prevent). Distances here are noisier than on a
+#: big crop, so the start check is a cheap screen for gross failure, not the
+#: verdict — the verdict is taken on video frames at MIN_FACE_PX.
+START_MIN_FACE_PX = 70
+
+#: Fraction of frames that must be judgeable before a verdict means anything.
+MIN_COVERAGE = 0.5
 
 _ANALYZER = None
 
@@ -66,12 +94,12 @@ def cosine_distance(a, b) -> float:
     return round(max(0.0, 1.0 - sim), 4)
 
 
-def face_embedding(path: str | Path):
-    """The largest face's embedding in an image, or None if no face is found.
+def face_detail(path: str | Path) -> dict | None:
+    """The largest face in an image: embedding + how big and confident it was.
 
-    None is a real answer, not an error: a frame the detector cannot find a face
-    in is a frame whose identity we cannot vouch for, and the caller scores that
-    as maximum drift rather than laundering it into a pass.
+    None means no face at all. The size comes back with the embedding on
+    purpose — an embedding without its crop size is not interpretable, because
+    distance inflates on small faces (see MIN_FACE_PX).
     """
     import numpy as np  # noqa: F401  (ensures numpy present alongside the model)
 
@@ -79,7 +107,29 @@ def face_embedding(path: str | Path):
     if not faces:
         return None
     faces.sort(key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return faces[-1].normed_embedding
+    f = faces[-1]
+    x0, y0, x1, y1 = (float(v) for v in f.bbox)
+    return {"embedding": f.normed_embedding,
+            "face_px": round(min(x1 - x0, y1 - y0)),
+            "det_score": round(float(f.det_score), 3)}
+
+
+def face_embedding(path: str | Path):
+    """The largest face's embedding in an image, or None if no face is found."""
+    d = face_detail(path)
+    return None if d is None else d["embedding"]
+
+
+def _quantile(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolated quantile. Local so the verdict needs no scipy."""
+    if not sorted_vals:
+        return 1.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
 
 
 def _read_bgr(path: str | Path):
@@ -92,40 +142,86 @@ def _read_bgr(path: str | Path):
     return rgb[:, :, ::-1].copy()
 
 
-def arcface_drift(frame_paths, reference_path) -> dict:
+def arcface_drift(frame_paths, reference_path, *,
+                  min_face_px: int = MIN_FACE_PX) -> dict:
     """Per-frame identity drift away from a reference face, by embedding distance.
 
-    Same return shape as `identity.identity_drift` so it is a drop-in for the
-    live path: ``per_frame`` / ``worst`` / ``drifted`` / ``readable`` / ``note``.
-    A frame with no detectable face gets drift 1.0 and is listed as drifted — an
-    unverifiable face is not a passing one.
+    Keeps `identity.identity_drift`'s keys (``per_frame`` / ``worst`` /
+    ``drifted`` / ``readable`` / ``note``) so it stays a drop-in, and adds the
+    ones a verdict on MOVING footage actually needs: ``median``, ``p90``,
+    ``coverage``, ``judgeable``, ``too_small``, ``no_face``, ``face_px``.
+
+    Why a median and not the worst frame: measured live, a clip of the genuine
+    person still spikes to 0.71 on the one frame where the face is blurred at
+    the top of a jump. Judging by the worst frame therefore fails every honest
+    jump clip — it measures "is the face legible right now", not "is this the
+    same person". The steady mass of frames is what carries identity, so the
+    verdict rests on the median of the JUDGEABLE frames, with ``p90`` left
+    exposed so a clip that morphs partway through still gets caught.
+
+    Frames whose face is smaller than ``min_face_px`` are excluded from the
+    distances and counted in ``too_small`` instead of being scored as maximum
+    drift. That is not leniency: on a too-small crop the number is not evidence
+    of anything, and "cannot verify" is a different claim from "different
+    person". ``coverage`` is what stops that from becoming a free pass — a clip
+    nobody could verify has low coverage, and the caller fails it on that.
     """
-    ref = face_embedding(reference_path)
-    if ref is None:
-        return {"per_frame": {}, "worst": (None, None), "drifted": [],
-                "readable": 0,
+    ref_detail = face_detail(reference_path)
+    empty = {"per_frame": {}, "face_px": {}, "worst": (None, None),
+             "drifted": [], "readable": 0, "judgeable": 0, "too_small": [],
+             "no_face": [], "median": None, "p90": None, "coverage": 0.0}
+    if ref_detail is None:
+        return {**empty,
                 "note": "no face in the reference photo: cannot measure identity."}
+    if ref_detail["face_px"] < min_face_px:
+        return {**empty,
+                "note": (f"reference face is only {ref_detail['face_px']}px "
+                         f"(< {min_face_px}px): too small to identify from. "
+                         f"Supply a closer photo.")}
+    ref = ref_detail["embedding"]
+
     per_frame: dict[str, float] = {}
+    face_px: dict[str, int] = {}
     drifted: list[str] = []
-    readable = 0
+    too_small: list[str] = []
+    no_face: list[str] = []
+    total = 0
     for p in frame_paths:
-        emb = face_embedding(p)
+        total += 1
         name = Path(p).name
-        readable += 1
-        if emb is None:
-            per_frame[name] = 1.0
-            drifted.append(name)
+        d = face_detail(p)
+        if d is None:
+            no_face.append(name)
             continue
-        d = cosine_distance(ref, emb)
-        per_frame[name] = d
-        if d > SAME_PERSON_MAX:
+        face_px[name] = d["face_px"]
+        if d["face_px"] < min_face_px:
+            too_small.append(name)
+            continue
+        dist = cosine_distance(ref, d["embedding"])
+        per_frame[name] = dist
+        if dist > SAME_PERSON_MAX:
             drifted.append(name)
+
     if not per_frame:
-        return {"per_frame": {}, "worst": (None, None), "drifted": [],
-                "readable": 0, "note": "no readable frames."}
+        why = (f"{len(too_small)} frame(s) had a face under {min_face_px}px and "
+               f"{len(no_face)} had none" if total else "no frames")
+        return {**empty, "face_px": face_px, "readable": total,
+                "too_small": too_small, "no_face": no_face,
+                "note": (f"identity NOT VERIFIABLE: {why}. The face is too small "
+                         f"in this clip to identify — frame it closer.")}
+
+    vals = sorted(per_frame.values())
     worst = max(per_frame, key=lambda n: per_frame[n])
-    note = (f"identity via ArcFace cosine distance (real embedding): "
-            f"{len(drifted)}/{readable} frame(s) past {SAME_PERSON_MAX}. "
-            f"Bar re-derived on cosine scale, not the proxy's.")
-    return {"per_frame": per_frame, "worst": (worst, per_frame[worst]),
-            "drifted": drifted, "readable": readable, "note": note}
+    median = round(_quantile(vals, 0.5), 4)
+    p90 = round(_quantile(vals, 0.9), 4)
+    coverage = round(len(per_frame) / total, 3) if total else 0.0
+    note = (f"identity via ArcFace cosine distance: median {median}, p90 {p90}, "
+            f"worst {per_frame[worst]} on {len(per_frame)}/{total} judgeable "
+            f"frame(s) (coverage {coverage:.0%}; {len(too_small)} face(s) under "
+            f"{min_face_px}px, {len(no_face)} with no face). "
+            f"{len(drifted)} judgeable frame(s) past {SAME_PERSON_MAX}.")
+    return {"per_frame": per_frame, "face_px": face_px,
+            "worst": (worst, per_frame[worst]), "drifted": drifted,
+            "readable": total, "judgeable": len(per_frame),
+            "too_small": too_small, "no_face": no_face,
+            "median": median, "p90": p90, "coverage": coverage, "note": note}

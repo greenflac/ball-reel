@@ -7,6 +7,24 @@ YOU generated, with a REAL vision judge (Pollinations), no GPU.
 ```bash
 pip install Pillow requests
 export POLLINATIONS_API_KEY=sk_...   # your bench key (Bearer), from enter.pollinations.ai
+
+# for the real identity check + the full video path (produce.py):
+pip install insightface onnxruntime numpy   # buffalo_l (~281 MB) downloads on first use
+apt-get install -y ffmpeg                   # frame extraction
+```
+Egress must allow **both** `gen.pollinations.ai` and `media.pollinations.ai` —
+the video endpoint fetches its start frame from the media host server-side, so a
+proxy that blocks it breaks image-to-video specifically.
+
+## 0b. Preflight before spending anything
+```bash
+python3 -m ball_reel.doctor           # free/cheap checks, no video spend
+python3 -m ball_reel.doctor --video   # + one short seedance clip (spends)
+```
+Expect `ALL CHECKS PASSED (6/6)`. Override the video model/length while shaking
+out plumbing — `wan-fast` is ~18x cheaper than seedance and proves the same path:
+```bash
+BALL_REEL_VIDEO_MODEL=wan-fast BALL_REEL_VIDEO_DURATION=2 python3 -m ball_reel.doctor --video
 ```
 
 ## 1. Get the prompts (one place writes them)
@@ -57,8 +75,28 @@ accepted N/3
   returns JSON, transcribes on-frame text) — not a hand-authored stand-in.
 - Identity drift: perceptual PROXY by default; REAL ArcFace with `--arcface`.
 - Motion: real over your frames.
-- Still not real: a true video model (frames stand in for a clip), and lipsync.
-  Both are wired seams (live_gen.py), not built.
+- **Video: now REAL** for `produce.py` — Seedance 2.0 image-to-video, verified
+  live (720x1280 h264, 4.04 s, ~97 s per call). `mvp.py` still uses a frame
+  sequence as its stand-in; `produce.py` is the true end-to-end clip.
+- Still not real: lipsync (a wired seam in `live_gen.py`, not built).
+
+## The full path, and what it costs
+```bash
+python3 -m ball_reel.produce --face me.jpg --attempts 4
+```
+Per attempt: kontext still (~7 s) → ArcFace screen on the still (rejects a bad
+one BEFORE any video spend) → upload (~1.5 s) → Seedance clip (~97 s, 0.72
+pollen for 4 s) → ffmpeg frames → ArcFace + motion gate. Passes, or retries.
+
+Two failure modes are normal and handled rather than fatal:
+- **Provider moderation (422).** Seedance refuses some phrasings outright, so
+  each retry steps the framing wording down (`VIDEO_FRAMING_STEPS`); a refusal
+  costs one attempt, never the run.
+- **"Identity not verifiable".** Not the same claim as "different person" — it
+  means the face was too small in the frames to judge. Frame closer.
+
+Read `produce_report.json` for the evidence behind any verdict: per-attempt
+median/p90 drift, coverage, and the face pixel sizes those rest on.
 
 ## The one-line pitch for this MVP
 "Same selection engine, now on my own Pollinations-generated frames with a real
