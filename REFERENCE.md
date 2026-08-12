@@ -46,7 +46,7 @@
 | `gpu_keyframes.py` | Кейфреймы на 4 ГБ VRAM: SD1.5 + ControlNet OpenPose + IP-Adapter FaceID. `plan()` инспектируется на CPU, `render_keyframes()` — только на карте. | torch, diffusers, Pillow | GPU + веса (~7 ГБ) |
 | `live_gen.py` | Альтернатива шлюзу на своём железе: SDXL + IP-Adapter FaceID для старт-кадра, произвольный video-API, TTS+липсинк. Всё за env-переменными. | torch, diffusers, insightface, requests | GPU + сеть + веса |
 | `tools/make_fixtures.py` | Рисует синтетические офлайн-фикстуры Pillow'ом (3 стратегии = 3 режима отказа) и хэнд-написанные вердикты судьи. | Pillow | нет |
-| `tests/` (11 файлов: `test_arcface_math`, `test_chain`, `test_condition_render`, `test_driving`, `test_identity_gate`, `test_intake`, `test_motion_subject`, `test_pose`, `test_router`, `test_skeleton`, `test_verdict`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. **152 теста, проходят за 0.3 c**. | unittest | нет |
+| `tests/` (14 файлов: `test_arcface_math`, `test_chain`, `test_condition_render`, `test_driving`, `test_dwpose`, `test_identity_gate`, `test_intake`, `test_motion_subject`, `test_plumbing`, `test_pose`, `test_preflight`, `test_router`, `test_skeleton`, `test_verdict`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. **214 тестов, проходят за 1.0 c**. | unittest | нет |
 
 ---
 
@@ -125,7 +125,7 @@ Env: `POLLINATIONS_IMAGE_MODEL` (`flux`), `POLLINATIONS_JUDGE_MODEL` (`openai`).
 | `--quick` | флаг | выкл | только тесты и покрытие, без мутаций |
 
 Что делает: прогоняет `unittest discover`; если красно — останавливается (аудит на красных тестах бессмысленен);
-считает покрытие по `CORE_MODULES` с порогом 70%; затем по очереди портит 15 порогов в КОПИИ пакета
+считает покрытие по `CORE_MODULES` с порогом 50%; затем по очереди портит 23 порога в КОПИИ пакета
 (`identity_arcface`, `pose`, `motion`, `intake`, `chain`, `router`) и требует, чтобы тесты покраснели.
 Выжившая мутация = порог, который никто не сторожит. Деньги: **нет**, сети нет.
 
@@ -144,7 +144,7 @@ Env: `POLLINATIONS_IMAGE_MODEL` (`flux`), `POLLINATIONS_JUDGE_MODEL` (`openai`).
 - `to_prompt(spec) -> str` — лоссовая словесная форма («about 0.6 bounces per second…»); неизмеренное просто опускается.
 - `MotionSummary`: `amplitude`, `cadence_hz`, `velocity`, `peak_velocity` (95-й перцентиль, не max), `pose_range`.
 - Приватные, но нужны по рунбуку: `_sample_frames(...)->list[str]`, `_segment_scale(torsos)`, `_cadence(series, fps)`, `_hip_raw(points)`.
-- **`survey()` упомянут в докстринге `extract`, но в коде его НЕТ.**
+- ~~`survey()` упомянут в докстринге `extract`, но в коде его НЕТ.~~ Устарело: `survey()` добавлен (`driving.py`, коммит 9179691).
 
 **`metrics.py`**
 - `face_metrics(photo, *, face_model=None) -> dict` — ключи: `photo`, `identity{embedding_dim, face_px, detector_score}`, `geometry{face_width_to_height, eye_spacing_to_face_width, left_eye_width_to_face_width, mouth_width_to_face_width, nose_to_chin_over_face_height, eye_to_mouth_over_face_height}`, `estimated{sex, age}`, `expression{count, top, all}`, `notes[]`. Лицо кропится по bbox ArcFace и увеличивается до 512 px, иначе меш не находит лицо в полноростовом кадре.
@@ -301,7 +301,7 @@ Env: `POLLINATIONS_IMAGE_MODEL` (`flux`), `POLLINATIONS_JUDGE_MODEL` (`openai`).
 | `MIN_VRAM_GB` / `MIN_DISK_GB` | `preflight_gpu` | 3.5 / 15 | пороги предполёта (веса ~7 ГБ + кэш и выдача) | согласованы с `gpu_keyframes`; в `GPU_RUNBOOK.md` рекомендуется диск от 30 ГБ |
 | порог весов | `preflight_gpu` | <3 ГБ в `HF_HOME` = качка не закончилась | — | выбрано |
 | `line_width`, `margin` | `skeleton` | 4 px, 0.35 | толщина линий скелета, запас кропа вокруг фигуры | выбрано |
-| `CORE_MODULES` / `MIN_CORE_COVERAGE` | `codeaudit` | 9 модулей / 70% | покрытие требуется только с тех, кто несёт вердикты; с CLI и сетевых обёрток — нет | выбрано |
+| `CORE_MODULES` / `MIN_CORE_COVERAGE` | `codeaudit` | 9 модулей / 50% | покрытие требуется только с тех, кто несёт вердикты; с CLI и сетевых обёрток — нет | выбрано |
 | `MUTATIONS` | `codeaudit` | 15 штук | список порогов, снятие которых обязано ронять тесты | список = пороги из §4, на которых стоят вердикты |
 | дефолты `live_gen` | `live_gen` | SDXL base, `lora_scale` 0.8, `ip_adapter_scale` 0.6, 30 шагов, guidance 5.0 | самохостовый старт-кадр | выбрано, никогда не исполнялось |
 
@@ -393,7 +393,7 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 ### 7.3 Не реализовано вообще
 
 - **Липсинк.** Есть только шов в `live_gen.voice_live` за env-переменными; в каталоге Pollinations липсинка нет. TTS готов, драйв губ — нет.
-- **`driving.survey()`** — упомянут в докстринге `extract` как способ выбрать сегмент, но функции в коде НЕТ.
+- ~~**`driving.survey()`** — упомянут в докстринге `extract`, но функции в коде НЕТ.~~ Закрыто в 9179691.
 - **`gen.LiveNotWired`** — класс объявлен и задокументирован, но нигде не бросается. `README` утверждает, что `--live` бросает `LiveNotWired`; фактически `Gateway` уходит в `live_gen`, который падает `RuntimeError` на отсутствующих зависимостях или env-переменных.
 - **DWPose как источник условий.** `skeleton.render_sequence` умеет только MediaPipe и сам предупреждает, что кондиционер и верификатор совпали, а значит гейт подтверждает собственные ошибки экстрактора. Поле `source` умеет значение `dwpose`, кода за ним нет.
 - **Апскейл после гейта** — описан как правило в `GPU_BRANCH.md`, кода нет.
