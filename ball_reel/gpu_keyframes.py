@@ -84,6 +84,14 @@ class GPUPlan:
     controlnet_scale: float = 1.0
     ip_adapter_scale: float = 0.7
     dtype: str = "float16"
+    #: LoRA реализма: путь к файлу или repo_id. ПУСТО ПО УМОЛЧАНИЮ, и это
+    #: принципиально. Влияние ручки измеримо только против прогона без неё, а
+    #: если она включена с самого начала, базы для сравнения не существует —
+    #: остаётся «мне кажется, стало лучше».
+    realism_lora: str = ""
+    realism_lora_weight: str = ""
+    #: Насколько сильно. 1.0 обычно перебивает и лицо тоже.
+    realism_lora_scale: float = 0.7
     optimisations: list = field(default_factory=lambda: [
         "attention_slicing", "vae_slicing", "vae_tiling",
         "model_cpu_offload"])
@@ -248,7 +256,22 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
         pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder=None,
                              weight_name=cfg.ip_adapter,
                              image_encoder_folder=None)
-        pipe.load_lora_weights(IP_ADAPTER_REPO, weight_name=IP_ADAPTER_LORA)
+        # adapter_name обязателен, как только LoRA становится больше одной.
+        # Без имён второй вызов load_lora_weights ЗАМЕНЯЕТ первый, а не
+        # добавляется к нему: лицо тихо теряет свою половину обусловливания,
+        # и выглядит это как «LoRA реализма испортила идентичность», хотя
+        # испортила её потеря FaceID-LoRA.
+        pipe.load_lora_weights(IP_ADAPTER_REPO, weight_name=IP_ADAPTER_LORA,
+                               adapter_name="faceid")
+        names, weights = ["faceid"], [1.0]
+        if cfg.realism_lora:
+            kw = ({"weight_name": cfg.realism_lora_weight}
+                  if cfg.realism_lora_weight else {})
+            pipe.load_lora_weights(cfg.realism_lora, adapter_name="realism",
+                                   **kw)
+            names.append("realism")
+            weights.append(cfg.realism_lora_scale)
+        pipe.set_adapters(names, adapter_weights=weights)
         pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
     except Exception as e:  # noqa: BLE001
         # Identity is load-bearing: losing the adapter silently would produce a

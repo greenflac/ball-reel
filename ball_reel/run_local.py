@@ -69,6 +69,14 @@ def main(argv: list) -> int:
     ap.add_argument("--smoke", action="store_true",
                     help="остановиться после одного кейфрейма")
     ap.add_argument("--no-loop", action="store_true")
+    ap.add_argument("--lora", default="",
+                    help="LoRA реализма: repo_id или путь к файлу. ПО "
+                         "УМОЛЧАНИЮ ВЫКЛЮЧЕНА — сначала прогон без неё, иначе "
+                         "не с чем сравнивать её влияние")
+    ap.add_argument("--lora-weight", default="",
+                    help="имя файла внутри repo, если их там несколько")
+    ap.add_argument("--lora-scale", type=float, default=0.7,
+                    help="сила LoRA; ближе к 1.0 она начинает перебивать лицо")
     ap.add_argument("--garment-ref", default="",
                     help="НЕ РЕАЛИЗОВАНО на GPU-ветке: единственный адаптер "
                          "занят лицом. Флаг оставлен, чтобы прогон отказал "
@@ -167,11 +175,20 @@ def main(argv: list) -> int:
                      "он пишет манифест сам.")
 
     cfg = plan(vram_gb=args.vram, keyframes=len(nodes))
+    cfg.realism_lora = args.lora
+    cfg.realism_lora_weight = args.lora_weight
+    cfg.realism_lora_scale = args.lora_scale
     print(f"\nусловий {len(conditions)}, узлов {len(nodes)}, "
           f"кадр {cfg.width}x{cfg.height}, шагов {cfg.steps}, "
           f"оценка VRAM {cfg.estimated_vram_gb} ГБ")
     for note in cfg.notes:
         print(f"      {note}")
+    # Печатается всегда, обеими сторонами. Строка «LoRA: нет» в отчёте —
+    # это и есть база, против которой потом читается прогон с ней; без неё
+    # два отчёта через неделю уже не различить.
+    print(f"      LoRA реализма: "
+          + (f"{cfg.realism_lora} @ {cfg.realism_lora_scale}"
+             if cfg.realism_lora else "нет (база для сравнения)"))
 
     def measure(keyframe: str, condition: str) -> tuple:
         ident = arcface_drift([keyframe], args.face,
@@ -304,7 +321,10 @@ def main(argv: list) -> int:
                             ("одежда", gclip["note"], bool(gclip["stable"]))):
         _say(label, ok, data[:96])
 
-    report = {"clip": res.clip_path, "keyframes": len(keyframes),
+    report = {"lora": cfg.realism_lora or None,
+              "lora_scale": cfg.realism_lora_scale if cfg.realism_lora else None,
+              "seed": 0,
+              "clip": res.clip_path, "keyframes": len(keyframes),
               "identity": drift.get("note"), "loop": seam.get("ratio"),
               "motion": quality.get("worst_jump"),
               "garment": gclip.get("regions"), "chain": res.note}
