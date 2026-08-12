@@ -121,11 +121,23 @@ def main(argv: list) -> int:
 
     # 2 ------------------------------------------------------------------- дым
     print("\n--- дым: один кейфрейм ---")
+    from .gpu_keyframes import fit_prompt
+
     prompt = args.prompt
     if args.garment_ref:
         # Одежда задаётся текстом, поэтому текст обязан быть побуквенно одним
         # и тем же на всех узлах: расхождение формулировки = расхождение ткани.
         prompt = f"{prompt} Clothing exactly as in the garment reference."
+    # Порядок важности, а не вкуса: SD1.5 режет хвост по 77 токенам молча,
+    # и реальный промт этого пайплайна выходит примерно на 89. Кадрирование
+    # сюда не входит намеренно — позу и композицию уже держит ControlNet.
+    prompt, dropped = fit_prompt([prompt])
+    if dropped:
+        _say("промт", False,
+             f"не поместилось {len(dropped)} фрагмент(ов) в 77 токенов CLIP — "
+             f"сократить, иначе часть описания просто не применится")
+        return _stop("промт длиннее текстового энкодера; обрезанная одежда "
+                     "потом читается как дрейф ткани в клипе")
     smoke = render_keyframes(nodes[:1], args.face, prompt,
                              out / "smoke", cfg=cfg, negative=args.negative)
     if not smoke.get("keyframes"):

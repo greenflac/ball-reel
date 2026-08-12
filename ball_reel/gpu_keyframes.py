@@ -108,6 +108,49 @@ def plan(vram_gb: float = 4.0, keyframes: int = 5) -> GPUPlan:
     return p
 
 
+#: Лимит текстового энкодера SD1.5. Не рекомендация: всё сверх молча
+#: отбрасывается, без предупреждения и без ошибки.
+CLIP_TOKEN_LIMIT = 77
+
+
+def count_tokens(text: str, tokenizer=None) -> int:
+    """Длина промта в токенах CLIP; при отсутствии токенизатора — оценка.
+
+    Точный счёт возможен только там, где стоит transformers (то есть на машине
+    с картой). В среде разработки его нет, поэтому используется приближение
+    ~1.3 токена на слово — грубое, но достаточное, чтобы поймать промт, который
+    вылезает за лимит в полтора раза.
+    """
+    if tokenizer is not None:
+        return len(tokenizer(text).input_ids)
+    return int(len(text.split()) * 1.3)
+
+
+def fit_prompt(parts: list, tokenizer=None,
+               limit: int = CLIP_TOKEN_LIMIT) -> tuple:
+    """Собрать промт по убыванию важности и сказать, что не поместилось.
+
+    Порядок здесь не косметический. SD1.5 обрезает ХВОСТ, поэтому то, что
+    стоит последним, исчезает первым — молча. Реальный промт этого пайплайна
+    выходит примерно на 89 токенов при лимите 77, так что обрезка не гипотеза.
+
+    Первой идёт одежда: её задаёт только текст, и если она обрежется, ткань
+    начнёт плыть между кейфреймами — тот самый дефект, который ловит
+    `garment.garment_drift`. Кадрирование, наоборот, в этом стеке лишнее:
+    ControlNet уже держит позу и композицию скелетом, а FRAMING писался для
+    пути, где никакого управления позой не было.
+    """
+    kept, dropped, text = [], [], ""
+    for part in [p for p in parts if p]:
+        candidate = " ".join(kept + [part])
+        if count_tokens(candidate, tokenizer) <= limit:
+            kept.append(part)
+            text = candidate
+        else:
+            dropped.append(part)
+    return text, dropped
+
+
 def render_keyframes(condition_images: list, face_photo: str, prompt: str,
                      out_dir: str | Path, *, cfg: GPUPlan | None = None,
                      negative: str = "", seed: int = 0) -> dict:

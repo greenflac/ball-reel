@@ -208,3 +208,54 @@ class KeyframeAcceptanceIsWhatPinsTheMotion(unittest.TestCase):
             res = self.c.generate_chain(kfs, "x", tmp, model="wan-fast")
         self.assertEqual(res.clip_path, "")
         self.assertIn("nothing to chain", res.note)
+
+
+class PromptFitsTheTextEncoder(unittest.TestCase):
+    """SD1.5 обрезает промт по 77 токенам МОЛЧА.
+
+    Реальный промт пайплайна выходит примерно на 89 токенов, то есть обрезка
+    не гипотеза, а факт. Порядок сборки определяет, что именно исчезнет.
+    """
+
+    def setUp(self):
+        from ball_reel import gpu_keyframes
+
+        self.g = gpu_keyframes
+
+    def test_a_short_prompt_survives_whole(self):
+        text, dropped = self.g.fit_prompt(["a woman on a fitness ball"])
+        self.assertIn("fitness ball", text)
+        self.assertEqual(dropped, [])
+
+    def test_the_tail_is_dropped_not_the_head(self):
+        head = "black sports top and leggings"
+        # Длиннее лимита с запасом: 25 повторов по 4 слова это ~130 токенов
+        # при лимите 77, так что хвост обязан не поместиться.
+        tail = " ".join(["extremely detailed cinematic lighting"] * 25)
+        text, dropped = self.g.fit_prompt([head, tail])
+        self.assertIn(head, text)
+        self.assertIn(tail, dropped)
+
+    def test_what_did_not_fit_is_reported_rather_than_lost(self):
+        # Молча обрезанный промт — это молча изменённая одежда. Вызывающий
+        # обязан узнать об этом до генерации, а не по дрейфу ткани в клипе.
+        _, dropped = self.g.fit_prompt([" ".join(["word"] * 200)])
+        self.assertTrue(dropped)
+
+    def test_empty_parts_are_ignored(self):
+        text, dropped = self.g.fit_prompt(["", "a woman", ""])
+        self.assertEqual(text, "a woman")
+        self.assertEqual(dropped, [])
+
+    def test_a_real_tokenizer_is_used_when_available(self):
+        calls = {"n": 0}
+
+        class FakeIds:
+            input_ids = list(range(5))
+
+        def tok(text):
+            calls["n"] += 1
+            return FakeIds()
+
+        self.g.fit_prompt(["a woman on a ball"], tokenizer=tok)
+        self.assertGreater(calls["n"], 0)
