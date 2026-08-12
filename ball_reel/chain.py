@@ -53,6 +53,36 @@ END_FRAME_POLLEN = {"wan-fast": 0.01, "veo": 0.08, "wan-pro": 0.1,
                     "seedance-2.0": 0.18}
 END_FRAME_MODELS = tuple(END_FRAME_POLLEN)
 
+#: Допустимая длительность сегмента, секунд. Шлюз валидирует её ПО МОДЕЛИ и
+#: отвечает 400 при выходе за диапазон — то есть провал приходит на последнем,
+#: платном шаге, когда все кейфреймы уже отрисованы. Дефолт прогона `2` живёт
+#: только на wan-семействе; на seedance и veo он бы упал.
+#:
+#: `veo` принимает НЕ диапазон, а три конкретных значения — поэтому таблица
+#: хранит множество, а не пару границ.
+SEGMENT_SECONDS = {
+    "wan-fast": frozenset(range(2, 16)),      # 2 c проверено live
+    "wan-pro": frozenset(range(2, 16)),       # семейство wan по докам
+    "seedance-2.0": frozenset(range(4, 16)),  # 2 c даёт 400 [проверено live]
+    "veo": frozenset((4, 6, 8)),              # только эти три
+}
+
+
+def segment_seconds_ok(model: str, seconds: int) -> tuple:
+    """Пройдёт ли такая длительность на этой модели. (ok, что делать)."""
+    allowed = SEGMENT_SECONDS.get(model)
+    if allowed is None:
+        return True, f"диапазон {model} не проверялся — сверить с /video/models"
+    if seconds in allowed:
+        return True, ""
+    ok_values = sorted(allowed)
+    shown = (f"{ok_values[0]}..{ok_values[-1]}" if len(ok_values) > 3
+             else "/".join(str(v) for v in ok_values))
+    return False, (f"{model} принимает {shown} c, а не {seconds}: шлюз вернёт "
+                   f"400 на последнем — платном — шаге, когда кейфреймы уже "
+                   f"отрисованы. Ближайшее допустимое: "
+                   f"{min(ok_values, key=lambda v: abs(v - seconds))}.")
+
 #: Keyframes per chain by default. Enough to pin a bounce at its extremes
 #: (top, bottom, top) plus the return to the start.
 DEFAULT_KEYFRAMES = 5

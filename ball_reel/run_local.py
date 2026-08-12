@@ -83,7 +83,7 @@ def main(argv: list) -> int:
     # проверялась только внутри generate_chain, то есть на пятом шаге — после
     # предполёта, дыма и всех кейфреймов. Опечатка в имени стоила бы всего
     # прогона ради ValueError, который виден отсюда.
-    from .chain import END_FRAME_POLLEN
+    from .chain import END_FRAME_POLLEN, segment_seconds_ok
 
     if args.video_model not in END_FRAME_POLLEN:
         _say("модель видео", False,
@@ -92,6 +92,12 @@ def main(argv: list) -> int:
                      f"(pollen/с: {END_FRAME_POLLEN}). Именно end_frame "
                      f"держит каждый сегмент за оба конца, без него узлы "
                      f"перестают что-либо закреплять.")
+    seconds_ok, seconds_note = segment_seconds_ok(args.video_model, args.seconds)
+    if not seconds_ok:
+        _say("длительность", False, f"--seconds {args.seconds}")
+        return _stop(seconds_note)
+    if seconds_note:
+        _say("длительность", True, seconds_note)
     if args.garment_ref:
         # Раньше этот флаг только дописывал в промт «одежда как на референсе»,
         # а сам файл не открывался и в рендерер не передавался: модель получала

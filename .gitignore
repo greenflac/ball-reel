@@ -44,3 +44,8 @@ dryrun/
 run_out/
 newref/
 ref_frames/
+
+# тест-кит: отдаётся файлом, не через git (7 МБ бинарей)
+kit/
+ball_reel_kit.tar.gz
+conditions_clean/

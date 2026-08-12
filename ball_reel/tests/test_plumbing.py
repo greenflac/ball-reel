@@ -159,6 +159,46 @@ class TheRunRefusesBadArgumentsBeforeSpendingAnything(unittest.TestCase):
     def test_garment_ref_says_it_is_not_wired_instead_of_pretending(self):
         self.assertEqual(self._run("--garment-ref", "shirt.jpg"), 1)
 
+    def test_a_duration_the_model_will_reject_is_caught_before_the_gpu(self):
+        # Дефолт прогона — 2 с, и на wan-fast он верен. На seedance-2.0 шлюз
+        # ответил бы 400 — на последнем, платном шаге, когда все кейфреймы уже
+        # отрисованы. Это ровно тот провал, который обязан случиться раньше.
+        self.assertEqual(self._run("--video-model", "seedance-2.0",
+                                   "--seconds", "2"), 1)
+
+    def test_veo_takes_three_values_not_a_range(self):
+        self.assertEqual(self._run("--video-model", "veo", "--seconds", "5"), 1)
+
+
+class SegmentLengthIsCheckedAgainstTheModel(unittest.TestCase):
+    """Длительность валидируется шлюзом ПО МОДЕЛИ, и 400 приходит последним."""
+
+    def setUp(self):
+        from ball_reel.chain import segment_seconds_ok
+
+        self.check = segment_seconds_ok
+
+    def test_the_cheap_default_pair_is_allowed(self):
+        ok, note = self.check("wan-fast", 2)
+        self.assertTrue(ok, note)
+
+    def test_seedance_refuses_two_seconds(self):
+        ok, note = self.check("seedance-2.0", 2)
+        self.assertFalse(ok)
+        self.assertIn("4", note)
+
+    def test_veo_refuses_five_and_names_the_nearest_legal_value(self):
+        ok, note = self.check("veo", 5)
+        self.assertFalse(ok)
+        self.assertIn("4/6/8", note)
+
+    def test_an_unknown_model_is_allowed_but_flagged(self):
+        # Молча пропускать неизвестное нельзя, но и блокировать нечем: таблица
+        # знает только то, что измерено.
+        ok, note = self.check("something-new", 3)
+        self.assertTrue(ok)
+        self.assertIn("не проверялся", note)
+
 
 class ConditionsExplainThemselves(unittest.TestCase):
     """Манифест должен лежать рядом с условиями, а не только возвращаться."""
