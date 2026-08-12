@@ -119,11 +119,12 @@ def motion_quality(frames: list[str]) -> dict:
 def best_loop_cut(frames: list[str], *, min_keep: float = 0.5) -> dict:
     """Find where to cut so the clip loops, without generating anything new.
 
-    An end-frame keyframe is the cheap way to get a loop, but not every model
-    honours it (measured on the same reference and prompt: veo came back at
-    0.17, wan at 1.71). When the model will not close the loop, the clip usually
-    still PASSES THROUGH a pose close to its opening one — so the loop is a
-    trimming problem, not a generation problem.
+    An end-frame keyframe is the cheap way to get a loop, but only models that
+    DECLARE `end_frame` accept one — the rest ignore the second keyframe
+    silently (measured: veo, which declares it, closed at 0.17; wan, which does
+    not, came back at 1.71). When no end frame is available, the clip usually
+    still PASSES THROUGH a pose close to its opening one — so the loop becomes a
+    trimming problem rather than a generation one.
 
     Scans candidate end frames in the last ``1 - min_keep`` of the clip and
     returns the one closest to frame 0, with the seam ratio it achieves. Costs

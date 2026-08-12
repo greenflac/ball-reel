@@ -283,9 +283,9 @@ def produce(
             frames = pollinations.extract_frames(mp4, out_dir / f"frames_{n:02d}",
                                                  fps=FRAME_FPS)
             if loop:
-                # end_frame is declared by more models than honour it (wan and
-                # happyhorse ignored it live), so close the loop locally when
-                # the model did not. Costs one decode and no tokens.
+                # Models that do not declare end_frame ignore the second
+                # keyframe (wan and happyhorse, live: 1.71 and 1.61), so close
+                # the loop locally when it did not close. One decode, no tokens.
                 seam = loop_seam(frames)
                 if seam["ratio"] is not None and not seam["seamless"]:
                     cut = trim_to_loop(mp4, frames,
