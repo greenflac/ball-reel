@@ -10,3 +10,7 @@ standin*_out/
 __pycache__/
 *.pyc
 frametest/
+# live A/B experiment scratch (numbers live in POLLINATIONS_CONTRACT.md)
+attrtest/
+looptest/
+poseloop/

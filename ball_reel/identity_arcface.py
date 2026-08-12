@@ -71,7 +71,11 @@ def _analyzer():
     if _ANALYZER is None:
         from insightface.app import FaceAnalysis  # type: ignore
 
-        app = FaceAnalysis(name="buffalo_l", allowed_modules=["detection", "recognition"])
+        # genderage rides along with the pack we already download, so apparent
+        # sex/age cost nothing extra and stay LOCAL — the subject check does not
+        # get outsourced to the model being judged.
+        app = FaceAnalysis(name="buffalo_l",
+                           allowed_modules=["detection", "recognition", "genderage"])
         app.prepare(ctx_id=0, det_size=(640, 640))
         _ANALYZER = app
     return _ANALYZER
@@ -109,15 +113,37 @@ def face_detail(path: str | Path) -> dict | None:
     faces.sort(key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
     f = faces[-1]
     x0, y0, x1, y1 = (float(v) for v in f.bbox)
-    return {"embedding": f.normed_embedding,
-            "face_px": round(min(x1 - x0, y1 - y0)),
-            "det_score": round(float(f.det_score), 3)}
+    out = {"embedding": f.normed_embedding,
+           "face_px": round(min(x1 - x0, y1 - y0)),
+           "det_score": round(float(f.det_score), 3)}
+    sex, age = getattr(f, "sex", None), getattr(f, "age", None)
+    if sex is not None:
+        out["sex"] = sex
+    if age is not None:
+        out["age"] = int(age)
+    return out
 
 
 def face_embedding(path: str | Path):
     """The largest face's embedding in an image, or None if no face is found."""
     d = face_detail(path)
     return None if d is None else d["embedding"]
+
+
+def face_attributes(path: str | Path) -> dict | None:
+    """Apparent sex/age of the largest face, from the local estimator.
+
+    Returns the estimator's labels for THIS IMAGE (``{"sex": "M"|"F", "age":
+    int, "face_px": int}``), or None if no face is found. Coarse by nature, and
+    not a statement about who anyone is — its use here is strictly comparative:
+    run it on the reference and on a generated frame, and a disagreement means
+    the generator changed the person, which is the only question being asked.
+    Compare like with like; do not read either number on its own as truth.
+    """
+    d = face_detail(path)
+    if d is None:
+        return None
+    return {k: d[k] for k in ("sex", "age", "face_px") if d.get(k) is not None}
 
 
 def _quantile(sorted_vals: list[float], q: float) -> float:

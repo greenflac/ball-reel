@@ -37,6 +37,8 @@ from pathlib import Path
 
 from .brief import DEMO_BRIEF, Brief
 from .gen import STRATEGIES, Strategy
+from .motion import LOOP_MOTION, PHYSICAL_MOTION
+from .subject import UNSPECIFIED, Subject
 
 #: Stack, as named in the vacancy. Override per bench via env at call sites.
 START_MODEL = "kontext"        # Flux Kontext — face-conditioned still

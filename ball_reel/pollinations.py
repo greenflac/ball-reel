@@ -129,6 +129,47 @@ def images_edit(prompt: str, ref_path: str | Path, out_path: str | Path, *,
     return str(out_path)
 
 
+def compose(prompt: str, image_urls: list[str], out_path: str | Path, *,
+            model: str = "nanobanana", width: int = 768, height: int = 1024,
+            seed: int = 0) -> str:
+    """Generate from SEVERAL reference images at once. [verified live]
+
+    GET /image/{prompt}?model=&image=<url1>|<url2> -> image bytes. This is the
+    only way to specify a body: an editing model restyles clothing from text but
+    keeps the body it was handed, so a build that differs from the face photo
+    has to arrive as a picture. Refer to the images by position in the prompt
+    ("the FIRST image for the face, the SECOND for build and clothing") — that
+    phrasing was what made the roles stick.
+
+    Reference capacity is per model (`max_reference_images` in /image/models):
+    kontext 1 (cannot do this), nanobanana 3, klein/seedream5-pro 10,
+    seedream5/nanobanana-pro 14, gptimage 16. Verified on the same inputs:
+    nanobanana took build and clothing from the second image while holding the
+    face at 0.176 drift; seedream5 lost the face entirely at 0.752. Capacity is
+    not fidelity — re-measure before switching models.
+
+    The URLs are fetched server-side, so they must be public (`upload()` them).
+    """
+    import requests
+
+    if len(image_urls) < 2:
+        raise ValueError("compose() is for 2+ references; use images_edit/image "
+                         "for a single one.")
+    url = f"{_base()}/image/" + quote(prompt, safe="")
+    r = requests.get(url, params={"model": model, "image": "|".join(image_urls),
+                                  "width": width, "height": height, "seed": seed},
+                     headers=_auth(), timeout=600)
+    if not r.ok:
+        raise RuntimeError(f"compose: HTTP {r.status_code} {r.text[:300]}")
+    if "image" not in r.headers.get("content-type", ""):
+        raise RuntimeError(f"compose: expected image bytes, got "
+                           f"{r.headers.get('content-type')}: {r.text[:200]!r}")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(r.content)
+    return str(out_path)
+
+
 # ---------------------------------------------------------------------------
 # video: text (+ reference image = the start frame) -> mp4 -> frames
 # ---------------------------------------------------------------------------
@@ -199,6 +240,22 @@ def _usage_of(r) -> dict:
         except ValueError:
             pass
     return out
+
+
+def video_loop(prompt: str, out_mp4: str | Path, start_url: str, **kwargs) -> str:
+    """A clip that ends where it began, so it loops without a visible cut.
+
+    Uses the video endpoint's SECOND reference image as the end frame
+    (`image=<start>|<end>`) with the same frame at both ends. The model then has
+    to return the subject to its starting position, which is what makes the last
+    frame cut back to the first cleanly — rather than fading or freezing, which
+    is what "make it loop" in the prompt text alone tends to produce.
+
+    Only for models whose `video_capabilities` include `end_frame`: seedance-2.0,
+    wan, wan-pro, veo (`seedance-pro` and `grok` are start-frame only, and pass
+    max_reference_images=1). Check /video/models before switching model.
+    """
+    return video(prompt, out_mp4, image_url=[start_url, start_url], **kwargs)
 
 
 def extract_frames(mp4_path: str | Path, out_dir: str | Path, *, fps: int = 6) -> list[str]:
