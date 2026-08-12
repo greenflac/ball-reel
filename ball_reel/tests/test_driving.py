@@ -175,5 +175,45 @@ class SpecRefusesToOverclaim(unittest.TestCase):
         self.assertNotIn("track", s.to_dict(with_track=False))
 
 
+
+class PromptRendersOnlyMeasuredExpression(unittest.TestCase):
+    """Ветка мимики в to_prompt: описывать только то, что реально измерено."""
+
+    def setUp(self):
+        from ball_reel import driving
+
+        self.d = driving
+
+    def _spec(self, coverage, peaks):
+        s = self.d.DrivingSpec(source="x", fps=12, frames=60, duration=5.0)
+        s.motion.cadence_hz, s.motion.amplitude = 1.0, 0.5
+        s.motion.velocity, s.motion.peak_velocity = 1.0, 1.5
+        s.expression.coverage, s.expression.peaks = coverage, peaks
+        return s
+
+    def test_a_broad_smile_is_described(self):
+        text = self.d.to_prompt(self._spec(1.0, {"mouthSmileLeft": 0.7}))
+        self.assertIn("smiling broadly", text)
+
+    def test_a_faint_smile_is_described_as_faint(self):
+        text = self.d.to_prompt(self._spec(1.0, {"mouthSmileRight": 0.25}))
+        self.assertIn("slight smile", text)
+
+    def test_raised_brows_are_described(self):
+        text = self.d.to_prompt(self._spec(1.0, {"browInnerUp": 0.7}))
+        self.assertIn("eyebrows raised", text)
+
+    def test_an_unread_face_contributes_nothing(self):
+        # Low coverage means the video did not specify the expression; the
+        # prompt must not invent one from peaks measured on a couple of frames.
+        text = self.d.to_prompt(self._spec(0.1, {"mouthSmileLeft": 0.9}))
+        self.assertNotIn("smil", text.lower())
+
+    def test_an_even_pace_reads_as_even(self):
+        s = self._spec(1.0, {})
+        s.motion.peak_velocity = 1.2      # ratio 1.2 -> not "sharp"
+        self.assertIn("even pace", self.d.to_prompt(s))
+
+
 if __name__ == "__main__":
     unittest.main()

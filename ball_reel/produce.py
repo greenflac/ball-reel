@@ -323,34 +323,10 @@ def produce(
                   if subject.pose_ref else None)
         p90 = drift["p90"]
         coverage = drift["coverage"]
-        if median is None or coverage < MIN_COVERAGE:
-            passed, score = False, 1.0
-            reason = (f"identity not verifiable: only {coverage:.0%} of frames "
-                      f"had a face big enough to identify — {drift['note']}")
-        else:
-            score = median
-            passed = (median <= bar and p90 <= HARD_DRIFT_MAX
-                      and motion >= min_motion and quality["smooth"]
-                      and (seam["seamless"] or not loop)
-                      and limbs.get("anatomical", True)
-                      and (wander is None or wander["held"]))
-            if passed:
-                reason = ""
-            elif median > bar:
-                reason = f"identity drift (median) {median:.2f} > {bar:.2f}"
-            elif p90 > HARD_DRIFT_MAX:
-                reason = (f"identity unstable: p90 {p90:.2f} > "
-                          f"{HARD_DRIFT_MAX:.2f} (drifts inside the clip)")
-            elif motion < min_motion:
-                reason = f"motion {motion:.3f} < {min_motion:.2f}"
-            elif not quality["smooth"]:
-                reason = f"motion not physical: {quality['note']}"
-            elif not limbs.get("anatomical", True):
-                reason = f"not anatomical: {limbs['note']}"
-            elif wander is not None and not wander["held"]:
-                reason = f"pose wandered off the reference: {wander['note']}"
-            else:
-                reason = f"does not loop: {seam['note']}"
+        passed, score, reason = verdict(
+            drift=drift, motion=motion, quality=quality, seam=seam,
+            limbs=limbs, wander=wander, bar=bar, min_motion=min_motion,
+            loop=loop)
         att = Attempt(n, strat.id, start, frames, round(score, 4),
                       round(motion, 4), passed, reason, clip_path=mp4,
                       identity=_identity_summary(drift),
@@ -377,6 +353,54 @@ def produce(
                  best.start_frame if best else "", tries, note)
     _write_report(out_dir, res)
     return res
+
+
+def verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
+            limbs: dict, wander: dict | None, bar: float, min_motion: float,
+            loop: bool) -> tuple:
+    """Свести измерения в один вердикт: (прошло, оценка, причина).
+
+    Вынесено из `produce` отдельной чистой функцией не ради красоты. Пока эта
+    логика жила внутри цикла генерации, проверить её можно было только платным
+    прогоном, и мутационный аудит показал ровно это: снятый `MIN_COVERAGE`
+    не ронял ни одного теста. Порог, который нечем проверить, — это порог,
+    который завтра сдвинут молча.
+
+    Порядок причин важен: сначала то, что делает вердикт невозможным
+    (нечего было судить), затем идентичность, затем движение, затем анатомия,
+    поза и луп. Возвращается ПЕРВАЯ несработавшая проверка, а не все сразу —
+    читателю отчёта нужно знать, с чего начинать, а не список из шести пунктов.
+    """
+    from .identity_arcface import HARD_DRIFT_MAX, MIN_COVERAGE
+
+    median, p90 = drift.get("median"), drift.get("p90")
+    coverage = drift.get("coverage") or 0.0
+    if median is None or coverage < MIN_COVERAGE:
+        return False, 1.0, (
+            f"identity not verifiable: only {coverage:.0%} of frames had a "
+            f"face big enough to identify — {drift.get('note', '')}")
+
+    checks = (
+        (median <= bar,
+         lambda: f"identity drift (median) {median:.2f} > {bar:.2f}"),
+        (p90 is not None and p90 <= HARD_DRIFT_MAX,
+         lambda: f"identity unstable: p90 {p90:.2f} > {HARD_DRIFT_MAX:.2f} "
+                 f"(drifts inside the clip)"),
+        (motion >= min_motion,
+         lambda: f"motion {motion:.3f} < {min_motion:.2f}"),
+        (quality.get("smooth", True),
+         lambda: f"motion not physical: {quality.get('note', '')}"),
+        (limbs.get("anatomical", True),
+         lambda: f"not anatomical: {limbs.get('note', '')}"),
+        (wander is None or wander.get("held"),
+         lambda: f"pose wandered off the reference: {wander.get('note', '')}"),
+        (seam.get("seamless") or not loop,
+         lambda: f"does not loop: {seam.get('note', '')}"),
+    )
+    for ok, why in checks:
+        if not ok:
+            return False, median, why()
+    return True, median, ""
 
 
 def _short(e: Exception, limit: int = 240) -> str:

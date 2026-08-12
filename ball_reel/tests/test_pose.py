@@ -209,3 +209,62 @@ class BuildIsMeasuredIn3DNotProjection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class PoseDriftAggregatesLikeTheIdentityCheck(unittest.TestCase):
+    """Агрегация pose_drift: медиана, худший сустав, покрытие.
+
+    Модельная часть (детекция) офлайн недоступна, но решение строится не в ней,
+    а здесь — и именно оно решает, «поза уехала» или «нечего было мерить».
+    """
+
+    def setUp(self):
+        from ball_reel import pose
+
+        self.p = pose
+        self.by_path = {}
+        self._real = pose.landmarks
+        pose.landmarks = lambda path: self.by_path.get(str(path))
+        self.addCleanup(setattr, pose, "landmarks", self._real)
+
+    def _shift(self, dx):
+        return _skeleton(**{"l_wrist": (0.40 + dx, 0.50, 1.0)})
+
+    def test_frames_matching_the_reference_hold(self):
+        self.by_path = {"ref": _skeleton(), "a": _skeleton(), "b": _skeleton()}
+        d = self.p.pose_drift(["a", "b"], "ref")
+        self.assertEqual(d["median"], 0.0)
+        self.assertTrue(d["held"])
+        self.assertEqual(d["coverage"], 1.0)
+
+    def test_a_frame_with_no_body_lowers_coverage_but_is_not_scored(self):
+        self.by_path = {"ref": _skeleton(), "a": _skeleton(), "b": None}
+        d = self.p.pose_drift(["a", "b"], "ref")
+        self.assertEqual(d["measured"], 1)
+        self.assertEqual(d["frames"], 2)
+        self.assertEqual(d["coverage"], 0.5)
+
+    def test_nothing_measurable_is_not_verifiable_rather_than_held(self):
+        self.by_path = {"ref": _skeleton(), "a": None}
+        d = self.p.pose_drift(["a"], "ref")
+        self.assertIsNone(d["median"])
+        self.assertFalse(d["held"])
+        self.assertIn("NOT VERIFIABLE", d["note"])
+
+    def test_a_reference_without_a_body_stops_the_check(self):
+        self.by_path = {"ref": None, "a": _skeleton()}
+        d = self.p.pose_drift(["a"], "ref")
+        self.assertFalse(d["held"])
+        self.assertIn("pose reference", d["note"])
+
+    def test_one_limb_far_away_fails_on_the_worst_joint(self):
+        # One joint a whole torso-length away: 1.0/12 = 0.083 on the mean, which
+        # sits UNDER the bar, while the joint itself is far over it. Any larger
+        # a shift and the mean would trip too, and the test would no longer be
+        # about the worst joint at all.
+        self.by_path = {"ref": _skeleton(), "a": self._shift(0.25)}
+        d = self.p.pose_drift(["a"], "ref")
+        self.assertLess(d["median"], self.p.SAME_POSE_MAX)
+        self.assertGreater(d["worst_joint"], self.p.WORST_JOINT_MAX)
+        self.assertFalse(d["held"])

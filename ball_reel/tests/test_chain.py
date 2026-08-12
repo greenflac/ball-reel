@@ -131,3 +131,80 @@ class GPUPlanFitsTheCard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyframeAcceptanceIsWhatPinsTheMotion(unittest.TestCase):
+    """Третий выживший мутант: KEYFRAME_POSE_MAX ничем не сторожился.
+
+    Кейфрейм, не воспроизводивший позу, — это узел, который ничего не
+    закрепляет, и вся идея цепочки вырождается: модель снова свободна между
+    кадрами, но теперь мы об этом не знаем. Отрисовка ходит в сеть, а решение
+    «принять или перерисовать» — нет, поэтому здесь заглушено ровно сетевое.
+    """
+
+    def setUp(self):
+        from ball_reel import chain
+
+        self.c = chain
+        self.pose_distance = 0.05
+        self.drift = 0.10
+
+        import ball_reel.identity as identity
+        import ball_reel.pollinations as pollinations
+        import ball_reel.pose as pose
+
+        self._saved = (pollinations.upload, pollinations.compose,
+                       pose.landmarks, pose.pose_delta, identity.arcface_drift)
+
+        pollinations.upload = lambda p: f"https://media/{p}"
+        pollinations.compose = lambda prompt, urls, out, **kw: str(out)
+        pose.landmarks = lambda p: {"stub": True}
+        pose.pose_delta = lambda a, b: {"mean": self.pose_distance,
+                                        "worst": self.pose_distance,
+                                        "worst_joint": "l_wrist"}
+        identity.arcface_drift = lambda frames, ref, **kw: {"median": self.drift}
+
+        def restore():
+            (pollinations.upload, pollinations.compose, pose.landmarks,
+             pose.pose_delta, identity.arcface_drift) = self._saved
+
+        self.addCleanup(restore)
+
+    def _render(self, tmp):
+        return self.c.render_keyframes(["frame0.png"], [0], "face.jpg",
+                                       out_dir=tmp, attempts=2)
+
+    def test_a_faithful_keyframe_is_accepted(self):
+        import tempfile
+
+        self.pose_distance = 0.05
+        with tempfile.TemporaryDirectory() as tmp:
+            kf = self._render(tmp)[0]
+        self.assertTrue(kf.accepted)
+        self.assertEqual(kf.reason, "")
+        self.assertTrue(kf.url)
+
+    def test_a_keyframe_that_missed_the_pose_is_rejected(self):
+        import tempfile
+
+        # A LITERAL, not KEYFRAME_POSE_MAX + delta. A test that derives its
+        # input from the constant it guards moves with that constant and can
+        # never fail: raise the bar to 999 and such a test raises the miss to
+        # 999.2 and still passes. Caught by the mutation audit.
+        self.pose_distance = 0.60
+        with tempfile.TemporaryDirectory() as tmp:
+            kf = self._render(tmp)[0]
+        self.assertFalse(kf.accepted)
+        self.assertIn("pose off", kf.reason)
+        # A rejected node must not be uploaded: it would then be chained.
+        self.assertEqual(kf.url, "")
+
+    def test_a_rejected_keyframe_never_reaches_the_chain(self):
+        import tempfile
+
+        self.pose_distance = 0.60
+        with tempfile.TemporaryDirectory() as tmp:
+            kfs = self._render(tmp)
+            res = self.c.generate_chain(kfs, "x", tmp, model="wan-fast")
+        self.assertEqual(res.clip_path, "")
+        self.assertIn("nothing to chain", res.note)
