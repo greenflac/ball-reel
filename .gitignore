@@ -38,3 +38,5 @@ conditions/
 ref_spec.json
 face.jpg
 payload.tar.gz
+conditions_dw/
+cond_thr*/
