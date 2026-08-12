@@ -259,4 +259,4 @@ tar czf result.tar.gz chain_out/ kf/ *.json
 `POLLINATIONS_CONTRACT.md`.
 
 Всё остальное — `intake`, `metrics`, `driving`, `pose`, `motion`, `skeleton`,
-гейт — проверено на живых данных и 108 офлайн-тестах.
+гейт — проверено на живых данных и 152 офлайн-тестах.

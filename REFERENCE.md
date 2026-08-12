@@ -46,7 +46,7 @@
 | `gpu_keyframes.py` | Кейфреймы на 4 ГБ VRAM: SD1.5 + ControlNet OpenPose + IP-Adapter FaceID. `plan()` инспектируется на CPU, `render_keyframes()` — только на карте. | torch, diffusers, Pillow | GPU + веса (~7 ГБ) |
 | `live_gen.py` | Альтернатива шлюзу на своём железе: SDXL + IP-Adapter FaceID для старт-кадра, произвольный video-API, TTS+липсинк. Всё за env-переменными. | torch, diffusers, insightface, requests | GPU + сеть + веса |
 | `tools/make_fixtures.py` | Рисует синтетические офлайн-фикстуры Pillow'ом (3 стратегии = 3 режима отказа) и хэнд-написанные вердикты судьи. | Pillow | нет |
-| `tests/` (11 файлов: `test_arcface_math`, `test_chain`, `test_condition_render`, `test_driving`, `test_identity_gate`, `test_intake`, `test_motion_subject`, `test_pose`, `test_router`, `test_skeleton`, `test_verdict`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. **148 тестов, проходят за 0.3 c** (в `GPU_RUNBOOK.md` написано «108» — устарело). | unittest | нет |
+| `tests/` (11 файлов: `test_arcface_math`, `test_chain`, `test_condition_render`, `test_driving`, `test_identity_gate`, `test_intake`, `test_motion_subject`, `test_pose`, `test_router`, `test_skeleton`, `test_verdict`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. **152 теста, проходят за 0.3 c**. | unittest | нет |
 
 ---
 
