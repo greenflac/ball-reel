@@ -136,5 +136,76 @@ class LimbConsistencyDetectsRubberBodies(unittest.TestCase):
         self.assertIn("NOT VERIFIABLE", r["note"])
 
 
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class BuildIsMeasuredIn3DNotProjection(unittest.TestCase):
+    """Regression: build measured in image space inverted on a turned photo.
+
+    Live, the same measurement gave shoulder width 0.143 on a three-quarter
+    photo and 1.019 on a frontal one — a sevenfold disagreement produced purely
+    by camera angle. In 3D the same two photos, of two DIFFERENT people, gave
+    0.638 and 0.643. Users rarely send front-on photos, so the 3D path is the
+    one that has to work.
+    """
+
+    def setUp(self):
+        from ball_reel import pose
+
+        self.p = pose
+        self._real = pose.world_landmarks
+        self.addCleanup(setattr, pose, "world_landmarks", self._real)
+
+    def _stub(self, points):
+        self.p.world_landmarks = lambda _p: points
+
+    def _body(self, shoulder_half=0.20, hip_half=0.13, torso=0.50):
+        # A skeleton in metres: shoulders and hips spread on x, torso along y.
+        pts = {}
+        for side, sign in (("l", -1), ("r", 1)):
+            pts[f"{side}_shoulder"] = (sign * shoulder_half, -torso / 2, 0.0, 1.0)
+            pts[f"{side}_hip"] = (sign * hip_half, torso / 2, 0.0, 1.0)
+            pts[f"{side}_elbow"] = (sign * shoulder_half, -torso / 6, 0.0, 1.0)
+            pts[f"{side}_wrist"] = (sign * shoulder_half, torso / 6, 0.0, 1.0)
+            pts[f"{side}_knee"] = (sign * hip_half, torso, 0.0, 1.0)
+            pts[f"{side}_ankle"] = (sign * hip_half, torso * 1.5, 0.0, 1.0)
+        return pts
+
+    def test_proportions_are_expressed_in_torso_lengths(self):
+        self._stub(self._body())
+        got = self.p.world_proportions("x")
+        self.assertAlmostEqual(got["shoulder_width"], 0.40 / 0.50, places=3)
+        self.assertAlmostEqual(got["hip_width"], 0.26 / 0.50, places=3)
+        self.assertAlmostEqual(got["shoulder_to_hip"], 0.40 / 0.26, places=3)
+
+    def test_the_same_body_further_from_camera_measures_the_same(self):
+        # 3D landmarks are metric, so a scaled skeleton (the model's estimate of
+        # a smaller or more distant person) yields identical ratios.
+        self._stub(self._body())
+        near = self.p.world_proportions("x")
+        self._stub(self._body(shoulder_half=0.10, hip_half=0.065, torso=0.25))
+        far = self.p.world_proportions("x")
+        self.assertAlmostEqual(near["shoulder_to_hip"], far["shoulder_to_hip"],
+                               places=3)
+
+    def test_a_broader_build_reads_as_broader(self):
+        self._stub(self._body(shoulder_half=0.20))
+        lean = self.p.world_proportions("x")["shoulder_to_hip"]
+        self._stub(self._body(shoulder_half=0.30))
+        broad = self.p.world_proportions("x")["shoulder_to_hip"]
+        self.assertGreater(broad, lean)
+
+    def test_invisible_joints_are_left_out(self):
+        pts = self._body()
+        pts["l_knee"] = (*pts["l_knee"][:3], 0.0)
+        self._stub(pts)
+        got = self.p.world_proportions("x")
+        self.assertNotIn("l_hip->l_knee", got)
+        self.assertIn("r_hip->r_knee", got)
+
+    def test_no_body_gives_nothing_rather_than_zeros(self):
+        self._stub(None)
+        self.assertIsNone(self.p.world_proportions("x"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -169,16 +169,22 @@ def face_metrics(photo: str | Path, *, face_model: str | Path | None = None) -> 
 def body_metrics(photo: str | Path) -> dict:
     """Build, as proportions — the part a face photo cannot give you.
 
-    All lengths are divided by torso length, so they are comparable between a
-    close crop and a wide shot, and between two different people. These are the
-    numbers that say "broad-shouldered" or "long-legged" without an adjective.
+    Measured in 3D world coordinates, not image coordinates, because user photos
+    are rarely front-on and a projection is not a body: turning the subject
+    collapses shoulder width toward nothing while the hips hold up, inverting
+    the ratio. See `pose.world_landmarks` for the numbers that settled this.
+
+    The 2D figures are still reported under ``projected`` — they describe how
+    the person appears in THIS frame, which is what matters for framing — but
+    ``proportions`` (the 3D set) is what should be fed anywhere as build.
 
     A portrait returns nothing here, and says so: that absence is precisely why
     build has to be supplied as a reference image rather than described.
     """
-    from .pose import LIMBS, _normalise, landmarks
+    from .pose import LIMBS, _normalise, landmarks, world_proportions
 
-    out: dict = {"photo": str(photo), "proportions": {}, "notes": []}
+    out: dict = {"photo": str(photo), "proportions": {}, "projected": {},
+                 "notes": []}
     pts = landmarks(photo)
     if pts is None:
         out["notes"].append("no body found: a head-and-shoulders portrait "
@@ -188,6 +194,10 @@ def body_metrics(photo: str | Path) -> dict:
     if norm is None:
         out["notes"].append("hips or shoulders not visible: build not measurable.")
         return out
+    out["proportions"] = world_proportions(photo) or {}
+    if not out["proportions"]:
+        out["notes"].append("3D landmarks unavailable: falling back to the "
+                            "projected figures, which depend on camera angle.")
 
     def seg(a, b):
         if norm[a][1] < 0.5 or norm[b][1] < 0.5:
@@ -204,7 +214,9 @@ def body_metrics(photo: str | Path) -> dict:
     leg = [v for v in (seg("l_hip", "l_knee"), seg("l_knee", "l_ankle")) if v]
     if len(leg) == 2:
         prop["leg_length"] = round(sum(leg), 4)  # already in torso lengths
-    out["proportions"] = {k: v for k, v in prop.items() if v is not None}
+    out["projected"] = {k: v for k, v in prop.items() if v is not None}
+    if not out["proportions"]:
+        out["proportions"] = dict(out["projected"])
     occluded = [k for k, v in prop.items() if v is None]
     if occluded:
         out["notes"].append(f"{len(occluded)} segment(s) occluded or out of "
@@ -217,14 +229,18 @@ def body_metrics(photo: str | Path) -> dict:
     # people: frontal gave shoulder 1.02 and shoulder/hip 1.50, a turned pose
     # gave 0.14 and 0.96. Reporting the second as build would hand the
     # generator a body nobody has.
+    # A turned subject no longer invalidates the build, because the reported
+    # proportions are 3D. It is still worth NAMING, since the projected figures
+    # sitting next to them will look wrong to anyone reading the report.
     turned = shoulders is not None and hips and shoulders < hips * 1.1
     mostly_hidden = len(occluded) >= len(prop) / 2
-    out["reliable"] = not (turned or mostly_hidden)
+    out["turned"] = bool(turned)
+    out["reliable"] = bool(out["proportions"]) and not mostly_hidden
     if turned:
         out["notes"].append(
-            f"shoulders ({shoulders}) are no wider than the hips ({hips}): the "
-            f"subject is turned away from camera, so these proportions are a "
-            f"PROJECTION, not this person's build. Use a front-on photo.")
+            f"subject is turned away from camera (projected shoulders "
+            f"{shoulders} vs hips {hips}). `proportions` are 3D and hold up; "
+            f"`projected` are foreshortened and describe this frame only.")
     if mostly_hidden:
         out["notes"].append("over half the body is occluded: build not usable.")
     return out

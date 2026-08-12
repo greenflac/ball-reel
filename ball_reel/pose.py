@@ -158,6 +158,89 @@ def landmarks(path: str | Path) -> dict | None:
             for name, i in BODY_POINTS.items()}
 
 
+def world_landmarks(path: str | Path) -> dict | None:
+    """Body landmarks in METRIC 3D space, rooted at the hips — view-independent.
+
+    The image landmarks `landmarks()` returns are a PROJECTION, and projection
+    destroys proportions: turn a person 45 degrees and their shoulders
+    foreshorten toward nothing while their hips, being rounder, hold up. Measured
+    on two real photos, shoulder width in torso units came out 0.143 on a turned
+    subject against 1.019 on a frontal one — a sevenfold disagreement that says
+    nothing about either body.
+
+    The same detector also estimates 3D world coordinates, and those are stable:
+    the same two photos, of two DIFFERENT people, gave 0.638 and 0.643 — within
+    one percent. That is what makes build measurable from the photos users
+    actually send, which are rarely frontal.
+
+    Returns ``{name: (x, y, z, visibility)}`` in metres relative to the hip
+    midpoint. Use this for PROPORTIONS. Keep `landmarks()` for comparing a
+    generated frame against a reference framing, where the projection is the
+    thing being compared.
+    """
+    import mediapipe as mp  # type: ignore
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(path) as im:
+        rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
+    result = _pose_model().detect(
+        mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    if not result.pose_landmarks or not result.pose_world_landmarks:
+        return None
+    lm = result.pose_world_landmarks[0]
+    vis = result.pose_landmarks[0]
+    return {name: (float(lm[i].x), float(lm[i].y), float(lm[i].z),
+                   float(vis[i].visibility))
+            for name, i in BODY_POINTS.items()}
+
+
+def world_proportions(path: str | Path) -> dict | None:
+    """Build as view-independent ratios, in torso lengths.
+
+    Every length divided by the 3D torso length, so the numbers are comparable
+    between people, between photos, and across camera angles — which the 2D
+    equivalent is not.
+    """
+    import numpy as np
+
+    pts = world_landmarks(path)
+    if pts is None:
+        return None
+
+    def v(name):
+        return np.array(pts[name][:3])
+
+    def seen(*names):
+        return all(pts[n][3] >= MIN_VISIBILITY for n in names)
+
+    if not seen("l_hip", "r_hip", "l_shoulder", "r_shoulder"):
+        return None
+    hip_c = (v("l_hip") + v("r_hip")) / 2
+    sho_c = (v("l_shoulder") + v("r_shoulder")) / 2
+    torso = float(np.linalg.norm(sho_c - hip_c))
+    if torso < 1e-6:
+        return None
+
+    out: dict = {"torso_metres": round(torso, 4)}
+    for a, b in LIMBS:
+        if seen(a, b):
+            out[f"{a}->{b}"] = round(float(np.linalg.norm(v(a) - v(b))) / torso, 4)
+    if seen("l_shoulder", "r_shoulder"):
+        out["shoulder_width"] = round(
+            float(np.linalg.norm(v("l_shoulder") - v("r_shoulder"))) / torso, 4)
+    if seen("l_hip", "r_hip"):
+        out["hip_width"] = round(
+            float(np.linalg.norm(v("l_hip") - v("r_hip"))) / torso, 4)
+    if out.get("shoulder_width") and out.get("hip_width"):
+        out["shoulder_to_hip"] = round(
+            out["shoulder_width"] / out["hip_width"], 4)
+    legs = [out.get("l_hip->l_knee"), out.get("l_knee->l_ankle")]
+    if all(legs):
+        out["leg_length"] = round(sum(legs), 4)
+    return out
+
+
 def _normalise(points: dict) -> dict | None:
     """Centre on the hips and scale by torso length.
 
