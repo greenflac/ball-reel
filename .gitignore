@@ -1,0 +1,10 @@
+# Live-run artifacts: generated media, never source. Regenerate with
+#   python3 -m ball_reel.doctor --video
+#   python3 -m ball_reel.produce --face <photo>
+doctor_out/
+produce_out/
+standin_out/
+*.mp4
+*.mp3
+__pycache__/
+*.pyc

@@ -1,0 +1,5 @@
+{
+  "start/energy_led": "fixtures/start/energy_led.png",
+  "start/product_led": "fixtures/start/product_led.png",
+  "start/routine_led": "fixtures/start/routine_led.png"
+}

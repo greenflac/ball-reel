@@ -1,0 +1,15 @@
+# Live path only. The offline demo needs just Pillow.
+# Identity (real ArcFace instead of the perceptual proxy):
+insightface
+onnxruntime          # or onnxruntime-gpu for throughput
+numpy
+
+# Start frame (face-identity adapter + optional LoRA):
+torch
+diffusers
+transformers
+accelerate
+
+# Video (image-to-video host) and voice (TTS + lipsync) call HTTP providers:
+requests
+# and ffmpeg on PATH for frame extraction from the returned mp4.
