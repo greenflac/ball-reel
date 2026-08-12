@@ -59,6 +59,14 @@ HOPELESS_FACTOR = 10.0
 #: мы не говорим «медленно» — мы говорим «судить рано».
 MIN_TAIL_SAMPLES = 20
 
+#: Полоса вокруг бюджета, внутри которой вердикт «влезает/не влезает» не
+#: заслуживает доверия. ±20% — не вкус, а наблюдение: `skeleton.draw` дал p95
+#: 9.90 мс в нашем профиле и 10.49 мс в независимом замере на той же машине,
+#: то есть два честных прогона легли по РАЗНЫЕ стороны черты. Метрика, которая
+#: меняет вердикт от прогона к прогону, обязана сказать «на границе», а не
+#: выдать тот ответ, который выпал сегодня. Шум виртуалки легко даёт эти 20%.
+BORDERLINE_BAND = 0.2
+
 #: Единицы, в которых этап тратит время. Строки, а не enum: они попадают
 #: в JSON-отчёт и читаются человеком.
 PER_RUN, PER_FRAME, PER_KEYFRAME = "run", "frame", "keyframe"
@@ -141,7 +149,8 @@ def _quantile(values: list, q: float):
 
 def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
                     hopeless_factor: float = HOPELESS_FACTOR,
-                    min_samples: int = MIN_TAIL_SAMPLES) -> dict:
+                    min_samples: int = MIN_TAIL_SAMPLES,
+                    borderline_band: float = BORDERLINE_BAND) -> dict:
     """Что из этого может работать НА ЗАПРОС, а что обязано быть посчитано ЗАРАНЕЕ.
 
     Судит по p95, а не по медиане: бюджет, который держится в половине случаев,
@@ -166,6 +175,9 @@ def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
     реального времени — категориальная ошибка.
     """
     online, optimise, precompute, unmeasured, thin = [], [], [], [], []
+    borderline = []
+    lo = budget_ms * (1 - borderline_band)
+    hi = budget_ms * (1 + borderline_band)
     for name, s in sorted(summary.items()):
         if s.get("per") == PER_RUN:
             continue
@@ -174,6 +186,8 @@ def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
             unmeasured.append(name)
         elif s.get("calls", 0) < min_samples:
             thin.append((name, p95, s.get("calls", 0)))
+        elif lo <= p95 <= hi:
+            borderline.append((name, p95))
         elif p95 <= budget_ms:
             online.append((name, p95))
         elif p95 <= budget_ms * hopeless_factor:
@@ -191,6 +205,11 @@ def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
     if precompute:
         parts.append("считать ЗАРАНЕЕ, настройками не спасти: " + ", ".join(
             f"{n} {v:g} ({v / budget_ms:.0f}x)" for n, v in precompute))
+    if borderline:
+        parts.append(
+            f"НА ГРАНИЦЕ (±{borderline_band:.0%} бюджета — вердикт меняется от "
+            f"прогона к прогону, мерить дольше или на тихой машине): "
+            + ", ".join(f"{n} {v:g}" for n, v in borderline))
     if thin:
         parts.append(
             f"СУДИТЬ РАНО (нужно {min_samples}+ замеров, иначе p95 держится на "
@@ -199,7 +218,8 @@ def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
     if unmeasured:
         parts.append("не измерено (был только холодный старт): "
                      + ", ".join(unmeasured))
-    if not (online or optimise or precompute or unmeasured or thin):
+    if not (online or optimise or precompute or unmeasured or thin
+            or borderline):
         parts.append("поштучных этапов не замерено — судить не о чем")
 
     return {
@@ -207,10 +227,143 @@ def latency_verdict(summary: dict, *, budget_ms: float = REALTIME_BUDGET_MS,
         "online": [n for n, _ in online],
         "optimise": [n for n, _ in optimise],
         "precompute": [n for n, _ in precompute],
+        "borderline": [n for n, _ in borderline],
         "thin": [n for n, _, _ in thin],
         "unmeasured": unmeasured,
         "note": ". ".join(parts) + ".",
     }
+
+
+#: Этапы, которые умеет прогнать `--profile`: (имя, что делает, на что тратит).
+#: Только офлайн-часть — она и есть та половина пайплайна, которая в принципе
+#: может жить в реальном времени. Генерация сюда не входит: она промахивается
+#: мимо любого интерактивного бюджета на три порядка, и мерить её нечем, кроме
+#: как самим прогоном.
+PROFILE_STAGES = ("landmarks", "dwpose", "arcface", "draw", "pose_delta")
+
+
+def profile(frames: list, *, stages=PROFILE_STAGES, repeats: int = 30,
+            clock=None):
+    """Прогнать офлайн-этапы на настоящих кадрах и вернуть Timings.
+
+    Кадры берутся РАЗНЫЕ на каждом повторе (циклически), а не один и тот же:
+    повторный вызов на одном файле меряет кэш декодера, а не работу этапа.
+    """
+    got = clock or Timings()
+    if not frames:
+        return got
+
+    def _frame(i):
+        return frames[i % len(frames)]
+
+    if "landmarks" in stages:
+        from .pose import landmarks
+
+        for i in range(repeats + 1):
+            with got.stage("landmarks", per=PER_FRAME):
+                landmarks(_frame(i))
+
+    if "dwpose" in stages:
+        from . import dwpose
+
+        if dwpose.available():
+            for i in range(repeats + 1):
+                with got.stage("dwpose", per=PER_FRAME):
+                    dwpose.pose_points(_frame(i))
+
+    if "arcface" in stages:
+        from .identity_arcface import face_detail
+
+        for i in range(repeats + 1):
+            with got.stage("arcface", per=PER_FRAME):
+                face_detail(_frame(i))
+
+    if "draw" in stages or "pose_delta" in stages:
+        import tempfile
+        from pathlib import Path
+
+        from .pose import landmarks, pose_delta
+        from .skeleton import draw, pose_points
+
+        # Точки снимаются ВНЕ таймера: иначе в замер отрисовки протечёт
+        # MediaPipe, который дороже её в три раза, и число будет про него.
+        pts = [p for p in (pose_points(_frame(i)) for i in range(8)) if p]
+        if pts and "draw" in stages:
+            with tempfile.TemporaryDirectory() as tmp:
+                for i in range(repeats + 1):
+                    with got.stage("draw", per=PER_FRAME):
+                        draw(pts[i % len(pts)], Path(tmp) / f"{i}.png")
+        if len(pts) >= 2 and "pose_delta" in stages:
+            poses = [landmarks(_frame(i)) for i in range(4)]
+            poses = [p for p in poses if p]
+            if len(poses) >= 2:
+                for i in range(repeats * 5 + 1):
+                    with got.stage("pose_delta", per=PER_FRAME):
+                        pose_delta(poses[i % len(poses)],
+                                   poses[(i + 1) % len(poses)])
+    return got
+
+
+def main(argv: list) -> int:
+    """python3 -m ball_reel.timing --frames kit/driving
+
+    Снимает профиль офлайн-этапов на СВОЁМ железе. Число без железа
+    бессмысленно, поэтому команда печатает и то, на чём мерила.
+    """
+    import argparse
+    import glob
+    import json
+    import platform
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(
+        prog="ball_reel.timing",
+        description="профиль латентности офлайн-этапов; ничего не генерирует")
+    ap.add_argument("--frames", default="kit/driving",
+                    help="каталог с настоящими кадрами")
+    ap.add_argument("--repeats", type=int, default=30)
+    ap.add_argument("--budget-ms", type=float, default=REALTIME_BUDGET_MS)
+    ap.add_argument("--stage", action="append", default=[],
+                    help="только этот этап; повторяемо. Запуск по одному "
+                         "этапу на процесс даёт ЧЕСТНЫЙ холодный старт — "
+                         "внутри одного процесса этапы прогревают друг другу "
+                         "общие библиотеки")
+    ap.add_argument("--json", default="", help="куда сложить профиль")
+    args = ap.parse_args(argv)
+
+    frames = sorted(glob.glob(str(Path(args.frames) / "*.jpg"))
+                    + glob.glob(str(Path(args.frames) / "*.png")))
+    if not frames:
+        print(f"в {args.frames} нет кадров — указать каталог с jpg/png")
+        return 1
+
+    import multiprocessing
+
+    print(f"железо: {platform.processor() or platform.machine()}, "
+          f"{multiprocessing.cpu_count()} ядер, {platform.system()} "
+          f"{platform.release()}, python {platform.python_version()}")
+    try:
+        import torch  # type: ignore
+
+        cuda = ("есть: " + torch.cuda.get_device_name(0)
+                if torch.cuda.is_available() else "НЕТ (всё ниже — CPU)")
+        print(f"torch: {torch.__version__}, cuda {cuda}")
+    except ImportError:
+        print("torch: не установлен (всё ниже — CPU)")
+    print(f"кадров {len(frames)}, повторов {args.repeats}\n")
+
+    got = profile(frames, stages=tuple(args.stage) or PROFILE_STAGES,
+                  repeats=args.repeats)
+    summary = got.summary()
+    print(render(summary))
+    verdict = latency_verdict(summary, budget_ms=args.budget_ms)
+    print(f"\n{verdict['note']}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(
+            {"timing": summary, "latency": verdict}, indent=2,
+            ensure_ascii=False))
+        print(f"\nпрофиль: {args.json}")
+    return 0
 
 
 def render(summary: dict) -> str:
@@ -225,3 +378,9 @@ def render(summary: dict) -> str:
         rows.append(f"  {name:<20} {s['per']:<9} {s['calls']:>5} "
                     f"{p50} {p95} {s['cold_ms']:8.1f}")
     return "\n".join(rows)
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

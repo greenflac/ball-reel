@@ -99,6 +99,8 @@ MUTATIONS = [
      "безнадёжный этап выдаётся за поправимый настройками"),
     ("ball_reel.timing", "MIN_TAIL_SAMPLES", 0,
      "p95 по трём замерам объявляется основанием для вердикта"),
+    ("ball_reel.timing", "BORDERLINE_BAND", 0.0,
+     "этап на самой черте бюджета получает вердикт, который меняется от прогона к прогону"),
 ]
 
 def _mutate_source(text: str, name: str, value) -> str:

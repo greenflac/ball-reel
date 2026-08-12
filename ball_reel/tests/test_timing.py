@@ -189,6 +189,54 @@ class ThinEvidenceIsRefusedNotGuessedAt(unittest.TestCase):
         self.assertEqual(self.t.latency_verdict(at)["online"], ["b"])
 
 
+class AVerdictThatFlipsBetweenRunsIsNotAVerdict(unittest.TestCase):
+    """Этап на самой черте бюджета обязан признаться, а не выбрать сторону."""
+
+    def setUp(self):
+        from ball_reel import timing
+
+        self.t = timing
+
+    def _at(self, ms):
+        got = self.t.Timings()
+        got.record("draw", 99.0, per=self.t.PER_FRAME)
+        for _ in range(40):
+            got.record("draw", ms)
+        return self.t.latency_verdict(got.summary())
+
+    def test_both_real_measurements_of_draw_land_in_the_same_bucket(self):
+        # Настоящий случай, ради которого корзина и появилась: skeleton.draw
+        # дал p95 9.90 в нашем профиле и 10.49 в независимом замере на той же
+        # машине. Два честных прогона — по разные стороны черты. Пока вердикт
+        # был бинарным, он бы отрапортовал «влезает» и «не влезает» на одних
+        # и тех же данных.
+        self.assertEqual(self._at(9.90)["borderline"], ["draw"])
+        self.assertEqual(self._at(10.49)["borderline"], ["draw"])
+        self.assertEqual(self._at(9.90)["online"], [])
+        self.assertEqual(self._at(10.49)["optimise"], [])
+
+    def test_clearly_fast_and_clearly_slow_still_get_a_verdict(self):
+        # Полоса не должна съесть решительность: то, что явно быстрее или
+        # явно медленнее, обязано получить ответ.
+        self.assertEqual(self._at(1.0)["online"], ["draw"])
+        self.assertEqual(self._at(50.0)["optimise"], ["draw"])
+        self.assertEqual(self._at(1.0)["borderline"], [])
+
+    def test_the_band_is_read_from_the_module_with_literal_inputs(self):
+        band = self.t.BORDERLINE_BAND
+        self.assertGreater(band, 0.0)
+        self.assertLess(band, 0.5)
+        edge = self.t.REALTIME_BUDGET_MS * (1 + band) * 0.99
+        self.assertEqual(self._at(edge)["borderline"], ["draw"])
+        clear = self.t.REALTIME_BUDGET_MS * (1 + band) * 1.5
+        self.assertEqual(self._at(clear)["borderline"], [])
+
+    def test_the_note_tells_the_operator_what_to_do_about_it(self):
+        note = self._at(10.0)["note"]
+        self.assertIn("НА ГРАНИЦЕ", note)
+        self.assertIn("мерить дольше", note)
+
+
 class PerRunWorkIsNotJudgedByARealtimeBudget(unittest.TestCase):
     """Этап, случающийся раз за прогон, не стоит латентности запроса."""
 
