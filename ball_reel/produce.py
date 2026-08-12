@@ -6,27 +6,35 @@ the face drifted into someone else or where nothing moved. It generates,
 CHECKS identity and motion, and RETRIES; if no attempt passes, it returns the
 best one clearly flagged as not-passing rather than pretending.
 
-Everything runs through ONE gateway — Pollinations (gen.pollinations.ai) — the
-same stack the vacancy names. No separate video host, no local GPU. The exact
-endpoints are pinned in POLLINATIONS_CONTRACT.md ([verified live] vs [confirm]):
+Everything generative runs through ONE gateway — Pollinations
+(gen.pollinations.ai). Every endpoint below is verified live; the response
+shapes, ranges and prices are pinned in POLLINATIONS_CONTRACT.md.
 
-  1. start frame -- Flux Kontext from the LOCAL face via /v1/images/edits
-     (multipart). The real face as a signal, not a prompt describing one; the
-     bytes go straight to the allowed host, no media upload for the still.
-     pollinations.images_edit(prompt, face_photo). [verified live]
-  2. reject early-- ArcFace drift on the start frame vs the photo. If it already
-     isn't this person, retry the still before spending a video call.
-  3. upload      -- the accepted start frame -> a media URL, because the video
-     endpoint references its input by URL. pollinations.upload(). [confirm live]
-  4. video       -- start frame URL -> jump motion, image-to-video on Seedance.
-     pollinations.video(model="seedance-2.0", image_url=start_url). [confirm live]
-  5. gate        -- ArcFace identity across the extracted frames + motion
-     presence. Pass -> done. Fail -> next attempt, new seed.
+  1. start frame -- from the LOCAL face. With only a face: Flux Kontext via
+     /v1/images/edits (multipart, no media host needed). With a body or pose
+     reference: a multi-reference model instead, because Kontext takes exactly
+     one reference and CANNOT accept them. See subject.py for why build has to
+     arrive as a picture and clothing does not.
+  2. reject early-- ArcFace on the still, and pose distance if a pose was
+     specified. Both here rather than after the video, because a bad still
+     costs one image call to redo and a video call costs ~18x that.
+  3. upload      -- the accepted still -> a public media URL, because the video
+     endpoint fetches its input server-side.
+  4. video       -- image-to-video. For a loop the still goes in as BOTH
+     keyframes, so the model must return the subject to where it began.
+  5. gate        -- on the extracted frames: ArcFace identity (median of the
+     judgeable frames), motion presence and continuity, limb-length stability,
+     loop seam, and pose wander. Pass -> done. Fail -> next attempt.
 
-The identity check (insightface/ArcFace) is real and local — the one thing that
-must not be outsourced to the thing being judged. Everything generative is a
-Pollinations HTTP call. Nothing here runs in THIS repo (no key/network); it is
-the real pipeline against the documented endpoints, to run on your bench.
+Every judge is LOCAL — ArcFace for the face, MediaPipe for the body, numpy for
+motion. That is the point: the thing being judged must not also be the judge.
+Everything generative is an HTTP call; nothing here needs a GPU.
+
+Thresholds are calibrated on live clips, not chosen, and the calibration is
+recorded next to each constant. Where a measurement cannot separate two
+explanations — a rewritten pose from ordinary motion, a different person from a
+face too small to read — it reports that instead of guessing, and the caller
+fails it rather than shipping it.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from .brief import DEMO_BRIEF, Brief
 from .gen import STRATEGIES, Strategy
 from .motion import (LOOP_MOTION, PHYSICAL_MOTION, loop_seam, motion_quality,
                      trim_to_loop)
+from .pose import POSE_WANDER_MAX, limb_consistency, pose_drift
 from .subject import UNSPECIFIED, Subject
 
 #: Frame-extraction rate for every gate. One constant because the loop trimmer
@@ -110,6 +119,10 @@ class Attempt:
     seamless: bool = False
     #: Largest frame-to-frame step over the median — a teleport/morph detector.
     worst_jump: float | None = None
+    #: Mean joint displacement from the pose reference, in torso lengths.
+    pose_distance: float | None = None
+    #: Worst limb-length variation across the clip (rubber-body detector).
+    limb_wobble: float | None = None
 
 
 @dataclass
@@ -223,6 +236,25 @@ def produce(
         start_check = arcface_drift([start], face_photo,
                                     min_face_px=START_MIN_FACE_PX)
         start_drift = start_check["median"]
+
+        # 2b. and if a pose was specified, did the still actually reproduce it?
+        #     Judged HERE and not on the video, because on a moving clip a
+        #     rewritten pose and ordinary motion score the same (both 0.05-0.30
+        #     in torso units) and cannot be told apart. On the still nothing has
+        #     moved yet, so the number means what it says.
+        if subject.pose_ref and start_drift is not None and start_drift <= bar:
+            from .pose import SAME_POSE_MAX, pose_drift
+
+            pose = pose_drift([start], subject.pose_ref,
+                              max_pose_distance=SAME_POSE_MAX)
+            if not pose["held"]:
+                tries.append(Attempt(
+                    n, strat.id, start, [], round(start_drift, 4), 0.0, False,
+                    f"start frame did not reproduce the reference pose: "
+                    f"{pose['note']} — retried before spending a video call",
+                    identity=_identity_summary(start_check),
+                    pose_distance=pose["median"]))
+                continue
         if start_drift is None or start_drift > bar:
             why = (f"start frame not the same person ({start_drift:.2f} > "
                    f"{bar:.2f})" if start_drift is not None
@@ -282,6 +314,13 @@ def produce(
         quality = motion_quality(frames)
         seam = loop_seam(frames)
         median = drift["median"]
+        # Anatomy across the clip: a real limb keeps its length, a hallucinated
+        # one stretches. Independent of identity — the face can be perfect while
+        # the body rubber-bands.
+        limbs = limb_consistency(frames)
+        wander = (pose_drift(frames, subject.pose_ref,
+                             max_pose_distance=POSE_WANDER_MAX)
+                  if subject.pose_ref else None)
         p90 = drift["p90"]
         coverage = drift["coverage"]
         if median is None or coverage < MIN_COVERAGE:
@@ -292,7 +331,9 @@ def produce(
             score = median
             passed = (median <= bar and p90 <= HARD_DRIFT_MAX
                       and motion >= min_motion and quality["smooth"]
-                      and (seam["seamless"] or not loop))
+                      and (seam["seamless"] or not loop)
+                      and limbs.get("anatomical", True)
+                      and (wander is None or wander["held"]))
             if passed:
                 reason = ""
             elif median > bar:
@@ -304,13 +345,19 @@ def produce(
                 reason = f"motion {motion:.3f} < {min_motion:.2f}"
             elif not quality["smooth"]:
                 reason = f"motion not physical: {quality['note']}"
+            elif not limbs.get("anatomical", True):
+                reason = f"not anatomical: {limbs['note']}"
+            elif wander is not None and not wander["held"]:
+                reason = f"pose wandered off the reference: {wander['note']}"
             else:
                 reason = f"does not loop: {seam['note']}"
         att = Attempt(n, strat.id, start, frames, round(score, 4),
                       round(motion, 4), passed, reason, clip_path=mp4,
                       identity=_identity_summary(drift),
                       loop_ratio=seam["ratio"], seamless=bool(seam["seamless"]),
-                      worst_jump=quality["worst_jump"])
+                      worst_jump=quality["worst_jump"],
+                      pose_distance=(wander or {}).get("median"),
+                      limb_wobble=(limbs.get("worst") or (None, None))[1])
         tries.append(att)
         if best is None or att.worst_identity_drift < best.worst_identity_drift:
             best = att
