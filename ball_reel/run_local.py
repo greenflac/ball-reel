@@ -92,6 +92,10 @@ def main(argv: list) -> int:
     # предполёта, дыма и всех кейфреймов. Опечатка в имени стоила бы всего
     # прогона ради ValueError, который виден отсюда.
     from .chain import END_FRAME_POLLEN, segment_seconds_ok
+    from .timing import (PER_FRAME, PER_KEYFRAME, PER_RUN, Timings,
+                         latency_verdict, render as render_timings)
+
+    clock = Timings()
 
     if args.video_model not in END_FRAME_POLLEN:
         _say("модель видео", False,
@@ -191,12 +195,18 @@ def main(argv: list) -> int:
              if cfg.realism_lora else "нет (база для сравнения)"))
 
     def measure(keyframe: str, condition: str) -> tuple:
-        ident = arcface_drift([keyframe], args.face,
-                              min_face_px=START_MIN_FACE_PX)["median"]
+        # Каждый измеритель тактируется отдельно: они и есть те этапы, которые
+        # в продукте с низкой латентностью пришлось бы держать в бюджете, —
+        # генерация туда не влезет никогда, а проверка может.
+        with clock.stage("arcface", per=PER_FRAME):
+            ident = arcface_drift([keyframe], args.face,
+                                  min_face_px=START_MIN_FACE_PX)["median"]
         driving = driving_of.get(Path(condition).stem)
-        a = landmarks(driving) if driving else None
-        b = landmarks(keyframe)
-        delta = pose_delta(a, b) if (a and b) else None
+        with clock.stage("landmarks", per=PER_FRAME):
+            a = landmarks(driving) if driving else None
+            b = landmarks(keyframe)
+        with clock.stage("pose_delta", per=PER_FRAME):
+            delta = pose_delta(a, b) if (a and b) else None
         return ident, delta
 
     # 2 ------------------------------------------------------------------- дым
@@ -218,10 +228,12 @@ def main(argv: list) -> int:
     # прогон — два вызова render_keyframes, и загрузка весов заново означала бы
     # вторую полную загрузку UNet + ControlNet + адаптера и второй пик памяти
     # сразу после первого. На 4 ГБ с offload это и минуты, и риск.
-    pipe = load_pipeline(cfg)
-    smoke = render_keyframes(nodes[:1], args.face, prompt,
-                             out / "smoke", cfg=cfg, negative=args.negative,
-                             pipe=pipe)
+    with clock.stage("load_pipeline", per=PER_RUN):
+        pipe = load_pipeline(cfg)
+    with clock.stage("keyframe", per=PER_KEYFRAME):
+        smoke = render_keyframes(nodes[:1], args.face, prompt,
+                                 out / "smoke", cfg=cfg,
+                                 negative=args.negative, pipe=pipe)
     if not smoke.get("keyframes"):
         return _stop("кейфрейм не отрисовался — смотреть ошибку выше")
     ident, delta = measure(smoke["keyframes"][0], nodes[0])
@@ -254,8 +266,9 @@ def main(argv: list) -> int:
 
     # 3 ------------------------------------------------------- все кейфреймы
     print(f"\n--- кейфреймы: {len(nodes)} ---")
-    made = render_keyframes(nodes, args.face, prompt, out / "kf",
-                            cfg=cfg, negative=args.negative, pipe=pipe)
+    with clock.stage("keyframes_all", per=PER_RUN):
+        made = render_keyframes(nodes, args.face, prompt, out / "kf",
+                                cfg=cfg, negative=args.negative, pipe=pipe)
     keyframes = made.get("keyframes") or []
     if len(keyframes) < 2:
         return _stop(f"отрисовано {len(keyframes)} кейфрейм(ов) — цепочку не из "
@@ -309,7 +322,8 @@ def main(argv: list) -> int:
     from .motion import loop_seam, motion_quality
     from .pose import limb_consistency
 
-    frames = pollinations.extract_frames(res.clip_path, out / "frames", fps=6)
+    with clock.stage("extract_frames", per=PER_RUN):
+        frames = pollinations.extract_frames(res.clip_path, out / "frames", fps=6)
     drift = arcface_drift(frames, args.face)
     seam, quality = loop_seam(frames), motion_quality(frames)
     limbs = limb_consistency(frames)
@@ -321,7 +335,14 @@ def main(argv: list) -> int:
                             ("одежда", gclip["note"], bool(gclip["stable"]))):
         _say(label, ok, data[:96])
 
-    report = {"lora": cfg.realism_lora or None,
+    profile = clock.summary()
+    latency = latency_verdict(profile)
+    print("\n--- тайминги ---")
+    print(render_timings(profile))
+    print(f"\n  {latency['note']}")
+
+    report = {"timing": profile, "latency": latency,
+              "lora": cfg.realism_lora or None,
               "lora_scale": cfg.realism_lora_scale if cfg.realism_lora else None,
               "seed": 0,
               "clip": res.clip_path, "keyframes": len(keyframes),

@@ -93,6 +93,12 @@ MUTATIONS = [
      "предполёт пропускает карту, на которой генерация не поедет"),
     ("ball_reel.router", "API_CANNOT", (),
      "траектория маршрутизируется на шлюз, который её не умеет"),
+    ("ball_reel.timing", "REALTIME_BUDGET_MS", 1e9,
+     "бюджет латентности снят — всё объявляется уложившимся в реальное время"),
+    ("ball_reel.timing", "HOPELESS_FACTOR", 1e9,
+     "безнадёжный этап выдаётся за поправимый настройками"),
+    ("ball_reel.timing", "MIN_TAIL_SAMPLES", 0,
+     "p95 по трём замерам объявляется основанием для вердикта"),
 ]
 
 def _mutate_source(text: str, name: str, value) -> str:
