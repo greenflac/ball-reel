@@ -32,3 +32,9 @@ mutants/
 cond_*/
 chain_out/
 kf*/
+newref/
+ref_frames/
+conditions/
+ref_spec.json
+face.jpg
+payload.tar.gz

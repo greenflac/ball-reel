@@ -272,6 +272,7 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     made, missing = [], []
+    drawn_joints = []
     for i, f in enumerate(frames):
         pts = pose_points(f)
         if pts is None:
@@ -279,15 +280,32 @@ def render_sequence(frames: list, out_dir: str | Path, *,
             continue
         if proportions:
             pts = retarget(pts, proportions)
+        # Сколько суставов реально попало в условие. Кадр со скелетом ещё не
+        # означает скелет ЦЕЛИКОМ: невидимый локоть выбрасывает вместе с собой
+        # предплечье, и в этом кадре рука ничем не ограничена. Поймано глазами
+        # на живом референсе, где `coverage` показывал 1.0, а у фигуры не было
+        # одной руки. Кадр — единица слишком крупная, чтобы это заметить.
+        drawn_joints.append(sum(1 for n in COCO18
+                                if pts.get(n) and pts[n][2] >= 0.5))
         made.append(draw(pts, out_dir / f"{i:04d}.png",
                          width=width, height=height))
     coverage = round(len(made) / len(frames), 3) if frames else 0.0
+    joint_cover = (round(sum(drawn_joints) / (len(drawn_joints) * len(COCO18)), 3)
+                   if drawn_joints else 0.0)
+    partial = sum(1 for n in drawn_joints if n < len(COCO18) - 2)
     manifest = {
         "conditions": made, "missing_frames": missing, "coverage": coverage,
+        "joint_coverage": joint_cover, "partial_frames": partial,
         "size": [width, height], "retargeted": bool(proportions),
         "source": "mediapipe" if from_mediapipe else "dwpose",
         "warnings": [],
     }
+    if partial:
+        manifest["warnings"].append(
+            f"{partial} of {len(made)} condition(s) are missing more than two "
+            f"joints ({joint_cover:.0%} of joints drawn overall): those limbs "
+            f"are unconstrained in those frames, and the generator will invent "
+            f"them.")
     if from_mediapipe:
         manifest["warnings"].append(
             "conditions were rendered from MediaPipe, which is also the "

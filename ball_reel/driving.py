@@ -171,8 +171,29 @@ def _blendshapes(path: str | Path, model_path: str | Path) -> dict | None:
                 base_options=BaseOptions(model_asset_path=str(model_path)),
                 running_mode=vision.RunningMode.IMAGE,
                 output_face_blendshapes=True))
+    from .identity_arcface import face_detail
+
     with Image.open(path) as im:
-        rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
+        im = im.convert("RGB")
+        # Кроп вокруг лица перед mesh — та же поправка, что уже сделана в
+        # metrics.face_metrics, и по той же причине: mesh смотрит на весь кадр
+        # и не находит лицо, когда оно мелкая деталь. На фитнес-референсе
+        # 720x1278 это давало покрытие мимики 0% при отлично видимом лице,
+        # то есть спека честно сообщала "мимика не задана" там, где она была.
+        det = face_detail(path)
+        if det and det.get("bbox"):
+            x0, y0, x1, y1 = det["bbox"]
+            pad = 0.6 * max(x1 - x0, y1 - y0)
+            crop = im.crop((max(0, int(x0 - pad)), max(0, int(y0 - pad)),
+                            min(im.width, int(x1 + pad)),
+                            min(im.height, int(y1 + pad))))
+            if crop.width >= 16 and crop.height >= 16:
+                if crop.width < 512:
+                    f = 512 / crop.width
+                    crop = crop.resize((512, max(16, int(crop.height * f))),
+                                       Image.BICUBIC)
+                im = crop
+        rgb = np.asarray(im, dtype=np.uint8)
     r = _FACE.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
     if not r.face_blendshapes:
         return None
