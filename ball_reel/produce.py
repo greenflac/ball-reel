@@ -123,6 +123,11 @@ class Attempt:
     pose_distance: float | None = None
     #: Worst limb-length variation across the clip (rubber-body detector).
     limb_wobble: float | None = None
+    #: Имя ПЕРВОЙ несработавшей проверки (см. CHECK_ORDER), None если прошла.
+    #: Отдельно от `reason` намеренно: по имени строится статистика «что
+    #: ломается первым», а текст причины меняется при первой же правке
+    #: формулировки, и статистика по нему разъезжается молча.
+    check: str | None = None
 
 
 @dataclass
@@ -323,17 +328,19 @@ def produce(
                   if subject.pose_ref else None)
         p90 = drift["p90"]
         coverage = drift["coverage"]
-        passed, score, reason = verdict(
+        v = verdict_detail(
             drift=drift, motion=motion, quality=quality, seam=seam,
             limbs=limbs, wander=wander, bar=bar, min_motion=min_motion,
             loop=loop)
+        passed, score, reason = v["passed"], v["score"], v["reason"]
         att = Attempt(n, strat.id, start, frames, round(score, 4),
                       round(motion, 4), passed, reason, clip_path=mp4,
                       identity=_identity_summary(drift),
                       loop_ratio=seam["ratio"], seamless=bool(seam["seamless"]),
                       worst_jump=quality["worst_jump"],
                       pose_distance=(wander or {}).get("median"),
-                      limb_wobble=(limbs.get("worst") or (None, None))[1])
+                      limb_wobble=(limbs.get("worst") or (None, None))[1],
+                      check=v["check"])
         tries.append(att)
         if best is None or att.worst_identity_drift < best.worst_identity_drift:
             best = att
@@ -355,10 +362,42 @@ def produce(
     return res
 
 
-def verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
-            limbs: dict, wander: dict | None, bar: float, min_motion: float,
-            loop: bool, garment: dict | None = None) -> tuple:
-    """Свести измерения в один вердикт: (прошло, оценка, причина).
+#: Проверки гейта в том порядке, в котором они применяются. Порядок — часть
+#: смысла: сначала то, что делает вердикт невозможным, потом идентичность,
+#: потом движение, анатомия, поза, одежда, луп. Имена стабильны, потому что по
+#: ним строится статистика «что ломается первым» — а такая статистика бесполезна,
+#: если категории переименовываются вместе с формулировкой сообщения.
+CHECK_ORDER = ("not_verifiable", "identity_median", "identity_p90",
+               "motion_amount", "motion_physical", "anatomy", "pose_wander",
+               "garment", "loop")
+
+
+def verdict(**kw) -> tuple:
+    """Совместимое представление: (прошло, оценка, причина).
+
+    Тонкая обёртка над `_verdict`. Существует, чтобы имя несработавшей проверки
+    можно было добавить, не ломая всех, кто распаковывает тройку.
+    """
+    passed, score, reason, _ = _verdict(**kw)
+    return passed, score, reason
+
+
+def verdict_detail(**kw) -> dict:
+    """То же самое плюс ИМЯ первой несработавшей проверки.
+
+    Нужно стенду: гистограмма «что ломается первым» строится по именам, а не по
+    тексту сообщения. Текст меняется при первой же правке формулировки, и
+    статистика, собранная по нему, разъезжается молча.
+    """
+    passed, score, reason, check = _verdict(**kw)
+    return {"passed": passed, "score": score, "reason": reason,
+            "check": check}
+
+
+def _verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
+             limbs: dict, wander: dict | None, bar: float, min_motion: float,
+             loop: bool, garment: dict | None = None) -> tuple:
+    """Свести измерения в один вердикт: (прошло, оценка, причина, проверка).
 
     Вынесено из `produce` отдельной чистой функцией не ради красоты. Пока эта
     логика жила внутри цикла генерации, проверить её можно было только платным
@@ -378,31 +417,31 @@ def verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
     if median is None or coverage < MIN_COVERAGE:
         return False, 1.0, (
             f"identity not verifiable: only {coverage:.0%} of frames had a "
-            f"face big enough to identify — {drift.get('note', '')}")
+            f"face big enough to identify — {drift.get('note', '')}"), "not_verifiable"
 
     checks = (
-        (median <= bar,
+        ("identity_median", median <= bar,
          lambda: f"identity drift (median) {median:.2f} > {bar:.2f}"),
-        (p90 is not None and p90 <= HARD_DRIFT_MAX,
+        ("identity_p90", p90 is not None and p90 <= HARD_DRIFT_MAX,
          lambda: f"identity unstable: p90 {p90:.2f} > {HARD_DRIFT_MAX:.2f} "
                  f"(drifts inside the clip)"),
-        (motion >= min_motion,
+        ("motion_amount", motion >= min_motion,
          lambda: f"motion {motion:.3f} < {min_motion:.2f}"),
-        (quality.get("smooth", True),
+        ("motion_physical", quality.get("smooth", True),
          lambda: f"motion not physical: {quality.get('note', '')}"),
-        (limbs.get("anatomical", True),
+        ("anatomy", limbs.get("anatomical", True),
          lambda: f"not anatomical: {limbs.get('note', '')}"),
-        (wander is None or wander.get("held"),
+        ("pose_wander", wander is None or wander.get("held"),
          lambda: f"pose wandered off the reference: {wander.get('note', '')}"),
-        (garment is None or garment.get("stable"),
+        ("garment", garment is None or garment.get("stable"),
          lambda: f"garment drifts between keyframes: {garment.get('note', '')}"),
-        (seam.get("seamless") or not loop,
+        ("loop", seam.get("seamless") or not loop,
          lambda: f"does not loop: {seam.get('note', '')}"),
     )
-    for ok, why in checks:
+    for name, ok, why in checks:
         if not ok:
-            return False, median, why()
-    return True, median, ""
+            return False, median, why(), name
+    return True, median, "", None
 
 
 def _short(e: Exception, limit: int = 240) -> str:

@@ -1,0 +1,252 @@
+"""Стенд: прогнать пайплайн N раз и сказать, что и как часто ломается.
+
+    python3 -m ball_reel.bench --face face.jpg --sessions 15 --attempts 2
+
+Отвечает на три вопроса, которые задаёт нанимающий, и ни на один больше:
+
+  1. сколько попыток гейт бракует и сколько сессий доходит до годного клипа;
+  2. ЧТО ломается первым — распределение по проверкам;
+  3. сколько pollen стоит один ПРИНЯТЫЙ клип (а не один вызов).
+
+Три решения, которые здесь зафиксированы.
+
+**Пишем построчно, а не в конце.** Каждая сессия ложится в JSONL сразу, как
+закончилась. Стенд живёт на чужом API, у которого кончаются деньги, случаются
+таймауты и 400-е; прогон, теряющий всё собранное при падении на четырнадцатой
+сессии из пятнадцати, — это не стенд, а лотерея. Заодно это делает наблюдаемым
+само поведение при отказе API, что для продукта на внешнем шлюзе часть
+контракта, а не досадная мелочь.
+
+**Считаем ШТУКИ, а не проценты.** «Годность 67%» на трёх сессиях — это 2 из 3,
+и доверительный интервал там от 20% до 95%. Процент подразумевает точность,
+которой нет. Поэтому наружу идут счётчики, а процент — только вместе с
+интервалом Уилсона, чтобы читатель видел, насколько числу можно верить.
+
+**Отделяем брак ПОПЫТОК от выхода СЕССИЙ.** Это два разных вопроса: первый про
+качество генератора, второй про качество продукта, который умеет повторить.
+Смешать их — значит либо польстить себе ретраями, либо занизить результат,
+выбросив то, ради чего ретраи и написаны.
+
+Ничего не чинит и не переспрашивает. Тратит деньги — ровно на то, что напечатал
+перед стартом.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+from pathlib import Path
+
+#: Сколько независимых сессий по умолчанию. Не «побольше»: при 15 сессиях
+#: интервал Уилсона для доли ещё широк, и стенд об этом честно скажет, но
+#: распределение «что ломается первым» уже читается.
+DEFAULT_SESSIONS = 15
+#: Попыток внутри сессии. Это и есть ретраи боевого пути.
+DEFAULT_ATTEMPTS = 2
+
+#: Цена, pollen за единицу. Снято с /image/models и /video/models
+#: [проверено live 2026-08-13]. Держится здесь, чтобы стенд печатал смету ДО
+#: траты, а не выяснял стоимость по факту.
+POLLEN = {"kontext": 0.04, "flux": 0.002, "nanobanana": 0.00003,
+          "wan-fast": 0.01, "veo": 0.08, "wan-pro": 0.1, "seedance-2.0": 0.18}
+
+
+def estimate(sessions: int, attempts: int, seconds: int,
+             start_model: str, video_model: str) -> float:
+    """Смета до старта. Верхняя граница: считает, что все ретраи израсходуются."""
+    per_attempt = POLLEN.get(start_model, 0.0) + POLLEN.get(video_model, 0.0) * seconds
+    return round(per_attempt * attempts * sessions, 3)
+
+
+def wilson(successes: int, total: int, z: float = 1.96) -> tuple:
+    """Интервал Уилсона для доли. Возвращает (низ, верх) в долях единицы.
+
+    Обычная формула `p ± z*sqrt(p(1-p)/n)` на малых выборках врёт особенно
+    грубо: при 3 успехах из 3 она даёт интервал нулевой ширины, то есть
+    «уверены на 100%» по трём наблюдениям. Уилсон на краях ведёт себя разумно,
+    и именно он нужен, когда сессий пятнадцать, а не пятнадцать тысяч.
+    """
+    if total <= 0:
+        return 0.0, 1.0
+    p = successes / total
+    d = 1 + z * z / total
+    centre = (p + z * z / (2 * total)) / d
+    half = z * ((p * (1 - p) / total + z * z / (4 * total * total)) ** 0.5) / d
+    return round(max(0.0, centre - half), 3), round(min(1.0, centre + half), 3)
+
+
+def summarise(records: list) -> dict:
+    """Свести сессии в числа, которые читает нанимающий."""
+    sessions = [r for r in records if r.get("kind") == "session"]
+    attempts = [a for r in sessions for a in r.get("attempts", [])]
+    crashed = [r for r in records if r.get("kind") == "crash"]
+
+    passed_sessions = [r for r in sessions if r.get("passed")]
+    passed_attempts = [a for a in attempts if a.get("passed")]
+
+    first_fail: dict = {}
+    for a in attempts:
+        if a.get("passed"):
+            continue
+        first_fail[a.get("check") or "error"] = \
+            first_fail.get(a.get("check") or "error", 0) + 1
+
+    spent = round(sum(r.get("pollen", 0.0) for r in sessions), 4)
+    per_accepted = (round(spent / len(passed_sessions), 4)
+                    if passed_sessions else None)
+    durations = sorted(r["seconds"] for r in sessions if r.get("seconds"))
+
+    return {
+        "sessions": len(sessions),
+        "sessions_passed": len(passed_sessions),
+        "sessions_ci": wilson(len(passed_sessions), len(sessions)),
+        "attempts": len(attempts),
+        "attempts_passed": len(passed_attempts),
+        "attempts_ci": wilson(len(passed_attempts), len(attempts)),
+        "first_failing_check": dict(sorted(first_fail.items(),
+                                           key=lambda kv: -kv[1])),
+        "pollen_spent": spent,
+        "pollen_per_accepted_clip": per_accepted,
+        "seconds_median": (durations[len(durations) // 2] if durations
+                           else None),
+        "crashes": len(crashed),
+    }
+
+
+def render(s: dict) -> str:
+    """Профиль стенда таблицей. Ведём со штук, процент — только с интервалом."""
+    if not s.get("sessions"):
+        return "сессий не было — судить не о чем"
+    lo, hi = s["sessions_ci"]
+    alo, ahi = s["attempts_ci"]
+    lines = [
+        f"  сессий:   {s['sessions_passed']}/{s['sessions']} прошло  "
+        f"(доля {s['sessions_passed'] / s['sessions']:.0%}, "
+        f"но истинная лежит между {lo:.0%} и {hi:.0%} — выборка мала)",
+        f"  попыток:  {s['attempts_passed']}/{s['attempts']} прошло  "
+        f"(доля {s['attempts_passed'] / s['attempts']:.0%}, "
+        f"интервал {alo:.0%}..{ahi:.0%})" if s["attempts"] else "",
+        f"  потрачено: {s['pollen_spent']} pollen; на ПРИНЯТЫЙ клип "
+        + (f"{s['pollen_per_accepted_clip']}" if s["pollen_per_accepted_clip"]
+           else "— (принятых нет, делить не на что)"),
+        f"  медиана сессии: {s['seconds_median']} c",
+    ]
+    if s["crashes"]:
+        lines.append(f"  сессий оборвалось на ошибке: {s['crashes']}")
+    if s["first_failing_check"]:
+        lines.append("  что ломается ПЕРВЫМ:")
+        for name, n in s["first_failing_check"].items():
+            lines.append(f"      {name:<18} {n}")
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _session(face: str, n: int, out_dir: Path, *, attempts: int,
+             start_model: str, video_model: str, brief=None,
+             subject=None) -> dict:
+    """Одна независимая сессия боевого пути. Возвращает запись для журнала."""
+    from . import pollinations
+    from .produce import produce
+
+    started = time.perf_counter()
+    rec: dict = {"kind": "session", "n": n, "face": face}
+    try:
+        kwargs = {"attempts": attempts, "start_model": start_model,
+                  "video_model": video_model,
+                  "out_dir": str(out_dir / f"s{n:02d}")}
+        if brief is not None:
+            kwargs["brief"] = brief
+        if subject is not None:
+            kwargs["subject"] = subject
+        res = produce(face, **kwargs)
+        rec.update({
+            "passed": bool(res.passed),
+            "note": res.note,
+            "clip": res.clip_path,
+            "attempts": [{
+                "n": a.n, "passed": bool(a.passed), "reason": a.reason,
+                "check": getattr(a, "check", None),
+                "identity": a.worst_identity_drift, "motion": a.motion,
+                "loop_ratio": a.loop_ratio, "worst_jump": a.worst_jump,
+                "pose_distance": a.pose_distance,
+            } for a in res.attempts],
+        })
+    except Exception as e:  # noqa: BLE001 — стенд обязан пережить отказ API
+        rec.update({"kind": "crash", "passed": False,
+                    "error": f"{type(e).__name__}: {e}"[:400], "attempts": []})
+    rec["seconds"] = round(time.perf_counter() - started, 1)
+    usage = getattr(pollinations, "LAST_VIDEO_USAGE", None) or {}
+    rec["usage"] = usage
+    return rec
+
+
+def main(argv: list) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="ball_reel.bench",
+        description="N живых сессий -> yield, распределение отказов, цена")
+    ap.add_argument("--face", required=True)
+    ap.add_argument("--sessions", type=int, default=DEFAULT_SESSIONS)
+    ap.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
+    ap.add_argument("--start-model", default="kontext")
+    ap.add_argument("--video-model", default="wan-fast")
+    ap.add_argument("--seconds", type=int, default=4)
+    ap.add_argument("--out", default="bench_out")
+    ap.add_argument("--budget", type=float, default=None,
+                    help="потолок в pollen; стенд остановится, не превысив его")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="только смета, ничего не тратить")
+    args = ap.parse_args(argv)
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    journal = out / "sessions.jsonl"
+
+    plan = estimate(args.sessions, args.attempts, args.seconds,
+                    args.start_model, args.video_model)
+    print(f"смета (верхняя граница, все ретраи израсходованы): {plan} pollen")
+    print(f"  {args.sessions} сессий x {args.attempts} попыток; "
+          f"старт {args.start_model} {POLLEN.get(args.start_model)} + "
+          f"видео {args.video_model} {POLLEN.get(args.video_model)}/с "
+          f"x {args.seconds} c")
+    if args.budget is not None and plan > args.budget:
+        print(f"смета выше потолка {args.budget} — уменьшить --sessions "
+              f"или взять модель дешевле")
+        return 1
+    if args.dry_run:
+        print("--dry-run: ничего не потрачено")
+        return 0
+
+    print(f"журнал пишется построчно в {journal} — падение API не унесёт "
+          f"собранное\n")
+    records = []
+    for n in range(1, args.sessions + 1):
+        rec = _session(args.face, n, out, attempts=args.attempts,
+                       start_model=args.start_model,
+                       video_model=args.video_model)
+        # Цену считаем по факту вызовов этой сессии, а не по смете.
+        rec["pollen"] = estimate(1, len(rec.get("attempts") or [1]),
+                                 args.seconds, args.start_model,
+                                 args.video_model)
+        records.append(rec)
+        with journal.open("a") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        mark = "OK  " if rec.get("passed") else "FAIL"
+        why = (rec.get("error") or
+               (rec.get("attempts") or [{}])[-1].get("check") or
+               rec.get("note", ""))
+        print(f"  {mark} сессия {n:>2}/{args.sessions}  {rec['seconds']:>5.1f} c  "
+              f"{str(why)[:80]}")
+
+    s = summarise(records)
+    (out / "summary.json").write_text(
+        json.dumps(s, indent=2, ensure_ascii=False))
+    print("\n--- итог ---")
+    print(render(s))
+    print(f"\nжурнал: {journal}\nсводка: {out / 'summary.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
