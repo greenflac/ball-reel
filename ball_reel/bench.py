@@ -49,6 +49,7 @@ DEFAULT_ATTEMPTS = 2
 #: [проверено live 2026-08-13]. Держится здесь, чтобы стенд печатал смету ДО
 #: траты, а не выяснял стоимость по факту.
 POLLEN = {"kontext": 0.04, "flux": 0.002, "nanobanana": 0.00003,
+          "seedream5": 0.035, "seedream5-pro": 0.09,
           "wan-fast": 0.01, "veo": 0.08, "wan-pro": 0.1, "seedance-2.0": 0.18}
 
 
