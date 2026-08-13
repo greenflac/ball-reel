@@ -775,3 +775,74 @@ class TheRealPoseProducerMustNotFailSILENTLY(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 call()
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class ThePasteRespectsCLOTHING(unittest.TestCase):
+    """Капсула держит вклейку на конечности; ткань она отличить не умеет.
+
+    Это разные задачи, и вторую геометрия не решает в принципе: рука в рукаве
+    остаётся рукой той же формы. Найдено визуальным аудитом — крест лёг поверх
+    лямки топа, а метрика отрапортовала честные 74% сохранившегося контраста.
+    Число было правдой, картинка нет.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+        self.mark = marks.Mark(bone="l_forearm", along=0.5, radius=0.15,
+                               name="tattoo")
+
+    def _mask(self, size=200, skin=True):
+        import numpy as np
+
+        return np.full((size, size), skin, dtype=bool)
+
+    def test_a_sleeved_limb_is_refused_and_the_frame_is_untouched(self):
+        import numpy as np
+
+        target = _skin()
+        out, rep = self.m.transfer(_with_patch(), _points(), target, _points(),
+                                   self.mark, skin_mask=self._mask(skin=False))
+        self.assertFalse(rep["applied"])
+        self.assertEqual(rep["skin_share"], 0.0)
+        self.assertIn("ОТМЕНЕНА", rep["note"])
+        self.assertTrue(np.allclose(out, target))
+
+    def test_bare_skin_still_gets_the_mark(self):
+        # Обратная сторона: починка, которая просто запрещает рисовать, — это
+        # регресс, а не фикс.
+        out, rep = self.m.transfer(_with_patch(), _points(), _skin(), _points(),
+                                   self.mark, skin_mask=self._mask(skin=True))
+        self.assertTrue(rep["applied"], rep["note"])
+        self.assertEqual(rep["skin_share"], 1.0)
+        got = self.m.distinctiveness(out, self.m.locate(_points(), self.mark))
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+
+    def test_the_paste_stops_at_the_sleeve_EDGE_not_at_the_window_edge(self):
+        # Половина руки одета. Примета обязана лечь только на голую половину,
+        # а не размазаться по всему окну и не отмениться целиком.
+        import numpy as np
+
+        mask = self._mask(skin=False)
+        mask[:100, :] = True                      # голая только верхняя половина
+        target = _skin()
+        out, rep = self.m.transfer(_with_patch(), _points(), target, _points(),
+                                   self.mark, skin_mask=mask)
+        self.assertTrue(rep["applied"], rep["note"])
+        x0, y0, x1, y1 = self.m.locate(_points(), self.mark)
+        cx = (x0 + x1) // 2
+        changed_bare = float(np.abs(out[y0 + 2, cx] - target[y0 + 2, cx]).sum())
+        changed_dressed = float(np.abs(out[y1 - 2, cx] - target[y1 - 2, cx]).sum())
+        self.assertGreater(changed_bare, 0.05)
+        self.assertLess(changed_dressed, 0.01)
+
+    def test_WITHOUT_a_mask_the_report_says_clothing_was_not_checked(self):
+        # Отсутствие маски — отсутствие сведений. Отчёт, молчащий об этом,
+        # выглядит как отчёт о проверке.
+        _, rep = self.m.transfer(_with_patch(), _points(), _skin(), _points(),
+                                 self.mark)
+        self.assertTrue(rep["applied"])
+        self.assertIn("Одежда НЕ ПРОВЕРЕНА", rep["note"])
+        self.assertNotIn("skin_share", rep)

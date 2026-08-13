@@ -225,7 +225,7 @@ class ConditionsExplainThemselves(unittest.TestCase):
         from ball_reel.skeleton import render_sequence
 
         frames = ["drive/a.png", "drive/b.png", "drive/c.png"]
-        render_sequence(frames, self.out, from_mediapipe=False,
+        render_sequence(frames, self.out,
                         source=self._fake_points)
         saved = json.loads((self.out / "manifest.json").read_text())
         # Ключ — основа имени условия, значение — исходный кадр. Без этой карты
@@ -244,7 +244,7 @@ class ConditionsExplainThemselves(unittest.TestCase):
             return None if path.endswith("b.png") else self._fake_points(path)
 
         render_sequence(["drive/a.png", "drive/b.png", "drive/c.png"],
-                        self.out, from_mediapipe=False, source=sometimes)
+                        self.out, source=sometimes)
         saved = json.loads((self.out / "manifest.json").read_text())
         self.assertEqual(sorted(saved["driving_frames"]), ["0000", "0002"])
         self.assertEqual(saved["missing_frames"], [1])

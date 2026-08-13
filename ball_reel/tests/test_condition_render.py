@@ -198,31 +198,72 @@ class ADrawingNeverInventsAJoint(unittest.TestCase):
 
         skeleton.pose_points = flaky
         self.addCleanup(setattr, skeleton, "pose_points", real)
-        m = self.s.render_sequence(["a", "b", "c"], self.dir / "seq")
+        # Экстрактор задан явно: с умолчанием этот тест зависел бы от того,
+        # лежат ли на машине веса DWPose, и «пропуск кадра» подменялся бы
+        # «нет весов» — два разных отказа под одним красным тестом.
+        m = self.s.render_sequence(["a", "b", "c"], self.dir / "seq",
+                                   source=flaky)
         self.assertEqual(m["missing_frames"], [1])
         self.assertAlmostEqual(m["coverage"], 2 / 3, places=3)
         self.assertTrue(any("unconstrained" in w for w in m["warnings"]))
 
     def test_an_unretargeted_sequence_says_whose_body_it_carries(self):
-        from ball_reel import skeleton
-
-        real = skeleton.pose_points
-        skeleton.pose_points = lambda _p: _points()
-        self.addCleanup(setattr, skeleton, "pose_points", real)
-        m = self.s.render_sequence(["a"], self.dir / "seq2")
+        m = self.s.render_sequence(["a"], self.dir / "seq2",
+                                   source=lambda _p: _points())
         self.assertTrue(any("DRIVING person's proportions" in w
                             for w in m["warnings"]))
 
-    def test_conditioning_from_the_verifier_is_declared(self):
-        # Using MediaPipe for both conditioning and verification weakens the
-        # gate; it is allowed, but never silently.
-        from ball_reel import skeleton
+    def _without_dwpose(self):
+        """Машина без весов DWPose — самый частый случай на чужом ноутбуке."""
+        from ball_reel import dwpose, skeleton
 
-        real = skeleton.pose_points
+        real_why, real_points = dwpose.why_unavailable, skeleton.pose_points
+        dwpose.why_unavailable = lambda: (
+            "нет весов DWPose: ~/.dwpose/yolox_l.onnx. Скачать один раз: "
+            "curl -sSLO .../yolox_l.onnx")
         skeleton.pose_points = lambda _p: _points()
-        self.addCleanup(setattr, skeleton, "pose_points", real)
-        m = self.s.render_sequence(["a"], self.dir / "seq3", from_mediapipe=True)
+        self.addCleanup(setattr, dwpose, "why_unavailable", real_why)
+        self.addCleanup(setattr, skeleton, "pose_points", real_points)
+
+    def test_conditioning_from_the_verifier_is_declared(self):
+        # Снимать условия тем же экстрактором, что проверяет, — ослабленный
+        # режим: гейт перестаёт ловить его собственные ошибки. Он разрешён,
+        # потому что работает без установки весов, но никогда не молча.
+        self._without_dwpose()
+        m = self.s.render_sequence(["a"], self.dir / "seq3")
+        self.assertEqual(m["source"], "mediapipe")
         self.assertTrue(any("also the verifier" in w for w in m["warnings"]))
+        # И сразу сказано, чем это лечится — иначе предупреждение бесполезно.
+        self.assertTrue(any("yolox_l.onnx" in w for w in m["warnings"]))
+
+    def test_the_default_conditioner_is_NOT_the_verifier(self):
+        # Заявление «условия снимает DWPose, проверяет MediaPipe» долго было
+        # только заявлением: умолчанием стоял MediaPipe, то есть судья и
+        # судимый совпадали, а независимость держалась на предупреждении.
+        from ball_reel import dwpose, skeleton
+
+        real = dwpose.why_unavailable
+        dwpose.why_unavailable = lambda: ""
+        self.addCleanup(setattr, dwpose, "why_unavailable", real)
+        extract, name = skeleton._extractor()
+        self.assertEqual(name, "dwpose")
+        self.assertIs(extract, dwpose.pose_points)
+        self.assertIsNot(extract, skeleton.pose_points)
+
+    def test_the_manifest_cannot_LIE_about_who_extracted(self):
+        # ДЕФЕКТ, КОТОРЫЙ ЭТОТ ТЕСТ ЗАКРЫВАЕТ. Экстрактор выбирался параметром
+        # `source`, а подпись в манифесте — отдельным флагом `from_mediapipe`,
+        # независимо от того, кто отработал. То есть можно было получить точки
+        # MediaPipe и записать «dwpose». Манифест лежит рядом с условиями и
+        # читается на другой машине через часы; подпись, способная соврать о
+        # происхождении условий, хуже отсутствующей.
+        import json
+
+        m = self.s.render_sequence(["a"], self.dir / "seq4",
+                                   source=lambda _p: _points())
+        saved = json.loads((self.dir / "seq4" / "manifest.json").read_text())
+        self.assertEqual(saved["source"], m["source"])
+        self.assertNotIn(saved["source"], ("dwpose", "mediapipe"))
 
 
 if __name__ == "__main__":

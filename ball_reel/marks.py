@@ -730,7 +730,8 @@ def transfer_cylindrical(source_image, source_points: dict, target_image,
 
 
 def transfer(source_image, source_points: dict, target_image,
-             target_points: dict, mark: Mark, *, feather: float = FEATHER):
+             target_points: dict, mark: Mark, *, feather: float = FEATHER,
+             skin_mask=None, min_skin_share=None):
     """Перенести примету с референса в результат. (картинка, отчёт).
 
     ПЕРЕНОСЯТСЯ НЕ ПИКСЕЛИ, А ОТКЛОНЕНИЕ ОТ ОКРЕСТНОЙ КОЖИ. Это единственная
@@ -754,12 +755,26 @@ def transfer(source_image, source_points: dict, target_image,
     похожую вместо той самой. Композит — единственный способ гарантировать, что
     на теле именно та татуировка, что на фото.
 
+    ГДЕ КОНЧАЕТСЯ КОЖА — ОТДЕЛЬНЫЙ ВОПРОС, И ГЕОМЕТРИЯ НА НЕГО НЕ ОТВЕЧАЕТ.
+    Капсула вокруг кости удерживает вклейку на конечности, но не отличает
+    предплечье от рукава. `skin_mask` (булев массив размером с кадр, из
+    `bodyparts.skin_mask`) закрывает именно это. Замерено на живом кадре: в окне
+    на предплечье кожи 91%, на плече 74%, а на бедре и голени — 0%, потому что
+    на человеке леггинсы. Без маски примета легла бы на ткань, и метрика
+    отрапортовала бы честный контраст: число было бы правдой, картинка нет.
+
+    Маска НЕОБЯЗАТЕЛЬНА намеренно. Её отсутствие — это отсутствие сведений, а не
+    запрет: модуль остаётся рабочим на машине без весов сегментации, но говорит
+    об этом в отчёте, а не делает вид, что проверил.
+
     ЧЕГО НЕ ДЕЛАЕТ: не рисует примету там, где кость не видна (вернёт кадр без
     изменений и скажет об этом), не исправляет ракурс сложнее плоского поворота,
     не знает про перекрытие рукой.
     """
     import numpy as np
     from PIL import Image
+
+    from PIL import ImageFilter
 
     report = {"name": mark.name, "applied": False, "note": ""}
     src_box = locate(source_points, mark)
@@ -861,6 +876,38 @@ def transfer(source_image, source_points: dict, target_image,
                          0.0, 1.0)
         alpha = alpha * inside[..., None]
         report["on_limb"] = round(float(inside.mean()), 3)
+
+    # СЕГМЕНТАЦИЯ ПОВЕРХ ГЕОМЕТРИИ. Порядок именно такой: капсула отсекает фон,
+    # маска — ткань. Одно другое не заменяет, потому что маска не знает, ЧЬЯ это
+    # кожа, а капсула не знает, кожа ли это вообще.
+    if skin_mask is not None:
+        from . import bodyparts
+
+        bar = (bodyparts.MIN_SKIN_SHARE if min_skin_share is None
+               else min_skin_share)
+        verdict = bodyparts.paintable(target, dst_box, mask=skin_mask,
+                                      min_share=bar)
+        report["skin_share"] = verdict["skin_share"]
+        if verdict["ok"] is False:
+            report["note"] = (f"вклейка ОТМЕНЕНА: {verdict['note']}. Рисовать "
+                              f"примету поверх одежды значит выдумывать — "
+                              f"правило продукта это запрещает так же, как "
+                              f"рисовать на невидимой конечности")
+            return target, report
+        gy2, gx2 = np.mgrid[max(0, dy0):dy1, max(0, dx0):dx1]
+        # Маска булева, поэтому её кладут в 8-битный канал: GaussianBlur в PIL
+        # режим "F" не принимает, а квантование в 256 уровней для маски, чья
+        # граница и так грубее пяти пикселей, ничего не теряет.
+        window = (np.asarray(skin_mask)[gy2, gx2] * 255).astype(np.uint8)
+        # Край размывается не «на глазок»: маска решается на стороне 256, то
+        # есть тоньше, чем `pixels_per_decision`, она физически не умеет.
+        # Смягчать меньше — самообман, больше — терять примету у края.
+        h_t, w_t = target.shape[:2]
+        radius = max(1.0, bodyparts.edge_coarseness(
+            (w_t, h_t))["pixels_per_decision"] / 2.0)
+        soft = Image.fromarray(window, mode="L").filter(
+            ImageFilter.GaussianBlur(radius))
+        alpha = alpha * (np.asarray(soft, dtype=np.float64) / 255.0)[..., None]
     if region.shape[:2] != painted.shape[:2]:
         painted = painted[:region.shape[0], :region.shape[1]]
         alpha = alpha[:region.shape[0], :region.shape[1]]
@@ -870,7 +917,10 @@ def transfer(source_image, source_points: dict, target_image,
                   note=(f"примета перенесена отклонением от кожи "
                         f"(контраст на референсе {src_stats['score']}). "
                         f"ПЛОСКО: без обёртывания по кривизне конечности и без "
-                        f"перспективного сжатия к силуэту"))
+                        f"перспективного сжатия к силуэту"
+                        + ("" if skin_mask is not None else
+                           ". Одежда НЕ ПРОВЕРЕНА: маска кожи не передана, "
+                           "вклейка ограничена только капсулой вокруг кости")))
     return out, report
 
 

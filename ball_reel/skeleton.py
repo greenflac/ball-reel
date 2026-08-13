@@ -21,12 +21,19 @@ propagates down each limb instead of tearing it apart.
 Runs on CPU, no GPU, no network. Which means the expensive half of the pipeline
 can be prepared and checked before a single GPU-minute is rented.
 
-A NOTE ON INDEPENDENCE. GPU_BRANCH.md says the extractor that CONDITIONS and the
-one that VERIFIES must differ, or the gate ends up confirming the conditioner's
-own errors. DWPose is the intended conditioning source. Rendering from MediaPipe
-(the verifier) is supported because it works today and needs nothing installed,
-but it weakens the gate, so `from_mediapipe=True` is explicit at the call site
-and recorded in the output — never a silent default.
+A NOTE ON INDEPENDENCE. Экстрактор, который СТАВИТ УСЛОВИЯ, и тот, что их
+ПРОВЕРЯЕТ, обязаны быть разными: иначе гейт подтверждает ошибки кондиционера.
+Условия снимает DWPose, проверяет MediaPipe.
+
+Это долго было заявлением, а не кодом. Умолчанием стоял MediaPipe, то есть судья
+и судимый совпадали, и заявление держалось на одном предупреждении в манифесте.
+Теперь умолчание — DWPose, если его веса на месте, а откат на MediaPipe остаётся
+рабочим, но помечается в манифесте как ослабленный режим.
+
+Расхождение двух экстракторов ИЗМЕРЕНО на живом кадре: медиана 0.0121
+нормированной длины, худший сустав (ухо) 0.0280, при баре гейта по позе 0.25.
+То есть в двадцать раз ниже порога — подмена экстрактора калибровку не ломает,
+и это стоило проверить до подмены, а не после.
 """
 
 from __future__ import annotations
@@ -259,16 +266,47 @@ def draw(points: dict, out_path: str | Path, *, width: int = 512,
     return str(out_path)
 
 
+def _extractor(source=None):
+    """Чем снимать скелет. Возвращает (функция, имя для манифеста).
+
+    ЗДЕСЬ БЫЛО ДВА ФЛАГА ПРО ОДНО И ТО ЖЕ, И ОНИ МОГЛИ РАСХОДИТЬСЯ. `source`
+    выбирал экстрактор, а `from_mediapipe` — подпись в манифесте, независимо от
+    того, кто отработал на самом деле. Манифест лежит рядом с условиями и
+    читается на другой машине через несколько часов; подпись, способная соврать
+    о происхождении условий, хуже отсутствующей.
+
+    Теперь имя выводится из того, что ДЕЙСТВИТЕЛЬНО исполнилось.
+
+    Умолчание — DWPose, и это не вкусовщина. Условия и проверка обязаны идти от
+    РАЗНЫХ моделей: если экстрактор ошибся, а проверяет его он же, гейт
+    подтвердит собственную ошибку. Замерено на живом кадре — два экстрактора
+    расходятся на медиану 0.0121 нормированной длины (худший сустав, ухо,
+    0.0280) при баре гейта по позе 0.25, то есть в двадцать раз ниже порога:
+    подмена экстрактора калибровку не ломает.
+    """
+    if source is not None:
+        name = getattr(source, "__module__", "") or ""
+        return source, (name.rsplit(".", 1)[-1] or "custom")
+    from . import dwpose
+
+    if not dwpose.why_unavailable():
+        return dwpose.pose_points, "dwpose"
+    return pose_points, "mediapipe"
+
+
 def render_sequence(frames: list, out_dir: str | Path, *,
                     proportions: dict | None = None, width: int = 512,
-                    height: int = 768, from_mediapipe: bool = True,
-                    source=None) -> dict:
+                    height: int = 768, source=None) -> dict:
     """A whole driving segment -> a folder of condition images.
 
     Returns the manifest a GPU run consumes, including `coverage` — the share of
     frames that produced a skeleton. A gap in the middle of a sequence means the
     generator gets no constraint for those frames, so it is reported rather than
     silently skipped.
+
+    Скелет снимается DWPose, если его веса на месте, и MediaPipe иначе — с
+    громким предупреждением в манифесте, потому что MediaPipe здесь ещё и
+    проверяющий. Чем именно сняли, записано в `source` по факту исполнения.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,7 +315,7 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     # Какой исходный кадр стоит за каждым условием — собирается здесь же,
     # иначе после пропусков соответствие уже не восстановить.
     driving: dict = {}
-    extract = source or pose_points
+    extract, source_name = _extractor(source)
     for i, f in enumerate(frames):
         pts = extract(f)
         if pts is None:
@@ -303,7 +341,7 @@ def render_sequence(frames: list, out_dir: str | Path, *,
         "conditions": made, "missing_frames": missing, "coverage": coverage,
         "joint_coverage": joint_cover, "partial_frames": partial,
         "size": [width, height], "retargeted": bool(proportions),
-        "source": "mediapipe" if from_mediapipe else "dwpose",
+        "source": source_name,
         # Какой исходный кадр стоит за каждым условием. Без этой карты условия
         # — набор палок на чёрном фоне, по которому уже не восстановить, ЧТО
         # они кодируют. А восстанавливать нужно: сгенерированный кейфрейм
@@ -318,12 +356,14 @@ def render_sequence(frames: list, out_dir: str | Path, *,
             f"joints ({joint_cover:.0%} of joints drawn overall): those limbs "
             f"are unconstrained in those frames, and the generator will invent "
             f"them.")
-    if from_mediapipe:
+    if source_name == "mediapipe":
+        from . import dwpose
+
         manifest["warnings"].append(
             "conditions were rendered from MediaPipe, which is also the "
             "verifier: the gate can no longer catch this extractor's own "
-            "errors. Switch to DWPose for conditioning before trusting the "
-            "pose verdict.")
+            "errors, because judge and judged are the same model. "
+            + dwpose.why_unavailable())
     if coverage < 1.0:
         manifest["warnings"].append(
             f"{len(missing)} frame(s) produced no skeleton: the generator is "
