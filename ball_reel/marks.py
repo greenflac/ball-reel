@@ -272,6 +272,213 @@ def mark_transferred(reference: dict | None, produced: dict | None, *,
             "note": why}
 
 
+#: Ширина мягкого края при вклейке, в долях стороны окна. Резкий край читается
+#: как наклейка мгновенно, даже когда цвет подобран идеально.
+FEATHER = 0.18
+
+#: Полуширина конечности в долях длины кости — граница, за которую вклейка не
+#: выходит. Примета наносится не в КВАДРАТ, а в капсулу вдоль кости.
+#:
+#: Здесь стоял цветовой признак «похоже на кожу», и замер его опроверг. Взяты
+#: два окна на одном кадре: плечо (кожа) дало разброс p50 0.063 / p90 0.586,
+#: бедро в леггинсах (ткань) — p50 0.021 / p90 0.031. ОДЕЖДА ОКАЗАЛАСЬ
+#: ОДНОРОДНЕЕ КОЖИ, потому что в окно на руке попадает силуэт и светотень.
+#: Признак назывался «кожа», а мерил однородность, и отсекал ровно ту кожу,
+#: на которую надо рисовать.
+#:
+#: Геометрия честнее: рука — это капсула вокруг кости, и за её пределами
+#: заведомо фон. Это решает «не рисовать мимо конечности». Задачу «не рисовать
+#: поверх одежды» она НЕ решает — для неё нужна сегментация, которой у нас нет,
+#: и пока примету размещает оператор, который знает, где у него татуировка.
+#: ВЫБРАНО 0.22: типичная рука примерно вчетверо длиннее своей ширины.
+LIMB_HALF_WIDTH = 0.22
+
+
+def _load(image):
+    """Картинка -> массив 0..1. Принимает путь или уже готовый массив."""
+    import numpy as np
+    from PIL import Image
+
+    if isinstance(image, (str, bytes)) or hasattr(image, "__fspath__"):
+        with Image.open(image) as im:
+            return np.asarray(im.convert("RGB"), dtype=np.float64) / 255.0
+    arr = np.asarray(image, dtype=np.float64)
+    return arr / 255.0 if arr.max() > 1.0 else arr
+
+
+def _bone_frame(points: dict, bone: str):
+    """(угол кости, её длина в пикселях) или None."""
+    import math
+
+    pair = BONES.get(bone)
+    if pair is None:
+        return None
+    a, b = points.get(pair[0]), points.get(pair[1])
+    if not a or not b:
+        return None
+    w, h, _ = points.get("__size__", (0.0, 0.0, 1.0))
+    dx, dy = (b[0] - a[0]) * w, (b[1] - a[1]) * h
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 1e-6:
+        return None
+    return math.degrees(math.atan2(dy, dx)), length
+
+
+def transfer(source_image, source_points: dict, target_image,
+             target_points: dict, mark: Mark, *, feather: float = FEATHER):
+    """Перенести примету с референса в результат. (картинка, отчёт).
+
+    ПЕРЕНОСЯТСЯ НЕ ПИКСЕЛИ, А ОТКЛОНЕНИЕ ОТ ОКРЕСТНОЙ КОЖИ. Это единственная
+    часть замысла, которую стоит запомнить.
+
+    Вклеить пиксели напрямую нельзя: на референсе другой свет, другой загар,
+    другая экспозиция — заплатка будет видна как заплатка. Поэтому с референса
+    снимается ОТНОШЕНИЕ каждого пикселя приметы к медианной коже вокруг неё, а
+    в результат это отношение применяется к ЕГО коже. Тёмная линия татуировки
+    остаётся «в 0.4 раза темнее окружающей кожи» — и на светлой коже, и на
+    смуглой, и в тени.
+
+    Ровно тот же принцип, на котором стоит метрика этого модуля, и та же
+    причина: локальная опора вместо абсолютного цвета.
+
+    Геометрия берётся из скелета: угол и длина кости известны на обоих концах,
+    значит заплатка поворачивается и масштабируется под конечность в кадре.
+
+    ПОЧЕМУ ВООБЩЕ ВКЛЕЙКА, А НЕ ГЕНЕРАЦИЯ. Правило продукта запрещает
+    выдумывать: любой генеративный способ примету ПЕРЕРИСУЕТ, то есть выдаст
+    похожую вместо той самой. Композит — единственный способ гарантировать, что
+    на теле именно та татуировка, что на фото.
+
+    ЧЕГО НЕ ДЕЛАЕТ: не рисует примету там, где кость не видна (вернёт кадр без
+    изменений и скажет об этом), не исправляет ракурс сложнее плоского поворота,
+    не знает про перекрытие рукой.
+    """
+    import numpy as np
+    from PIL import Image
+
+    report = {"name": mark.name, "applied": False, "note": ""}
+    src_box = locate(source_points, mark)
+    dst_box = locate(target_points, mark)
+    target = _load(target_image)
+    if src_box is None:
+        report["note"] = "на референсе кость не видна — переносить нечего"
+        return target, report
+    if dst_box is None:
+        report["note"] = ("в результате кость не видна — примета НЕ вклеена. "
+                          "Это отказ от вмешательства, а не потеря: рисовать "
+                          "примету на невидимой конечности значит выдумывать.")
+        return target, report
+
+    source = _load(source_image)
+    sx0, sy0, sx1, sy1 = src_box
+    patch = source[max(0, sy0):sy1, max(0, sx0):sx1]
+    if patch.size == 0:
+        report["note"] = "область приметы вышла за край референса"
+        return target, report
+
+    # Опора: медианная кожа вокруг приметы НА РЕФЕРЕНСЕ.
+    src_stats = distinctiveness(source, src_box)
+    if src_stats is None or src_stats["score"] < MIN_REFERENCE_CONTRAST:
+        report["note"] = (f"на референсе в этом месте ровная кожа "
+                          f"(контраст {None if src_stats is None else src_stats['score']}) "
+                          f"— приметы нет, переносить нечего")
+        return target, report
+
+    src_skin = _skin_median(source, src_box)
+    ratio = patch / np.maximum(src_skin, 1e-3)          # отклонение от кожи
+
+    # Геометрия: повернуть и растянуть под кость в результате.
+    src_frame = _bone_frame(source_points, mark.bone)
+    dst_frame = _bone_frame(target_points, mark.bone)
+    if src_frame and dst_frame:
+        turn = dst_frame[0] - src_frame[0]
+        img = Image.fromarray(np.clip(ratio / 4.0, 0, 1).astype(np.float32),
+                              mode="F") if ratio.ndim == 2 else None
+        # Поворот делаем поканально, чтобы не терять цвет отношения.
+        chans = []
+        for c in range(3):
+            layer = Image.fromarray(ratio[..., c].astype(np.float32), mode="F")
+            layer = layer.rotate(-turn, resample=Image.BILINEAR, fillcolor=1.0)
+            chans.append(np.asarray(layer, dtype=np.float64))
+        ratio = np.stack(chans, axis=-1)
+
+    dx0, dy0, dx1, dy1 = dst_box
+    dh, dw = dy1 - dy0, dx1 - dx0
+    chans = []
+    for c in range(3):
+        layer = Image.fromarray(ratio[..., c].astype(np.float32), mode="F")
+        layer = layer.resize((dw, dh), Image.BILINEAR)
+        chans.append(np.asarray(layer, dtype=np.float64))
+    ratio = np.stack(chans, axis=-1)
+
+    dst_skin = _skin_median(target, dst_box)
+    painted = np.clip(ratio * dst_skin, 0.0, 1.0)
+
+    # Мягкий край: резкая граница читается как наклейка даже при точном цвете.
+    yy, xx = np.mgrid[0:dh, 0:dw]
+    edge = np.minimum.reduce([xx, yy, dw - 1 - xx, dh - 1 - yy]).astype(float)
+    width = max(1.0, min(dh, dw) * feather)
+    alpha = np.clip(edge / width, 0.0, 1.0)[..., None]
+
+    out = target.copy()
+    region = out[max(0, dy0):dy1, max(0, dx0):dx1]
+
+    # НЕ ВЫХОДИТЬ ЗА КОНЕЧНОСТЬ. Найдено визуальным аудитом: без ограничения
+    # крест лёг поверх лямки топа и фона, а метрика отрапортовала честные 74%
+    # сохранившегося контраста — число было правдой, картинка нет.
+    #
+    # Ограничение геометрическое, а не цветовое: рука — капсула вокруг кости.
+    # Цветовой признак «похоже на кожу» здесь уже пробовался и был опровергнут
+    # замером (см. LIMB_HALF_WIDTH).
+    if dst_frame:
+        _, bone_len = dst_frame
+        limb = bone_len * LIMB_HALF_WIDTH
+        gy, gx = np.mgrid[0:dh, 0:dw]
+        px_x = max(0, dx0) + gx
+        px_y = max(0, dy0) + gy
+        ax_, ay_ = target_points[BONES[mark.bone][0]][:2]
+        bx_, by_ = target_points[BONES[mark.bone][1]][:2]
+        W, H, _ = target_points["__size__"]
+        ax_, ay_, bx_, by_ = ax_ * W, ay_ * H, bx_ * W, by_ * H
+        vx, vy = bx_ - ax_, by_ - ay_
+        vlen2 = max(vx * vx + vy * vy, 1e-6)
+        s = np.clip(((px_x - ax_) * vx + (px_y - ay_) * vy) / vlen2, 0.0, 1.0)
+        dist = np.hypot(px_x - (ax_ + s * vx), px_y - (ay_ + s * vy))
+        inside = np.clip(1.0 - (dist - limb * 0.7) / max(limb * 0.3, 1e-6),
+                         0.0, 1.0)
+        alpha = alpha * inside[..., None]
+        report["on_limb"] = round(float(inside.mean()), 3)
+    if region.shape[:2] != painted.shape[:2]:
+        painted = painted[:region.shape[0], :region.shape[1]]
+        alpha = alpha[:region.shape[0], :region.shape[1]]
+    out[max(0, dy0):dy1, max(0, dx0):dx1] = (
+        region * (1 - alpha) + painted * alpha)
+    report.update(applied=True,
+                  note=(f"примета перенесена отклонением от кожи "
+                        f"(контраст на референсе {src_stats['score']}). "
+                        f"ПЛОСКО: без обёртывания по кривизне конечности и без "
+                        f"перспективного сжатия к силуэту"))
+    return out, report
+
+
+def _skin_median(arr, box):
+    """Медианный цвет кожи ВОКРУГ окна, каналами. Опора для переноса."""
+    import numpy as np
+
+    x0, y0, x1, y1 = box
+    h, w = arr.shape[:2]
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = int((x1 - x0) * SURROUND_SCALE / 2)
+    sx0, sy0 = max(0, cx - half), max(0, cy - half)
+    sx1, sy1 = min(w, cx + half), min(h, cy + half)
+    ring = arr[sy0:sy1, sx0:sx1]
+    mask = np.ones(ring.shape[:2], dtype=bool)
+    iy0, ix0 = max(0, y0 - sy0), max(0, x0 - sx0)
+    mask[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)] = False
+    skin = ring[mask] if mask.sum() >= 16 else ring.reshape(-1, 3)
+    return np.median(skin.reshape(-1, 3), axis=0)
+
+
 def marks_report(ref_image, ref_points: dict, out_image, out_points: dict,
                  marks) -> dict:
     """Все приметы разом. Сводка для гейта и для отчёта."""

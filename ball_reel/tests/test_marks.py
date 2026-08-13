@@ -245,3 +245,103 @@ class TheReportJudgesOnlyWhatWasMeasured(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class TheMarkIsCarriedAsDeviationNotAsPixels(unittest.TestCase):
+    """Переносится отношение к коже, поэтому свет и загар не ломают перенос.
+
+    ОГОВОРКА О КРУГОВОЙ ПОРУКЕ, и её надо держать в голове: перенос и метрика
+    стоят на одном принципе (локальная опора), поэтому метрика ОБЯЗАНА
+    признавать всё, что перенос вклеил. Это не доказательство качества вклейки,
+    и выдавать одно за другое нельзя.
+
+    Что эти тесты действительно проверяют: геометрию (примета едет с костью),
+    независимость от освещения, и отказ вмешиваться там, где кости не видно.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+        self.mark = marks.Mark(bone="l_forearm", along=0.5, radius=0.2,
+                               name="tattoo")
+
+    def test_a_mark_lands_on_plain_skin_where_the_bone_is(self):
+        out, rep = self.m.transfer(_with_patch(), _points(), _skin(),
+                                   _points(), self.mark)
+        self.assertTrue(rep["applied"], rep["note"])
+        box = self.m.locate(_points(), self.mark)
+        got = self.m.distinctiveness(out, box)
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(got["luma_contrast"], 0)   # тату осталась ТЕМНЕЕ кожи
+
+    def test_the_mark_follows_a_rotated_limb(self):
+        # Кость в результате повёрнута на 90 градусов. Примета обязана
+        # оказаться на ней, а не там, где была в кадре референса.
+        turned = _points(elbow=(0.2, 0.5), wrist=(0.8, 0.5))
+        out, rep = self.m.transfer(_with_patch(), _points(), _skin(),
+                                   turned, self.mark)
+        self.assertTrue(rep["applied"])
+        on_bone = self.m.distinctiveness(out, self.m.locate(turned, self.mark))
+        self.assertGreater(on_bone["score"], self.m.MIN_REFERENCE_CONTRAST)
+
+    def test_darker_target_skin_keeps_the_mark_relative_not_absolute(self):
+        # Смуглая кожа в результате. Вклеенные ПИКСЕЛИ выглядели бы светлым
+        # пятном; перенесённое ОТНОШЕНИЕ остаётся темнее своей кожи.
+        dark = _skin(tone=0.34)
+        out, _ = self.m.transfer(_with_patch(), _points(), dark, _points(),
+                                 self.mark)
+        got = self.m.distinctiveness(out, self.m.locate(_points(), self.mark))
+        self.assertLess(got["luma_contrast"], 0)
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+
+    def test_an_invisible_bone_leaves_the_frame_untouched(self):
+        # Рисовать примету на невидимой конечности значит выдумывать — ровно
+        # то, что правило продукта запрещает.
+        import numpy as np
+
+        target = _skin()
+        out, rep = self.m.transfer(_with_patch(), _points(), target,
+                                   _points(vis=0.2), self.mark)
+        self.assertFalse(rep["applied"])
+        self.assertIn("НЕ вклеена", rep["note"])
+        self.assertTrue(np.allclose(out, target))
+
+    def test_plain_skin_on_the_reference_is_refused(self):
+        import numpy as np
+
+        target = _skin()
+        out, rep = self.m.transfer(_skin(), _points(), target, _points(),
+                                   self.mark)
+        self.assertFalse(rep["applied"])
+        self.assertIn("переносить нечего", rep["note"])
+        self.assertTrue(np.allclose(out, target))
+
+    def test_the_edges_are_feathered_not_cut(self):
+        # Резкий край читается как наклейка даже при точном цвете. У края
+        # результат обязан быть ближе к коже, чем в середине приметы.
+        out, _ = self.m.transfer(_with_patch(), _points(), _skin(), _points(),
+                                 self.mark)
+        x0, y0, x1, y1 = self.m.locate(_points(), self.mark)
+        mid = out[(y0 + y1) // 2, (x0 + x1) // 2].mean()
+        edge = out[y0 + 1, (x0 + x1) // 2].mean()
+        self.assertGreater(edge, mid)
+
+    def test_the_paste_does_not_leave_the_limb(self):
+        # Найдено визуальным аудитом: без ограничения крест лёг поверх лямки
+        # топа и фона. Ограничение геометрическое — рука это капсула вокруг
+        # кости, и за ней заведомо не тело.
+        import numpy as np
+
+        target = _skin()
+        out, rep = self.m.transfer(_with_patch(), _points(), target,
+                                   _points(), self.mark)
+        far = int(200 * 0.5 + 200 * self.m.LIMB_HALF_WIDTH * 1.6)
+        self.assertTrue(np.allclose(out[100, far:], target[100, far:]),
+                        "вклейка вышла за конечность")
+
+    def test_the_limb_width_is_read_from_the_module(self):
+        half = self.m.LIMB_HALF_WIDTH
+        self.assertGreater(half, 0.05)
+        self.assertLess(half, 0.5)
