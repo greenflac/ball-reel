@@ -85,6 +85,20 @@ class TheTorchBuildIsJudgedByItsName(unittest.TestCase):
         self.assertIn("драйвер", detail)
         self.assertNotIn("CPU-сборка", detail)
 
+    def test_an_intel_card_is_not_sent_to_nvidia_smi(self):
+        # Совет «проверь nvidia-smi» владельцу Arc вреден: он уводит от
+        # настоящей причины (сборка без XPU или драйверы Level Zero).
+        _, detail = self.p.torch_verdict("2.13.0", False, "")
+        self.assertIn("Arc", detail)
+        self.assertIn("XPU", detail)
+
+    def test_an_accelerator_of_any_kind_passes(self):
+        for kind, name in (("cuda", "RTX 3050"), ("xpu", "Arc A580")):
+            ok, detail = self.p.torch_verdict("2.13.0", True, name,
+                                              device_kind=kind)
+            self.assertTrue(ok, detail)
+            self.assertIn(name, detail)
+
 
 @unittest.skipUnless(HAVE_PIL, "Pillow not installed (live extra)")
 class BrokenConditionsAreCaughtAtHome(unittest.TestCase):

@@ -1,0 +1,56 @@
+[
+  {
+    "variant": "plain",
+    "i": 0,
+    "face_px": 353,
+    "drift": 0.3085
+  },
+  {
+    "variant": "plain",
+    "i": 1,
+    "face_px": 451,
+    "drift": 0.3075
+  },
+  {
+    "variant": "plain",
+    "i": 2,
+    "face_px": 403,
+    "drift": 0.4077
+  },
+  {
+    "variant": "role",
+    "i": 0,
+    "face_px": 329,
+    "drift": 0.3058
+  },
+  {
+    "variant": "role",
+    "i": 1,
+    "face_px": 436,
+    "drift": 0.3554
+  },
+  {
+    "variant": "role",
+    "i": 2,
+    "face_px": 307,
+    "drift": 0.3175
+  },
+  {
+    "variant": "face_first",
+    "i": 0,
+    "face_px": 276,
+    "drift": 0.2124
+  },
+  {
+    "variant": "face_first",
+    "i": 1,
+    "face_px": 274,
+    "drift": 0.3549
+  },
+  {
+    "variant": "face_first",
+    "i": 2,
+    "face_px": 335,
+    "drift": 0.2932
+  }
+]

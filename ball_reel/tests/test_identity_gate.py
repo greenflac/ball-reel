@@ -119,6 +119,31 @@ class VerdictRestsOnTheJudgeableMass(unittest.TestCase):
         self.assertIsNone(unjudged["median"])
         self.assertEqual(unjudged["too_small"], ["thumbnail"])
 
+    def test_a_mixed_edit_is_judged_on_the_shots_where_the_face_is_readable(self):
+        # Планируемая драматургия: общий план на мяче + средний план с гелем.
+        # На 4 ГБ (512x768) лицо в ОБЩЕМ плане выходит ~72 px, то есть ниже
+        # порога. Вопрос, который стоило проверить кодом, а не памятью: рухнет
+        # ли от этого весь вердикт.
+        #
+        # Не рухнет. Мелкие лица не штрафуются как максимальный дрейф, а
+        # исключаются из расчёта: медиана берётся по читаемым кадрам, а доля
+        # читаемых уходит в coverage. Общему плану не нужно быть проверяемым —
+        # ему достаточно не доминировать.
+        wide = [(72, 0.90)] * 6      # общий план: лицо мельче порога
+        medium = [(150, 0.19)] * 6   # средний план: лицо читается
+        d = self.mod.arcface_drift(self._clip(wide + medium), "ref")
+        self.assertEqual(d["coverage"], 0.5)
+        self.assertEqual(len(d["too_small"]), 6)
+        # Медиана — по среднему плану, а не смесь с непроверяемым общим.
+        self.assertLessEqual(d["median"], self.mod.SAME_PERSON_MAX)
+
+    def test_a_wide_shot_that_dominates_makes_the_clip_unjudgeable(self):
+        # Обратный край того же правила: если читаемых кадров меньше половины,
+        # судить не по чему, и это должно быть сказано, а не сглажено.
+        d = self.mod.arcface_drift(
+            self._clip([(72, 0.90)] * 9 + [(150, 0.19)] * 3), "ref")
+        self.assertLess(d["coverage"], self.mod.MIN_COVERAGE)
+
     def test_a_reference_photo_too_small_to_identify_from_says_so(self):
         self.faces["ref"] = (40, 0.0)
         d = self.mod.arcface_drift(self._clip([(112, 0.18)]), "ref")

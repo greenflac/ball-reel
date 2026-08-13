@@ -158,9 +158,18 @@ def plan(vram_gb: float = 4.0, keyframes: int = 5) -> GPUPlan:
             f"{vram_gb} GB is below the ~3.6 GB this configuration needs even "
             f"with every saving on. Drop to 448x640, or use a larger card.")
     if vram_gb >= 8:
-        p.width, p.height = 640, 960
-        p.optimisations = ["attention_slicing", "vae_slicing"]
-        p.estimated_vram_gb = 6.5
+        # 768x1152, а не 640x960. Разница не в красоте: 960 даёт лицо ~90 px
+        # при пороге 100, то есть на карте вдвое большей гейт всё равно
+        # остаётся слепым. 1152 даёт ~108 px — измеритель начинает работать.
+        # Выбирать разрешение, не глядя на порог идентичности, значит купить
+        # память и не купить проверяемость.
+        p.width, p.height = 768, 1152
+        p.optimisations = ["attention_slicing", "vae_slicing", "vae_tiling"]
+        p.estimated_vram_gb = 7.0
+        p.notes.append(
+            "768x1152 выбрано по порогу идентичности, а не по памяти: это "
+            "минимальная высота, на которой лицо в полноростовом кадре "
+            "остаётся судимым. Памяти хватило бы и на больше.")
         p.notes.append(
             "at this size a video model (AnimateDiff + ControlNet) becomes "
             "possible and would give CONTINUOUS pose control instead of "
@@ -225,7 +234,7 @@ def fit_prompt(parts: list, tokenizer=None,
     return text, dropped
 
 
-def face_embeds(face_photo: str, dtype: str = "float16", device: str = "cuda"):
+def face_embeds(face_photo: str, dtype: str = "", device: str = ""):
     """Лицо как ЭМБЕДДИНГ, в той форме, которую ждёт FaceID.
 
     FaceID обусловливается не картинкой: у него на входе не CLIP-эмбеддинг
@@ -245,8 +254,11 @@ def face_embeds(face_photo: str, dtype: str = "float16", device: str = "cuda"):
     """
     import torch  # type: ignore
 
+    from .device import detect, dtype_for
     from .identity_arcface import face_detail
 
+    device = device or detect()
+    dtype = dtype or dtype_for(device)
     d = face_detail(face_photo)
     if d is None:
         raise RuntimeError(
@@ -257,7 +269,7 @@ def face_embeds(face_photo: str, dtype: str = "float16", device: str = "cuda"):
     return both.unsqueeze(1).to(dtype=getattr(torch, dtype), device=device)
 
 
-def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
+def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
     """Собрать пайплайн один раз.
 
     Отдельной функцией, потому что `render_keyframes` вызывается дважды за
@@ -277,6 +289,9 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
     from diffusers import (ControlNetModel,  # type: ignore
                            StableDiffusionControlNetPipeline)
 
+    from .device import detect
+
+    device = device or detect()
     cfg = cfg or plan()
     dtype = getattr(torch, cfg.dtype)
 
@@ -351,7 +366,7 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = "cuda"):
 def render_keyframes(condition_images: list, face_photo: str, prompt: str,
                      out_dir: str | Path, *, cfg: GPUPlan | None = None,
                      negative: str = "", seed: int = 0, pipe=None,
-                     device: str = "cuda") -> dict:
+                     device: str = "") -> dict:
     """Generate one image per condition skeleton, holding the face fixed.
 
     `condition_images` come from `skeleton.render_sequence` — already retargeted
@@ -367,6 +382,9 @@ def render_keyframes(condition_images: list, face_photo: str, prompt: str,
     import torch  # type: ignore
     from PIL import Image
 
+    from .device import detect
+
+    device = device or detect()
     cfg = cfg or plan()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -388,8 +406,9 @@ def render_keyframes(condition_images: list, face_photo: str, prompt: str,
         path = out_dir / f"kf_{i:04d}.png"
         image.save(path)
         made.append(str(path))
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        from .device import empty_cache
+
+        empty_cache(device)
     return {"keyframes": made, "config": cfg.to_dict(),
             "count": len(made), "source": "gpu"}
 

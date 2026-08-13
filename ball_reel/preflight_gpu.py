@@ -46,13 +46,23 @@ def check_torch() -> tuple:
                      f"https://download.pytorch.org/whl/cuXXX). Если pip "
                      f"пишет 'No matching distribution' — колёс под ЭТУ "
                      f"версию Python в том индексе нет, брать новее.")
-    ok, detail = torch_verdict(torch.__version__, torch.cuda.is_available(),
-                               torch.cuda.get_device_name(0)
-                               if torch.cuda.is_available() else "")
-    return (_ok if ok else _fail)("torch.cuda", detail)
+    from .device import detect
+
+    dev = detect()
+    backend = getattr(torch, dev, None) if dev != "cpu" else None
+    name = ""
+    if backend is not None:
+        try:
+            name = backend.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            name = dev
+    ok, detail = torch_verdict(torch.__version__, dev != "cpu", name,
+                               device=dev)
+    return (_ok if ok else _fail)(f"torch.{dev}", detail)
 
 
-def torch_verdict(version: str, cuda_available: bool, device: str) -> tuple:
+def torch_verdict(version: str, accelerator_available: bool, device: str,
+                  *, device_kind: str = "cuda") -> tuple:
     """Годится ли эта сборка torch. Отдельно от импорта, чтобы проверялось.
 
     Различает два разных провала, потому что чинятся они по-разному. `+cpu`
@@ -61,9 +71,12 @@ def torch_verdict(version: str, cuda_available: bool, device: str) -> tuple:
 
     Первый случай не гипотетический: `torch>=2.6` в requirements-файле без
     индекса даёт на Windows именно его, молча перекрывая правильную установку.
+
+    `device_kind` — что нашлось (cuda/xpu/cpu). Ускоритель у Intel называется
+    `xpu`, и совет «проверь nvidia-smi» там был бы вредным.
     """
-    if cuda_available:
-        return True, f"{device}, torch {version}"
+    if accelerator_available:
+        return True, f"{device or device_kind}, torch {version}"
     if "+cpu" in version:
         return False, (
             f"torch {version} — это CPU-сборка, карты она не увидит никогда. "
@@ -73,8 +86,10 @@ def torch_verdict(version: str, cuda_available: bool, device: str) -> tuple:
             f"на pytorch.org). Внимание: pip install -r с обычной строкой "
             f"torch вернёт CPU-колесо обратно.")
     return False, (
-        f"torch {version} собран с CUDA, но карту не видит. Смотреть драйвер "
-        f"(nvidia-smi покажет версию) и совпадает ли он с CUDA сборки.")
+        f"torch {version} карту не видит (ни cuda, ни xpu). Для NVIDIA — "
+        f"смотреть драйвер (nvidia-smi) и совпадает ли он с CUDA сборки; для "
+        f"Intel Arc нужна сборка с поддержкой XPU (PyTorch 2.5+) и драйверы "
+        f"Level Zero. Пока карты нет, всё поедет на процессоре.")
 
 
 def vram_verdict(total_gb: float) -> tuple:
@@ -95,13 +110,43 @@ def check_vram() -> tuple:
     try:
         import torch  # type: ignore
 
-        if not torch.cuda.is_available():
-            return _fail("vram", "карта недоступна (см. torch.cuda)")
-        total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        from .device import detect
+
+        dev = detect()
+        if dev == "cpu":
+            return _fail("vram", "карта недоступна (см. torch)")
+        props = getattr(torch, dev).get_device_properties(0)
+        total = getattr(props, "total_memory") / 1024 ** 3
     except Exception as e:  # noqa: BLE001
         return _fail("vram", f"не прочитать: {e}")
     ok, detail = vram_verdict(total)
     return (_ok if ok else _fail)("vram", detail)
+
+
+def check_onnx_providers() -> tuple:
+    """Умеет ли onnxruntime ускорять то, что мы ему отдадим.
+
+    Проверка стоит здесь, а не «где-нибудь потом», по одной причине: провайдер,
+    которого нет, onnxruntime принимает МОЛЧА и считает на процессоре. Замерено
+    живьём — DWPose просил CUDA, получил предупреждение в stderr и выдал 438 мс
+    вместо десятков. Числа при этом выглядят правдоподобно, и понять, что они
+    про другое железо, по ним нельзя.
+
+    Это не блокирующая проверка: на CPU всё работает, просто медленно. Поэтому
+    она предупреждает, а не останавливает — останавливать надо то, что не
+    поедет вовсе.
+    """
+    from .device import detect, onnx_providers
+
+    dev = detect()
+    want, missing = onnx_providers(dev)
+    if not missing:
+        return _ok("onnxruntime", f"{want[0]} доступен ({dev})")
+    return _ok("onnxruntime",
+               f"НЕТ {', '.join(missing)} — insightface и DWPose пойдут на CPU "
+               f"(замерено: 438 мс против десятков). Поставить "
+               f"onnxruntime-gpu под свою CUDA, иначе прогон будет медленным, "
+               f"но верным.")
 
 
 def check_disk(path: str = ".") -> tuple:
@@ -256,6 +301,7 @@ def main(argv: list) -> int:
     checks = [
         ("диск", lambda: check_disk(".")),
         ("torch", check_torch),
+        ("onnxruntime", check_onnx_providers),
         ("vram", check_vram),
         ("веса", check_weights),
         ("модель позы", check_pose_model),

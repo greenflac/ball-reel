@@ -76,7 +76,11 @@ def _analyzer():
         # get outsourced to the model being judged.
         app = FaceAnalysis(name="buffalo_l",
                            allowed_modules=["detection", "recognition", "genderage"])
-        app.prepare(ctx_id=0, det_size=(640, 640))
+        # ctx_id под реальное устройство: указать номер несуществующего
+        # ускорителя значит получить молчаливый откат внутри чужой библиотеки.
+        from .device import detect, insightface_ctx
+
+        app.prepare(ctx_id=insightface_ctx(detect()), det_size=(640, 640))
         _ANALYZER = app
     return _ANALYZER
 

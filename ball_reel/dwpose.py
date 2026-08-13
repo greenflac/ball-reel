@@ -41,6 +41,19 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+def _providers():
+    """Провайдеры onnxruntime под то устройство, что реально есть.
+
+    Раньше здесь был жёсткий CUDA-список, и onnxruntime МОЛЧА его игнорировал:
+    на замерах латентности DWPose просил CUDA и выдал 438 мс на процессоре.
+    Запрошенный, но отсутствующий провайдер не ошибка, а тихая деградация.
+    """
+    from .device import detect, onnx_providers
+
+    want, _ = onnx_providers(detect())
+    return want
+
+
 DET_ENV, POSE_ENV = "BALL_REEL_DWPOSE_DET", "BALL_REEL_DWPOSE_POSE"
 DEFAULT_DET = "~/.dwpose/yolox_l.onnx"
 DEFAULT_POSE = "~/.dwpose/dw-ll_ucoco_384.onnx"
@@ -110,7 +123,7 @@ def _session(path: Path):
     key = str(path)
     if key not in _SESSIONS:
         _SESSIONS[key] = onnxruntime.InferenceSession(
-            key, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            key, providers=list(_providers()))
     return _SESSIONS[key]
 
 

@@ -160,16 +160,44 @@ class TheReportRefusesToOverclaim(unittest.TestCase):
 
         self.b = bench
 
+    def test_a_tiny_run_refuses_to_headline_a_percentage(self):
+        # «1/1 прошло, 100%» — заголовок, который живёт своей жизнью, даже
+        # когда рядом честно написан интервал 5%..100%. Подпись читают позже
+        # заголовка, если читают вообще.
+        one = self.b.summarise([
+            {"kind": "session", "n": 1, "passed": True, "seconds": 5.0,
+             "pollen": 0.1, "attempts": [{"n": 1, "passed": True,
+                                          "check": None}]}])
+        text = self.b.render(one)
+        self.assertIn("1/1", text)          # счётчик остаётся
+        self.assertNotIn("100%", text)      # доля — нет
+        self.assertIn("НЕ отчитывается", text)
+
+    def test_the_floor_is_read_from_the_module_with_literal_counts(self):
+        floor = self.b.MIN_SESSIONS_FOR_YIELD
+        self.assertFalse(self.b.yield_is_reportable(floor - 1)[0])
+        self.assertTrue(self.b.yield_is_reportable(floor)[0])
+        self.assertGreaterEqual(floor, 5)
+
+    def test_the_refusal_points_at_what_IS_informative(self):
+        # Отказ обязан сказать, на что смотреть вместо доли: счётчики и
+        # распределение отказов работают и на малой выборке.
+        _, why = self.b.yield_is_reportable(2)
+        self.assertIn("распределение отказов", why)
+
     def test_an_empty_run_says_so_instead_of_printing_zeros(self):
         self.assertIn("судить не о чем", self.b.render(self.b.summarise([])))
 
     def test_every_percentage_is_printed_with_its_interval(self):
+        # Выборка достаточная — тогда доля печатается, и обязательно с
+        # интервалом рядом.
         s = self.b.summarise([
-            {"kind": "session", "n": 1, "passed": True, "seconds": 5.0,
+            {"kind": "session", "n": i, "passed": True, "seconds": 5.0,
              "pollen": 0.1, "attempts": [{"n": 1, "passed": True,
-                                          "check": None}]}])
+                                          "check": None}]}
+            for i in range(10)])
         text = self.b.render(s)
-        self.assertIn("1/1", text)
+        self.assertIn("10/10", text)
         self.assertIn("между", text)   # интервал рядом с долей
 
 
