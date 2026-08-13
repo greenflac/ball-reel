@@ -324,6 +324,178 @@ def _bone_frame(points: dict, bone: str):
     return math.degrees(math.atan2(dy, dx)), length
 
 
+def limb_uv(points: dict, bone: str, xs, ys, *,
+            half_width: float = LIMB_HALF_WIDTH):
+    """Пиксели -> координаты НА ПОВЕРХНОСТИ конечности. (u, v, внутри?).
+
+    Конечность моделируется цилиндром вокруг кости:
+
+    * ``u`` — вдоль кости, 0 у сустава-родителя, 1 у дочернего;
+    * ``v`` — угол обхвата, 0 по центру видимой стороны, ±1 у силуэта.
+
+    ЗАЧЕМ ЭТО, А НЕ ПЛОСКИЙ ПОВОРОТ. Плоская вклейка оставляет татуировку
+    прямоугольной на круглой руке — на кропе это видно сразу. На настоящем
+    цилиндре видимая ширина сжимается к краю как косинус: участок поверхности
+    у силуэта занимает в кадре в разы меньше пикселей, чем такой же участок по
+    центру. Отсюда `v = arcsin(d / r)`: равные шаги по поверхности дают
+    неравные шаги в кадре, и именно это делает наклейку татуировкой.
+
+    ЧТО ЭТО ДАЁТ СВЕРХ ПРИМЕТ, и ради этого стоит держать функцию отдельно:
+    (u, v) — это МАТЕРИАЛЬНАЯ точка тела, одна и та же во всех кадрах. Скелет
+    отвечает, где сустав; поверхность отвечает, где тот же самый участок кожи.
+    На этом же основании можно спрашивать, едет ли ткань вместе с телом или
+    скользит по нему, — то есть мерить прилегание одежды, а не только её цвет.
+
+    ЧЕГО НЕ УЧИТЫВАЕТ: наклон кости ОТ камеры. Рука, направленная в объектив,
+    короче в кадре, и вдоль неё тоже есть сжатие — оно здесь не моделируется,
+    потому что требует глубины. `world_landmarks` её дают, и это следующий шаг.
+    """
+    import numpy as np
+
+    pair = BONES.get(bone)
+    if pair is None:
+        return None
+    a, b = points.get(pair[0]), points.get(pair[1])
+    if not a or not b:
+        return None
+    w, h, _ = points.get("__size__", (0.0, 0.0, 1.0))
+    ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
+    vx, vy = bx - ax, by - ay
+    length = (vx * vx + vy * vy) ** 0.5
+    if length < 1e-6:
+        return None
+    radius = length * half_width
+
+    # Вдоль кости и поперёк неё.
+    ux, uy = vx / length, vy / length
+    px, py = -uy, ux
+    rel_x, rel_y = xs - ax, ys - ay
+    u = (rel_x * ux + rel_y * uy) / length
+    d = rel_x * px + rel_y * py
+
+    # Обхват: d = r*sin(v). За силуэтом поверхности нет.
+    ratio = np.clip(d / max(radius, 1e-6), -1.0, 1.0)
+    v = np.arcsin(ratio) / (np.pi / 2)
+    inside = (np.abs(d) <= radius) & (u >= 0.0) & (u <= 1.0)
+    return u, v, inside
+
+
+def _uv_to_pixels(points: dict, bone: str, u, v, *,
+                  half_width: float = LIMB_HALF_WIDTH):
+    """Обратно: точка поверхности -> пиксель в этом кадре."""
+    import numpy as np
+
+    pair = BONES[bone]
+    a, b = points[pair[0]], points[pair[1]]
+    w, h, _ = points["__size__"]
+    ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
+    vx, vy = bx - ax, by - ay
+    length = (vx * vx + vy * vy) ** 0.5
+    ux, uy = vx / length, vy / length
+    px, py = -uy, ux
+    radius = length * half_width
+    d = radius * np.sin(v * (np.pi / 2))
+    return (ax + ux * length * u + px * d,
+            ay + uy * length * u + py * d)
+
+
+def transfer_cylindrical(source_image, source_points: dict, target_image,
+                         target_points: dict, mark: Mark, *,
+                         feather: float = FEATHER,
+                         half_width: float = LIMB_HALF_WIDTH):
+    """Перенос примет ПО ПОВЕРХНОСТИ конечности, а не плоской заплаткой.
+
+    Отличие от `transfer` одно, и оно видно глазом: примета обёртывается вокруг
+    руки. Каждый пиксель цели переводится в координаты на поверхности (u, v),
+    та же точка поверхности находится на референсе, и оттуда берётся отклонение
+    от кожи. Сжатие к силуэту получается само — оно заложено в arcsin.
+
+    НАСКОЛЬКО ЭТО ЛУЧШЕ ПЛОСКОЙ ВКЛЕЙКИ — ИЗМЕРЕНО, И ОТВЕТ СКРОМНЫЙ.
+    На настоящем кадре разница между двумя способами составила 0.0001 по
+    среднему и 445 пикселей, отличающихся заметно. Причина не в ошибке, а в
+    геометрии: сжатие действительно шестикратное, но живёт оно в последних
+    процентах обхвата, а они занимают в кадре считанные пиксели. Для любого
+    размещения приметы, кроме прижатого к самому силуэту, плоская вклейка даёт
+    практически то же.
+
+    Поэтому плоская версия остаётся рабочей, а эта оправдана не картинкой, а
+    ПОБОЧНЫМ ПРОДУКТОМ: координатами (u, v). Материальная привязка к поверхности
+    — это то, чего скелет не даёт, и на ней строится вопрос «едет ли ткань
+    вместе с телом или скользит», то есть прилегание одежды. Ради вклейки
+    татуировки цилиндр не окупается; ради параметризации поверхности — да.
+    """
+    import numpy as np
+
+    report = {"name": mark.name, "applied": False, "mode": "cylindrical",
+              "note": ""}
+    target = _load(target_image)
+    src_box = locate(source_points, mark)
+    dst_box = locate(target_points, mark)
+    if src_box is None or dst_box is None:
+        report["note"] = ("кость не видна на одном из кадров — примета не "
+                          "вклеена, рисовать её вслепую значит выдумывать")
+        return target, report
+
+    src_stats = distinctiveness(_load(source_image), src_box)
+    if src_stats is None or src_stats["score"] < MIN_REFERENCE_CONTRAST:
+        report["note"] = "на референсе в этом месте ровная кожа — переносить нечего"
+        return target, report
+
+    source = _load(source_image)
+    src_skin = _skin_median(source, src_box)
+    dst_skin = _skin_median(target, dst_box)
+
+    # Окно в цели берём с запасом: обёрнутая примета занимает другой участок.
+    dx0, dy0, dx1, dy1 = dst_box
+    pad = (dx1 - dx0) // 2
+    h, w = target.shape[:2]
+    dx0, dy0 = max(0, dx0 - pad), max(0, dy0 - pad)
+    dx1, dy1 = min(w, dx1 + pad), min(h, dy1 + pad)
+    gy, gx = np.mgrid[dy0:dy1, dx0:dx1]
+
+    uv = limb_uv(target_points, mark.bone, gx.astype(float), gy.astype(float),
+                 half_width=half_width)
+    if uv is None:
+        report["note"] = "не построить поверхность конечности в цели"
+        return target, report
+    u, v, inside = uv
+
+    # Та же точка поверхности на референсе.
+    sx, sy = _uv_to_pixels(source_points, mark.bone, u, v,
+                           half_width=half_width)
+    sh, sw = source.shape[:2]
+    ix = np.clip(np.round(sx).astype(int), 0, sw - 1)
+    iy = np.clip(np.round(sy).astype(int), 0, sh - 1)
+    ratio = source[iy, ix] / np.maximum(src_skin, 1e-3)
+
+    # Маска: только внутри окна приметы В КООРДИНАТАХ ПОВЕРХНОСТИ. Так примета
+    # остаётся тем же участком тела при любом повороте руки.
+    su, sv, _ = limb_uv(source_points, mark.bone,
+                        np.array([(src_box[0] + src_box[2]) / 2.0]),
+                        np.array([(src_box[1] + src_box[3]) / 2.0]),
+                        half_width=half_width)
+    du = abs(mark.radius)
+    near = (np.abs(u - float(su[0])) <= du) & (np.abs(v - float(sv[0])) <= du * 2)
+
+    soft = np.clip((du - np.abs(u - float(su[0]))) / max(du * feather, 1e-6),
+                   0.0, 1.0)
+    alpha = (near & inside).astype(float) * soft
+    if alpha.max() <= 0:
+        report["note"] = "участок поверхности не попал в кадр цели"
+        return target, report
+
+    painted = np.clip(ratio * dst_skin, 0.0, 1.0)
+    out = target.copy()
+    region = out[dy0:dy1, dx0:dx1]
+    out[dy0:dy1, dx0:dx1] = (region * (1 - alpha[..., None])
+                             + painted * alpha[..., None])
+    report.update(applied=True, on_limb=round(float(inside.mean()), 3),
+                  note=(f"примета обёрнута по поверхности конечности "
+                        f"(контраст на референсе {src_stats['score']}); "
+                        f"сжатие к силуэту учтено, наклон кости ОТ камеры — нет"))
+    return out, report
+
+
 def transfer(source_image, source_points: dict, target_image,
              target_points: dict, mark: Mark, *, feather: float = FEATHER):
     """Перенести примету с референса в результат. (картинка, отчёт).

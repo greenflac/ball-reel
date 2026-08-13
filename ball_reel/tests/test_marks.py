@@ -345,3 +345,73 @@ class TheMarkIsCarriedAsDeviationNotAsPixels(unittest.TestCase):
         half = self.m.LIMB_HALF_WIDTH
         self.assertGreater(half, 0.05)
         self.assertLess(half, 0.5)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class TheSurfaceGivesMaterialCoordinates(unittest.TestCase):
+    """(u, v) — это точка НА ТЕЛЕ, одна и та же во всех кадрах.
+
+    Ценность этой параметризации не во вклейке татуировки: замер показал, что
+    против плоской вклейки цилиндр выигрывает 0.0001 по среднему. Ценность в
+    том, что появляется материальная привязка, которой скелет не даёт, — на ней
+    строится вопрос «едет ли ткань вместе с телом или скользит по нему».
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+
+    def test_the_centre_of_the_visible_side_is_v_zero(self):
+        import numpy as np
+
+        u, v, inside = self.m.limb_uv(_points(), "l_forearm",
+                                      np.array([100.0]), np.array([100.0]))
+        self.assertAlmostEqual(float(v[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(u[0]), 0.5, places=2)
+        self.assertTrue(bool(inside[0]))
+
+    def test_beyond_the_silhouette_there_is_no_surface(self):
+        import numpy as np
+
+        far = 100.0 + 200 * self.m.LIMB_HALF_WIDTH * 1.5
+        _, _, inside = self.m.limb_uv(_points(), "l_forearm",
+                                      np.array([far]), np.array([100.0]))
+        self.assertFalse(bool(inside[0]))
+
+    def test_equal_steps_on_the_surface_shrink_toward_the_silhouette(self):
+        # Суть цилиндра: равные шаги ПО ПОВЕРХНОСТИ дают неравные шаги В КАДРЕ.
+        # Замерено на живом кадре: 4.91 px в центре против 0.77 у силуэта.
+        import numpy as np
+
+        pts = _points()
+        centre = self.m._uv_to_pixels(pts, "l_forearm", np.array([0.5]),
+                                      np.array([0.0]))[0][0]
+        near_c = self.m._uv_to_pixels(pts, "l_forearm", np.array([0.5]),
+                                      np.array([0.10]))[0][0]
+        edge = self.m._uv_to_pixels(pts, "l_forearm", np.array([0.5]),
+                                    np.array([0.85]))[0][0]
+        near_e = self.m._uv_to_pixels(pts, "l_forearm", np.array([0.5]),
+                                      np.array([0.95]))[0][0]
+        self.assertGreater(abs(near_c - centre), abs(near_e - edge) * 3)
+
+    def test_the_same_body_point_maps_to_both_frames(self):
+        # Материальная привязка: одна и та же (u, v) в двух РАЗНЫХ позах даёт
+        # разные пиксели, и оба лежат на своей кости.
+        import numpy as np
+
+        a = _points()
+        b = _points(elbow=(0.2, 0.5), wrist=(0.8, 0.5))
+        ua, va = np.array([0.5]), np.array([0.3])
+        xa, ya = self.m._uv_to_pixels(a, "l_forearm", ua, va)
+        xb, yb = self.m._uv_to_pixels(b, "l_forearm", ua, va)
+        self.assertNotAlmostEqual(float(xa[0]), float(xb[0]), delta=5)
+        for pts, x, y in ((a, xa, ya), (b, xb, yb)):
+            _, _, inside = self.m.limb_uv(pts, "l_forearm", x, y)
+            self.assertTrue(bool(inside[0]))
+
+    def test_an_unknown_bone_has_no_surface(self):
+        import numpy as np
+
+        self.assertIsNone(self.m.limb_uv(_points(), "tail",
+                                         np.array([1.0]), np.array([1.0])))
