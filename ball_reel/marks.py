@@ -639,6 +639,44 @@ def half_width_for(bone: str, override=None) -> float:
     return LIMB_HALF_WIDTH_BY_BONE.get(bone, LIMB_HALF_WIDTH)
 
 
+def _warp_to_bone(layer, src_angle: float, dst_angle: float,
+                  along_scale: float, across_scale: float, out_size,
+                  fill: float):
+    """Патч из системы ОДНОЙ кости в систему ДРУГОЙ, с разным масштабом по осям.
+
+    Три шага, и разделять их обязательно: повернуть кость вертикально,
+    растянуть отдельно ВДОЛЬ и отдельно ПОПЕРЁК, повернуть на целевую кость.
+    Единый поворот с одним масштабом, который стоял здесь раньше, не умеет
+    второго шага в принципе — а именно он и нужен, когда конечность в кадре
+    укоротилась от разворота к камере, но не похудела.
+    """
+    import numpy as np
+    from PIL import Image
+
+    img = Image.fromarray(layer.astype(np.float32), mode="F")
+    img = img.rotate(src_angle - 90.0, resample=Image.BILINEAR, expand=True,
+                     fillcolor=fill)
+    w = max(1, int(round(img.width * across_scale)))
+    h = max(1, int(round(img.height * along_scale)))
+    img = img.resize((w, h), Image.BILINEAR)
+    img = img.rotate(90.0 - dst_angle, resample=Image.BILINEAR, expand=True,
+                     fillcolor=fill)
+
+    # По центру в окно назначения: обрезать лишнее, добить недостающее.
+    ow, oh = out_size
+    out = np.full((oh, ow), fill, dtype=np.float64)
+    arr = np.asarray(img, dtype=np.float64)
+    sy = (arr.shape[0] - oh) // 2
+    sx = (arr.shape[1] - ow) // 2
+    ay0, by0 = max(0, sy), max(0, -sy)
+    ax0, bx0 = max(0, sx), max(0, -sx)
+    ch = min(arr.shape[0] - ay0, oh - by0)
+    cw = min(arr.shape[1] - ax0, ow - bx0)
+    if ch > 0 and cw > 0:
+        out[by0:by0 + ch, bx0:bx0 + cw] = arr[ay0:ay0 + ch, ax0:ax0 + cw]
+    return out
+
+
 def _load(image):
     """Картинка -> массив 0..1. Принимает путь или уже готовый массив."""
     import numpy as np
@@ -649,6 +687,53 @@ def _load(image):
             return np.asarray(im.convert("RGB"), dtype=np.float64) / 255.0
     arr = np.asarray(image, dtype=np.float64)
     return arr / 255.0 if arr.max() > 1.0 else arr
+
+
+def measured_limb_width(skin_mask, points: dict, bone: str,
+                        *, along: float = 0.5, reach: int = 160):
+    """Ширина конечности В ПИКСЕЛЯХ, замером по маске кожи. None — не измерить.
+
+    ЗАЧЕМ, ЕСЛИ ЕСТЬ `half_width_for`. Табличная полуширина выводится из ДЛИНЫ
+    кости, и это верно ровно до тех пор, пока конечность лежит поперёк взгляда.
+    Рука, повёрнутая ОТ камеры, коротка в проекции и при этом не тоньше — модель
+    «ширина = доля длины» на ней разваливается.
+
+    ИЗМЕРЕНО на живой паре: на фото личности плечо даёт длину 339.6 px при
+    ширине 65 px (отношение 0.191), а на кадре цели — длину 148.9 px при ширине
+    84 px (отношение 0.564). Втрое. Вклейка, отмасштабированная по одной только
+    длине, сжимается поперёк примерно втрое сильнее нужного, и примета выглядит
+    мелкой и сдвинутой к суставу. Найдено ГЛАЗАМИ, подтверждено этими числами.
+
+    Мерится непрерывный пробег кожи поперёк кости через её точку `along`:
+    непрерывный — чтобы не приплюсовать вторую конечность или другую часть тела,
+    оказавшуюся на том же луче.
+    """
+    import numpy as np
+
+    frame = _bone_frame(points, bone)
+    if frame is None or skin_mask is None:
+        return None
+    pair = BONES[bone]
+    a, b = points[pair[0]], points[pair[1]]
+    w, h = _frame_size(points)
+    ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
+    cx, cy = ax + (bx - ax) * along, ay + (by - ay) * along
+    dx, dy = bx - ax, by - ay
+    n = (dx * dx + dy * dy) ** 0.5
+    if n < 1e-6:
+        return None
+    px, py = -dy / n, dx / n
+
+    mask = np.asarray(skin_mask)
+    mh, mw = mask.shape[:2]
+    run = 0
+    for sign in (1, -1):
+        for t in range(0 if sign > 0 else 1, reach):
+            x, y = int(cx + px * t * sign), int(cy + py * t * sign)
+            if not (0 <= x < mw and 0 <= y < mh) or not mask[y, x]:
+                break
+            run += 1
+    return run or None
 
 
 def _bone_frame(points: dict, bone: str):
@@ -1009,37 +1094,55 @@ def transfer(source_image, source_points: dict, target_image,
         # поворота и растяжения размазался бы в тёмную кайму по краю приметы.
         ratio = np.where(m[..., None], ratio, 1.0)
 
-    # Геометрия: повернуть и растянуть под кость в результате.
+    # ГЕОМЕТРИЯ: ВДОЛЬ И ПОПЕРЁК КОСТИ МАСШТАБИРУЮТСЯ ПО-РАЗНОМУ.
+    #
+    # Здесь стоял один поворот и один масштаб — по длине кости, в обе стороны.
+    # Это верно, пока конечность лежит поперёк взгляда, и разваливается, когда
+    # она повёрнута К камере: проекция вдоль сжимается, поперёк — нет.
+    #
+    # Замерено на живой паре: плечо на фото личности 339.6 px длиной при 65 px
+    # ширины (0.191), на кадре цели — 148.9 px при 84 px (0.564). Втрое. Вклейка
+    # по одной длине выходила поперёк примерно втрое уже нужного, и примета
+    # читалась как мелкая и съехавшая к суставу. Найдено ГЛАЗАМИ, подтверждено
+    # этими числами; до того предел был записан оговоркой в docstring `limb_uv`.
+    #
+    # Ширина берётся ЗАМЕРОМ по маске кожи, когда маска есть, и падает обратно
+    # на табличную модель, когда нет: без маски отличить короткую руку от
+    # повёрнутой невозможно, и делать вид, что можем, нельзя.
     src_frame = _bone_frame(source_points, mark.bone)
     dst_frame = _bone_frame(target_points, mark.bone)
+    dx0, dy0, dx1, dy1 = dst_box
+    dh, dw = dy1 - dy0, dx1 - dx0
     if src_frame and dst_frame:
-        turn = dst_frame[0] - src_frame[0]
-        # Поворот делаем поканально, чтобы не терять цвет отношения.
+        src_ang, src_len = src_frame
+        dst_ang, dst_len = dst_frame
+        model_w = half_width_for(mark.bone) * 2
+        src_w = (measured_limb_width(source_skin_mask, source_points, mark.bone)
+                 or src_len * model_w)
+        dst_w = (measured_limb_width(skin_mask, target_points, mark.bone)
+                 or dst_len * model_w)
+        along_scale = dst_len / max(src_len, 1e-6)
+        across_scale = dst_w / max(src_w, 1e-6)
+        report["foreshortening"] = round(across_scale / max(along_scale, 1e-6), 3)
+        chans = [_warp_to_bone(ratio[..., c], src_ang, dst_ang, along_scale,
+                               across_scale, (dw, dh), 1.0) for c in range(3)]
+        ratio = np.stack(chans, axis=-1)
+        if valid is not None:
+            # Маска едет ТЕМИ ЖЕ преобразованиями, иначе перестанет
+            # соответствовать отношению ровно там, где нужна, — на краю.
+            valid = _warp_to_bone(valid, src_ang, dst_ang, along_scale,
+                                  across_scale, (dw, dh), 0.0)
+    else:
         chans = []
         for c in range(3):
             layer = Image.fromarray(ratio[..., c].astype(np.float32), mode="F")
-            layer = layer.rotate(-turn, resample=Image.BILINEAR, fillcolor=1.0)
-            chans.append(np.asarray(layer, dtype=np.float64))
+            chans.append(np.asarray(layer.resize((dw, dh), Image.BILINEAR),
+                                    dtype=np.float64))
         ratio = np.stack(chans, axis=-1)
         if valid is not None:
-            # Маска едет ТЕМИ ЖЕ преобразованиями, что и отношение. Иначе она
-            # перестанет ему соответствовать ровно там, где нужна, — на краю.
-            layer = Image.fromarray(valid.astype(np.float32), mode="F")
-            valid = np.asarray(layer.rotate(-turn, resample=Image.BILINEAR,
-                                            fillcolor=0.0), dtype=np.float64)
-
-    dx0, dy0, dx1, dy1 = dst_box
-    dh, dw = dy1 - dy0, dx1 - dx0
-    chans = []
-    for c in range(3):
-        layer = Image.fromarray(ratio[..., c].astype(np.float32), mode="F")
-        layer = layer.resize((dw, dh), Image.BILINEAR)
-        chans.append(np.asarray(layer, dtype=np.float64))
-    ratio = np.stack(chans, axis=-1)
-    if valid is not None:
-        valid = np.asarray(
-            Image.fromarray(valid.astype(np.float32), mode="F")
-            .resize((dw, dh), Image.BILINEAR), dtype=np.float64)
+            valid = np.asarray(
+                Image.fromarray(valid.astype(np.float32), mode="F")
+                .resize((dw, dh), Image.BILINEAR), dtype=np.float64)
 
     painted = np.clip(ratio * dst_skin, 0.0, 1.0)
 
