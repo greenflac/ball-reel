@@ -40,6 +40,59 @@ def _with_patch(size=200, box=(80, 80, 120, 120), value=0.25, sat=None):
     return a
 
 
+def _partly_inked(fill, size=200, box=(60, 60, 140, 140), value=0.05):
+    """Кожа с приметой, закрывающей ДОЛЮ окна. Ключевое слово — долю.
+
+    Из-за отсутствия ровно этой функции модуль полгода жил со ступенькой:
+    все синтетические образцы заливали окно на 100%, то есть стояли в
+    единственной точке, где дефект не проявляется.
+    """
+    a = _skin(size)
+    x0, y0, x1, y1 = box
+    a[y0:y1, x0:x0 + int((x1 - x0) * fill)] = value
+    return a
+
+
+def _contour_mark(size=200, box=(60, 60, 140, 140), pitch=6, width=2):
+    """Контурная татуировка: тонкие линии, чернил мало, глазу видно отлично."""
+    a = _skin(size)
+    x0, y0, x1, y1 = box
+    for x in range(x0, x1, pitch):
+        a[y0:y1, x:x + width] = 0.05
+    return a
+
+
+def _limb_over_background(size=300, bone_px=200.0, inked=False):
+    """Рука поперёк ТЁМНОГО ФОНА — то, чего синтетика раньше не давала.
+
+    Прежние образцы состояли из кожи целиком, поэтому вопрос «а что попадает
+    в опорное кольцо» в них не мог возникнуть в принципе. На живом кадре он
+    возник сразу: опорой стал тёмный топ, и ровная кожа получила приметность
+    1.411.
+    """
+    import numpy as np
+    from ball_reel import marks
+
+    scene = np.zeros((size, size, 3), dtype=np.float64)
+    scene[..., 2] = 0.18                       # тёмно-синий фон
+    ax, ay = size / 2.0, size * 0.17
+    half = bone_px * marks.half_width_for("l_forearm")
+    gy, gx = np.mgrid[0:size, 0:size]
+    on_arm = ((np.abs(gx - ax) <= half) & (gy >= ay) & (gy <= ay + bone_px))
+    scene[on_arm] = [0.72, 0.72, 0.72 * 0.82]
+    points = {
+        "l_elbow": (ax / size, ay / size, 0.9),
+        "l_wrist": (ax / size, (ay + bone_px) / size, 0.9),
+        "__size__": (float(size), float(size), 1.0),
+    }
+    if inked:
+        x0, y0, x1, y1 = marks.locate(points, marks.Mark(
+            bone="l_forearm", along=0.5, radius=0.15))
+        for x in range(x0, x1, 6):
+            scene[y0:y1, x:x + 2] = 0.05
+    return scene, points
+
+
 def _points(size=200, elbow=(0.5, 0.2), wrist=(0.5, 0.8), vis=0.9):
     """Скелет с одной костью «локоть-запястье» по вертикали."""
     return {
@@ -136,6 +189,52 @@ class DistinctivenessIsMeasuredAgainstNeighbouringSkin(unittest.TestCase):
     def test_a_region_below_the_floor_is_refused(self):
         self.assertIsNone(self.m.distinctiveness(_with_patch(), (80, 80, 90, 90)))
 
+    def test_the_score_grows_with_how_much_of_the_window_is_inked(self):
+        # ДЕФЕКТ, КОТОРЫЙ ЭТОТ ТЕСТ ЛОВИТ. Первая версия брала медиану окна,
+        # а медиана двухмодальной выборки — это её большинство. Замерено на
+        # старом коде: заливка 10 / 30 / 49% давала score ровно 0.0000,
+        # заливка 51% — 0.5546, а 80 и 100% — одинаковые 1.1091. Метрика была
+        # ступенькой на половине и не отличала ни тонкую примету от кожи, ни
+        # половину рисунка от целого.
+        box = (60, 60, 140, 140)
+        scores = [self.m.distinctiveness(_partly_inked(f), box)["score"]
+                  for f in (0.0, 0.1, 0.3, 0.5, 0.7, 1.0)]
+        self.assertEqual(scores[0], 0.0)               # чистая кожа
+        for lo, hi in zip(scores, scores[1:]):
+            self.assertGreater(hi, lo + 0.05, f"нет хода: {scores}")
+        # И отдельно — что дефект именно этой формы: ниже половины больше не ноль.
+        self.assertGreater(scores[1], self.m.MIN_REFERENCE_CONTRAST)
+
+    def test_a_thin_contour_tattoo_is_a_mark_not_bare_skin(self):
+        # Самый дорогой частный случай ступеньки: контурная тату занимает
+        # чернилами меньше половины окна, и старая метрика объявляла её
+        # отсутствием приметы НА ВХОДЕ — то есть отказывалась переносить ровно
+        # то, ради чего модуль написан.
+        got = self.m.distinctiveness(_contour_mark(), (60, 60, 140, 140))
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(got["luma_contrast"], 0)
+        verdict = self.m.mark_transferred(got, got)
+        self.assertEqual(verdict["state"], "measured")
+
+    def test_coverage_tells_the_operator_the_window_is_oversized(self):
+        # Диагностика, а не вердикт: одно и то же число score получается у
+        # сплошного слабого пятна и у тонкого контура. Различает их coverage,
+        # и без него оператор не поймёт, почему примету «не видно».
+        wide = self.m.distinctiveness(_partly_inked(0.9), (60, 60, 140, 140))
+        sparse = self.m.distinctiveness(_partly_inked(0.1), (60, 60, 140, 140))
+        self.assertGreater(wide["coverage"], 0.8)
+        self.assertLess(sparse["coverage"], 0.2)
+
+    def test_peak_separates_a_faded_mark_from_a_shrunken_one(self):
+        # Две разные поломки с одинаковой средней: примета уменьшилась вдвое,
+        # либо выцвела вдвое. Чинятся они разным, и слепить их в одно число
+        # значит отправить чинить не тот конец.
+        box = (60, 60, 140, 140)
+        shrunk = self.m.distinctiveness(_partly_inked(0.5, value=0.05), box)
+        faded = self.m.distinctiveness(_partly_inked(1.0, value=0.40), box)
+        self.assertAlmostEqual(shrunk["score"], faded["score"], delta=0.12)
+        self.assertGreater(shrunk["peak"], faded["peak"] * 1.5)
+
     def test_the_floor_is_read_from_the_module_with_literal_sizes(self):
         floor = self.m.MIN_MARK_PX
         self.assertIsNone(
@@ -197,6 +296,46 @@ class LostIsDistinguishedFromNotObserved(unittest.TestCase):
         got = self.m.mark_transferred(self.ref, produced)
         self.assertFalse(got["verdict"])
         self.assertIn("перевернулся", got["note"])
+
+    def test_a_weak_mark_replaced_by_its_opposite_is_still_a_failure(self):
+        # ДЫРА, КОТОРУЮ ЭТОТ ТЕСТ ЗАКРЫВАЕТ. Проверка знака была обусловлена
+        # тем, что контраст РЕЗУЛЬТАТА дотягивает до порога входа. Поэтому в
+        # окне «референс слабоват» (0.08..0.16) перевёрнутый результат проходил
+        # как «примета на месте»: величина сохранилась, а направление не
+        # смотрели.
+        #
+        # Числа тут литеральные и намеренно лежат в этом окне: тёмная примета
+        # 0.1386 на референсе, светлое пятно 0.0783 в результате — сохранилось
+        # 56%, порог величины взят, а примета противоположная.
+        box = (60, 60, 140, 140)
+        ref = self.m.distinctiveness(_partly_inked(0.125, value=0.05), box)
+        produced = self.m.distinctiveness(_partly_inked(0.1375, value=0.98), box)
+        self.assertLess(produced["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertGreater(produced["score"] / ref["score"],
+                           self.m.PRESENT_RATIO)
+        got = self.m.mark_transferred(ref, produced)
+        self.assertFalse(got["verdict"], got["note"])
+        self.assertIn("перевернулся", got["note"])
+
+    def test_a_colour_mark_without_a_luma_direction_says_so_instead_of_guessing(self):
+        # Обратная сторона той же проверки: цветная татуировка той же светлоты,
+        # что кожа, отличается насыщенностью. Знак её яркости — шум, и судить
+        # по нему нельзя. Молчаливое «прошло» и молчаливое «перевернулось» тут
+        # одинаково нечестны, поэтому отказ проверять знак произносится вслух.
+        import numpy as np
+
+        ref_img, out_img = _skin(), _skin()
+        # Пятно той же яркости, но насыщенное: меняем только распределение
+        # каналов, сохраняя взвешенную сумму.
+        ref_img[80:120, 80:120] = [0.95, 0.66, 0.30]
+        out_img[80:120, 80:120] = [0.30, 0.76, 0.95]
+        box = (80, 80, 120, 120)
+        ref = self.m.distinctiveness(ref_img, box)
+        produced = self.m.distinctiveness(out_img, box)
+        self.assertLess(abs(ref["luma_contrast"]), self.m.SIGN_MIN)
+        got = self.m.mark_transferred(ref, produced)
+        self.assertTrue(got["verdict"], got["note"])
+        self.assertIn("Направление НЕ проверялось", got["note"])
 
     def test_the_ratio_is_read_from_the_module_with_literal_inputs(self):
         ratio = self.m.PRESENT_RATIO
@@ -415,3 +554,206 @@ class TheSurfaceGivesMaterialCoordinates(unittest.TestCase):
 
         self.assertIsNone(self.m.limb_uv(_points(), "tail",
                                          np.array([1.0]), np.array([1.0])))
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class TheBaselineStaysOnTheLIMB(unittest.TestCase):
+    """Опорой обязана быть кожа этой конечности, а не то, что рядом в кадре.
+
+    Дефект был арифметический и от синтетики скрытый. Половина опорного кольца
+    равна `radius * SURROUND_SCALE` длины кости, то есть при значениях по
+    умолчанию 0.15 и 2.0 составляет 0.30 длины — против полуширины предплечья
+    0.15. Кольцо вдвое шире руки, значит на любом настоящем кадре половина
+    «кожи» — это фон.
+
+    Все прежние образцы состояли из кожи целиком, поэтому вопрос не мог даже
+    возникнуть. Здесь рука лежит поперёк тёмного фона.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+        self.mark = marks.Mark(bone="l_forearm", along=0.5, radius=0.15,
+                               name="tattoo")
+
+    def test_bare_skin_over_a_dark_background_is_not_a_mark(self):
+        scene, pts = _limb_over_background()
+        box = self.m.locate(pts, self.mark)
+        got = self.m.distinctiveness(scene, box, points=pts, bone="l_forearm")
+        self.assertLess(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertEqual(got["baseline"], "limb")
+        self.assertEqual(self.m.mark_transferred(got, got)["state"],
+                         "no_mark_on_reference")
+
+    def test_a_real_tattoo_on_that_same_arm_is_still_found(self):
+        # Обратная сторона: починка, которая просто глушит число, — регресс.
+        scene, pts = _limb_over_background(inked=True)
+        box = self.m.locate(pts, self.mark)
+        got = self.m.distinctiveness(scene, box, points=pts, bone="l_forearm")
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(got["luma_contrast"], 0)
+
+    def test_without_a_skeleton_the_contaminated_baseline_is_flagged(self):
+        # Скелета может не быть на входе. Тогда честно не «число», а «число и
+        # предупреждение»: молча выдать приметность ровной коже нельзя.
+        scene, pts = _limb_over_background()
+        box = self.m.locate(pts, self.mark)
+        blind = self.m.distinctiveness(scene, box)
+        self.assertTrue(blind["baseline_suspect"])
+        self.assertEqual(blind["baseline"], "ring")
+        self.assertGreater(blind["baseline_spread"], self.m.MAX_BASELINE_SPREAD)
+
+    def test_the_report_passes_the_skeleton_through(self):
+        # Сводка знает оба скелета, значит отговорок «геометрии не было» у неё
+        # нет. Раньше она их не прокидывала, и весь путь целиком судил по фону.
+        scene, pts = _limb_over_background()
+        got = self.m.marks_report(scene, pts, scene, pts, [self.mark])
+        self.assertEqual(got["measured"], 0)
+        self.assertEqual(got["marks"][0]["state"], "no_mark_on_reference")
+
+    def test_a_window_wider_than_the_limb_measures_only_the_limb(self):
+        # Найдено этим же тестовым классом уже ПОСЛЕ первой правки, и это
+        # показательно: чистили опору, а грязным остался второй конец сравнения.
+        # Окно с radius 0.45 шире руки втрое, опора при этом бралась правильная
+        # — и ровная кожа получала score 1.184, потому что «приметой» работал
+        # фон, попавший в окно. Чистить надо оба конца.
+        scene, pts = _limb_over_background()
+        fat = self.m.Mark(bone="l_forearm", along=0.5, radius=0.45)
+        box = self.m.locate(pts, fat)
+        blind = self.m.distinctiveness(scene, box)
+        got = self.m.distinctiveness(scene, box, points=pts, bone="l_forearm")
+        self.assertGreater(blind["score"], 1.0)          # что было
+        self.assertLess(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(got["pixels"], (box[2] - box[0]) * (box[3] - box[1]))
+
+    def test_no_supporting_skin_is_refused_rather_than_guessed(self):
+        # Опоры может не остаться вовсе — тогда это ОТКАЗ ИЗМЕРЯТЬ. Прежняя
+        # версия в этом случае тихо брала кольцо ЦЕЛИКОМ, вместе с самой
+        # приметой: опора тем хуже, чем сильнее её не хватает, и молча.
+        import numpy as np
+
+        tiny = _skin(size=40)
+        whole = (0, 0, 40, 40)               # окно занимает весь кадр
+        self.assertIsNone(self.m._ring_pixels(tiny, whole)[0])
+        self.assertIsNone(self.m._skin_median(tiny, whole))
+        self.assertIsNone(self.m.distinctiveness(tiny, whole))
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class LimbWidthIsPerBone(unittest.TestCase):
+    """Одного числа на все кости не бывает, и обоснование обязано сходиться.
+
+    Здесь стояло единственное значение 0.22 с пояснением «конечность вчетверо
+    длиннее своей ширины». Из этого пояснения следует 0.125 — оно противоречило
+    собственному числу почти вдвое, и капсула получалась шире руки.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+
+    def test_a_thigh_is_relatively_thicker_than_a_shin(self):
+        # Не «число в диапазоне», а проверяемое утверждение об анатомии.
+        self.assertGreater(self.m.half_width_for("l_thigh"),
+                           self.m.half_width_for("l_shin"))
+        self.assertGreater(self.m.half_width_for("r_upperarm"),
+                           self.m.half_width_for("r_forearm"))
+
+    def test_an_unlisted_bone_falls_back_to_the_default(self):
+        self.assertEqual(self.m.half_width_for("tail"), self.m.LIMB_HALF_WIDTH)
+
+    def test_an_explicit_override_beats_the_table(self):
+        self.assertEqual(self.m.half_width_for("l_thigh", 0.33), 0.33)
+
+    def test_the_capsule_actually_clips_at_the_declared_width(self):
+        # Прежний тест на эту константу утверждал лишь, что она между 0.05 и
+        # 0.5, то есть не сторожил ничего: любая правка числа его проходила.
+        # Здесь проверяется, что объявленное число — это ГРАНИЦА ПОВЕРХНОСТИ.
+        import numpy as np
+
+        pts = _points()                        # кость 120 px по вертикали
+        half = self.m.half_width_for("l_forearm") * 120.0
+        inside = 100.0 + half * 0.9
+        outside = 100.0 + half * 1.1
+        _, _, got_in = self.m.limb_uv(pts, "l_forearm", np.array([inside]),
+                                      np.array([100.0]))
+        _, _, got_out = self.m.limb_uv(pts, "l_forearm", np.array([outside]),
+                                       np.array([100.0]))
+        self.assertTrue(bool(got_in[0]))
+        self.assertFalse(bool(got_out[0]))
+
+    def test_a_thigh_mark_uses_the_thigh_width_not_the_forearm_one(self):
+        # Таблица должна доезжать до геометрии, а не украшать модуль.
+        import numpy as np
+
+        pts = {"l_hip": (0.5, 0.2, 0.9), "l_knee": (0.5, 0.8, 0.9),
+               "__size__": (200.0, 200.0, 1.0)}
+        edge = 100.0 + self.m.half_width_for("l_forearm") * 120.0 * 1.2
+        _, _, on_thigh = self.m.limb_uv(pts, "l_thigh", np.array([edge]),
+                                        np.array([100.0]))
+        _, _, on_arm = self.m.limb_uv(_points(), "l_forearm", np.array([edge]),
+                                      np.array([100.0]))
+        self.assertTrue(bool(on_thigh[0]))     # бедро сюда достаёт
+        self.assertFalse(bool(on_arm[0]))      # предплечье — нет
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class TheRealPoseProducerMustNotFailSILENTLY(unittest.TestCase):
+    """Самый дорогой отказ — тот, что выглядит как работа.
+
+    `pose.landmarks` отдаёт точки, нормированные в 0..1, и размера кадра не
+    несёт: ему он не нужен, там всё сравнивается в долях. Этот модуль считает в
+    пикселях. Стыка между ними не было, и `locate` на настоящем выходе позы
+    возвращал None — то есть весь модуль примет отвечал «кость не видна» на
+    любой живой вход, и отвечал бы так молча и вечно.
+
+    Синтетика этого поймать не могла: `_points` здесь всегда клала `__size__`
+    сама, то есть тесты кормили модуль не тем, чем его кормит пайплайн.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+        self.mark = marks.Mark(bone="l_forearm", along=0.5, radius=0.15)
+
+    def _as_pose_returns_it(self):
+        """Ровно та форма, что у `pose.landmarks`: имя -> (x, y, visibility)."""
+        return {"l_elbow": (0.5, 0.2, 0.9), "l_wrist": (0.5, 0.8, 0.9)}
+
+    def test_a_skeleton_without_a_frame_size_is_an_ERROR_not_a_shrug(self):
+        with self.assertRaises(ValueError) as cm:
+            self.m.locate(self._as_pose_returns_it(), self.mark)
+        self.assertIn("attach_size", str(cm.exception))
+
+    def test_attach_size_makes_the_real_producer_usable(self):
+        import numpy as np
+
+        pts = self.m.attach_size(self._as_pose_returns_it(), (200, 200))
+        box = self.m.locate(pts, self.mark)
+        self.assertIsNotNone(box)
+        self.assertAlmostEqual((box[0] + box[2]) / 2, 100, delta=2)
+        # И то же самое от картинки, а не от пары чисел: вызывающему обычно
+        # проще подать кадр, который у него и так в руках.
+        from_image = self.m.attach_size(self._as_pose_returns_it(), _skin(200))
+        self.assertEqual(self.m.locate(from_image, self.mark), box)
+
+    def test_every_pixel_facing_entry_point_refuses_the_same_way(self):
+        # Не только locate: любая дверь в модуль, считающая в пикселях, обязана
+        # сказать одно и то же. Иначе дыру заткнут в одном месте и оставят в
+        # трёх.
+        import numpy as np
+
+        bare = self._as_pose_returns_it()
+        for call in (
+            lambda: self.m.locate(bare, self.mark),
+            lambda: self.m.limb_uv(bare, "l_forearm", np.array([1.0]),
+                                   np.array([1.0])),
+            lambda: self.m._bone_frame(bare, "l_forearm"),
+            lambda: self.m._uv_to_pixels(bare, "l_forearm", np.array([0.5]),
+                                         np.array([0.0])),
+        ):
+            with self.assertRaises(ValueError):
+                call()

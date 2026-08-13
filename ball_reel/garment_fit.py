@@ -234,8 +234,7 @@ def _bone_frame(points: dict, bone: str, min_visibility: float):
     return (ax, ay), (ux, uy), (-uy, ux), length
 
 
-def surface_to_pixel(points: dict, bone: str, u, v, *,
-                     half_width: float = marks.LIMB_HALF_WIDTH,
+def surface_to_pixel(points: dict, bone: str, u, v, *, half_width=None,
                      min_visibility: float = 0.5):
     """Точка поверхности (u, v) -> пиксель этого кадра. Обратна `marks.limb_uv`.
 
@@ -244,6 +243,13 @@ def surface_to_pixel(points: dict, bone: str, u, v, *,
     подписаться на чужие правки. Расхождение с оригиналом ловит тест, который
     гоняет туда-обратно через настоящий `marks.limb_uv`: если формулы разойдутся,
     круговой прогон сломается, а не тихо соврёт.
+
+    Полуширина берётся через `marks.half_width_for`, а не из одной константы:
+    у бедра и предплечья она разная в долях собственной длины, и жёсткое число
+    здесь означало бы, что круговой прогон сходится только на той кости, для
+    которой это число угадано. Ровно так и было — до появления таблицы по
+    костям формула совпадала лишь на предплечье, а тест этого не показывал,
+    потому что гонял только предплечье.
     """
     import numpy as np
 
@@ -251,8 +257,9 @@ def surface_to_pixel(points: dict, bone: str, u, v, *,
     if frame is None:
         return None
     (ax, ay), (ux, uy), (px, py), length = frame
+    radius = length * marks.half_width_for(bone, half_width)
     # d = r*sin(v * pi/2) — ровно то, что limb_uv обращает через arcsin.
-    d = length * half_width * np.sin(np.asarray(v, dtype=float) * (np.pi / 2))
+    d = radius * np.sin(np.asarray(v, dtype=float) * (np.pi / 2))
     u = np.asarray(u, dtype=float)
     return ax + ux * length * u + px * d, ay + uy * length * u + py * d
 

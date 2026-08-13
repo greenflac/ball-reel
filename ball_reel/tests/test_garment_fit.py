@@ -130,6 +130,25 @@ class TheSurfaceIsTheOneMarksParameterises(unittest.TestCase):
         self.assertTrue(bool(np.allclose(u_in, u_out, atol=1e-6)), u_out)
         self.assertTrue(bool(np.allclose(v_in, v_out, atol=1e-6)), v_out)
 
+    def test_the_round_trip_holds_on_a_bone_of_a_DIFFERENT_thickness(self):
+        # Тест выше гонял только предплечье, и этого было достаточно ровно до
+        # тех пор, пока полуширина была одна на все кости. Как только она стала
+        # табличной (бедро толще предплечья и в долях собственной длины),
+        # жёсткое число в обратном преобразовании начало сходиться ТОЛЬКО на
+        # предплечье — а тест продолжал бы зеленеть, потому что другой кости не
+        # видел. Проверять круговой прогон на одной кости из десяти значит
+        # проверять совпадение констант, а не совпадение формул.
+        pts = {"l_hip": (0.5, 0.2, 0.9), "l_knee": (0.5, 0.8, 0.9),
+               "__size__": (200.0, 200.0, 1.0)}
+        self.assertNotEqual(self.marks.half_width_for("l_thigh"),
+                            self.marks.half_width_for("l_forearm"))
+        u_in, v_in = np.array([0.3, 0.6]), np.array([-0.4, 0.5])
+        xs, ys = self.gf.surface_to_pixel(pts, "l_thigh", u_in, v_in)
+        u_out, v_out, inside = self.marks.limb_uv(pts, "l_thigh", xs, ys)
+        self.assertTrue(bool(np.all(inside)))
+        self.assertTrue(bool(np.allclose(u_in, u_out, atol=1e-6)), u_out)
+        self.assertTrue(bool(np.allclose(v_in, v_out, atol=1e-6)), v_out)
+
     def test_the_same_surface_point_moves_with_the_bone(self):
         # Материальная точка тела: кость повернулась — точка уехала В КАДРЕ,
         # но осталась той же точкой ТЕЛА. На этом стоит вся метрика.

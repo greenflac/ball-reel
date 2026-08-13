@@ -5,9 +5,11 @@
 Значит утверждение «приметы на месте» обязано быть проверяемым, иначе оно
 остаётся лозунгом — а лозунг на аудите стоит меньше, чем честное «не умеем».
 
-Канала переноса примет у нас ещё НЕТ. Метрика пишется первой намеренно: ручка
-без счётчика уже один раз обошлась дорого — позу впрыскивали и не знали, что
-она не доезжает, пока не посмотрели на картинку глазами.
+Метрика написана первой намеренно, ещё до канала переноса: ручка без счётчика
+уже один раз обошлась дорого — позу впрыскивали и не знали, что она не доезжает,
+пока не посмотрели на картинку глазами. Канал появился следом (`transfer`), и
+порядок себя оправдал: измеритель немедленно нашёл в переносе две ошибки,
+которые глазом на синтетике не видны.
 
 ЧТО ЗДЕСЬ УСТОЙЧИВО, А ЧТО НЕТ
 
@@ -37,6 +39,22 @@
 
 Это честный размен, и он в нашу пользу: наблюдаемый отказ — именно потеря.
 Генератор не рисует чужую татуировку вместо вашей, он не рисует никакой.
+
+Ещё два предела, оба вскрыты состязательным разбором уже после того, как модуль
+был объявлен готовым, — и оба стоит держать на виду:
+
+**Скелет обязателен, а не желателен.** Опорная кожа берётся из кольца вокруг
+приметы, и это кольцо ШИРЕ КОНЕЧНОСТИ: его половина — `radius * SURROUND_SCALE`
+длины кости против полуширины предплечья 0.15. Без геометрии половина «кожи» —
+это фон, и на живом кадре опорой стал тёмный топ, отчего ровная кожа получила
+приметность 1.411. Поэтому `distinctiveness` принимает `points`/`bone`, а
+`marks_report` их прокидывает всегда. Без них результат помечается
+`baseline_suspect`, а не выдаётся молча.
+
+**Окно задаётся под примету.** Метрика — это среднее отклонение по окну, значит
+она разбавляется чистой кожей: тонкий контур в заведомо большом окне уйдёт под
+порог входа. Ровно для этого в отчёте есть `coverage` — чтобы «примету не
+видно» отличалось от «окно втрое шире приметы».
 
 Работает на CPU, ничего не генерирует, в сеть не ходит.
 """
@@ -76,7 +94,37 @@ SURROUND_SCALE = 2.0
 #: кожа, то переносить нечего, и сказать об этом надо сразу, а не отчитаться
 #: потом «примета потеряна». ВЫБРАНО: 0.08 отделяет заметное глазу пятно от
 #: неоднородности освещения на коже.
+#:
+#: Что такое 0.08 в новых единицах (см. `distinctiveness`): это СРЕДНЕЕ по окну
+#: отклонение от кожи. Порог берут одинаково два разных случая — сплошное пятно
+#: со слабым контрастом 0.08 и тонкий контур, занимающий 10% площади окна при
+#: контрасте 0.8. Отсюда практическое требование к оператору: окно задаётся ПОД
+#: примету. Если примета занимает меньше десятой доли окна, надо уменьшать
+#: `radius`, а не удивляться, что метрика её не видит — и `coverage` в отчёте
+#: существует ровно для того, чтобы это было видно, а не угадывалось.
 MIN_REFERENCE_CONTRAST = 0.08
+
+#: Ниже этого отклонения пиксель НЕ СЧИТАЕТСЯ чернилами при подсчёте `coverage`.
+#: ВЫБРАНО: 0.10 — отклонения в десятую долю яркости кожи даёт сама светотень на
+#: круглой руке, и записывать их в примету значит мерить освещение.
+NOISE_FLOOR = 0.10
+
+#: Меньше этого числа опорных пикселей — опоры нет, и это ОТКАЗ ИЗМЕРЯТЬ, а не
+#: повод взять что попало. ВЫБРАНО: 64 пикселя — медиана по меньшей выборке
+#: пляшет сильнее, чем измеряемая величина.
+MIN_RING_PX = 64
+
+#: Разброс опорной кожи (p90-p10 яркости, в долях от медианы), выше которого
+#: опора считается НЕНАДЁЖНОЙ. Кожа под одним источником света в такой разброс
+#: укладывается; фон, одежда и силуэт — нет. Это не отказ, а флаг в отчёте:
+#: скелета может не быть на входе, и тогда честнее сказать «опора сомнительна»,
+#: чем молча выдать число. ВЫБРАНО, откалибровать не на чем.
+MAX_BASELINE_SPREAD = 0.45
+
+#: Ниже этого модуля знаковой яркости направление контраста СУДИТЬ НЕЛЬЗЯ.
+#: Цветная татуировка той же светлоты, что кожа, отличается насыщенностью, а
+#: знак её яркости — шум. ВЫБРАНО: половина MIN_REFERENCE_CONTRAST.
+SIGN_MIN = 0.04
 
 #: Какая доля исходной «приметности» должна дожить до результата, чтобы примета
 #: считалась перенесённой. ВЫБРАНО и заведомо мягко: генератор перерисовывает,
@@ -101,6 +149,42 @@ class Mark:
     name: str = "mark"
 
 
+def attach_size(points: dict, size) -> dict:
+    """Добавить к скелету размер кадра. `size` — (ширина, высота) или картинка.
+
+    ЗАЧЕМ ЭТО СУЩЕСТВУЕТ. Точки и от DWPose, и от MediaPipe нормированы в 0..1,
+    поэтому сами по себе они не знают, сколько пикселей длиной кость — а весь
+    этот модуль считает в пикселях. `pose.landmarks` размер не отдаёт: он ему
+    не нужен, там всё сравнивается в долях.
+
+    Без этой склейки получалось молчаливое ничего: `locate` не находил
+    `__size__`, возвращал None, и None читался как «кость не видна». То есть
+    приметы, накормленные своим же естественным поставщиком, всегда выдавали
+    «не наблюдалось» — самый дорогой вид отказа, потому что он выглядит как
+    работа.
+    """
+    if hasattr(size, "shape"):
+        h, w = size.shape[:2]
+    elif hasattr(size, "size") and not isinstance(size, (tuple, list)):
+        w, h = size.size
+    else:
+        w, h = size
+    return {**points, "__size__": (float(w), float(h), 1.0)}
+
+
+def _frame_size(points: dict):
+    """Размер кадра из скелета. Отсутствие — ОШИБКА ВЫЗОВА, а не «не видно»."""
+    size = points.get("__size__")
+    if not size or not size[0] or not size[1]:
+        raise ValueError(
+            "в скелете нет размера кадра (`__size__`), а приметы считаются в "
+            "пикселях. Точки от MediaPipe и DWPose нормированы в 0..1 и размера "
+            "не несут — оберни их в marks.attach_size(points, image). "
+            "Молча вернуть None здесь нельзя: None у нас значит «кость не "
+            "видна», и подменять им сломанный вход — врать вызывающему.")
+    return float(size[0]), float(size[1])
+
+
 def locate(points: dict, mark: Mark, *, min_visibility: float = 0.5):
     """Костные координаты -> прямоугольник в пикселях. None, если судить нельзя.
 
@@ -117,9 +201,7 @@ def locate(points: dict, mark: Mark, *, min_visibility: float = 0.5):
         return None
     if min(a[2], b[2]) < min_visibility:
         return None
-    w, h, _ = points.get("__size__", (0.0, 0.0, 1.0))
-    if not w or not h:
-        return None
+    w, h = _frame_size(points)
 
     ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
     dx, dy = bx - ax, by - ay
@@ -137,23 +219,102 @@ def locate(points: dict, mark: Mark, *, min_visibility: float = 0.5):
     return (int(cx - half), int(cy - half), int(cx + half), int(cy + half))
 
 
-def _median_stats(arr):
-    """Медианная яркость и насыщенность массива пикселей 0..1."""
+def _luma_sat(arr):
+    """Поканальный RGB 0..1 -> (яркость, насыщенность), ПОПИКСЕЛЬНО."""
     import numpy as np
 
     lum = (0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2])
     hi, lo = arr.max(axis=-1), arr.min(axis=-1)
     sat = np.where(hi > 1e-6, (hi - lo) / np.maximum(hi, 1e-6), 0.0)
-    return float(np.median(lum)), float(np.median(sat))
+    return lum, sat
 
 
-def distinctiveness(image, box) -> dict | None:
+def _ring_pixels(arr, box, points=None, bone=None, half_width=None):
+    """Опорные пиксели кожи вокруг окна. (пиксели Nx3, откуда) либо (None, почему).
+
+    ДВЕ ОТДЕЛЬНЫЕ ЧИСТКИ, и вторая появилась после замера.
+
+    1. Из кольца выбрасывается сама примета — иначе «кожа» включала бы то, с чем
+       её сравнивают, и контраст занижался бы тем сильнее, чем крупнее примета.
+
+    2. Из кольца выбрасывается всё, что НЕ НА КОНЕЧНОСТИ. Без этого кольцо
+       уезжает за руку: его половина равна `radius * SURROUND_SCALE` длины кости,
+       то есть при значениях по умолчанию (0.15 и 2.0) она составляет 0.30 длины
+       кости против полуширины руки 0.15 — вдвое больше. На синтетике этого не
+       видно, потому что там весь кадр из кожи; на живом кадре опорой стал
+       тёмный синий топ, и ровная кожа получила «приметность» 1.411.
+
+    Геометрия нужна, чтобы вторую чистку сделать: без `points`/`bone` она
+    невозможна, и тогда результат помечается как опора «ring» — судить по нему
+    можно только там, где вокруг заведомо тело.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = box
+    h, w = arr.shape[:2]
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = int((x1 - x0) * SURROUND_SCALE / 2)
+    sx0, sy0 = max(0, cx - half), max(0, cy - half)
+    sx1, sy1 = min(w, cx + half), min(h, cy + half)
+    if sx1 - sx0 < 2 or sy1 - sy0 < 2:
+        return None, "окрестность не помещается в кадр"
+
+    ring = arr[sy0:sy1, sx0:sx1]
+    keep = np.ones(ring.shape[:2], dtype=bool)
+    iy0, ix0 = max(0, y0 - sy0), max(0, x0 - sx0)
+    keep[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)] = False
+
+    origin = "ring"
+    if points is not None and bone is not None:
+        gy, gx = np.mgrid[sy0:sy1, sx0:sx1]
+        uv = limb_uv(points, bone, gx.astype(float), gy.astype(float),
+                     half_width=half_width)
+        if uv is not None:
+            keep &= uv[2]
+            origin = "limb"
+
+    if int(keep.sum()) < MIN_RING_PX:
+        return None, (f"опорной кожи вокруг приметы осталось "
+                      f"{int(keep.sum())} px < {MIN_RING_PX}: окно шире "
+                      f"конечности или примета у самого края кадра — "
+                      f"опоры нет, и судить не по чему")
+    return ring[keep], origin
+
+
+def distinctiveness(image, box, *, points=None, bone=None,
+                    half_width=None) -> dict | None:
     """Насколько область отличается от кожи ВОКРУГ неё. None — судить нельзя.
 
-    Считается против кольца-окрестности, а не против абсолютного оттенка:
-    так метрика не превращается в измеритель освещения. Ровно тот же приём, что
-    спас метрику одежды, где сравнение по среднему RGB давало ложную тревогу
-    0.265 на съёмке с заведомо одной одеждой.
+    Опора локальная, а не абсолютная: иначе метрика превращается в измеритель
+    освещения. Ровно этот приём спас метрику одежды, где сравнение по среднему
+    RGB давало ложную тревогу 0.265 на съёмке с заведомо одной одеждой.
+
+    ПОЧЕМУ ЗДЕСЬ БОЛЬШЕ НЕТ МЕДИАНЫ ПО ОКНУ, И ЭТО ГЛАВНОЕ.
+
+    Первая версия брала медианную яркость окна и сравнивала её с медианной
+    яркостью кожи. Медиана двухмодальной выборки — это её БОЛЬШИНСТВО, поэтому
+    величина оказывалась ступенькой ровно на половине заливки окна. Замерено на
+    синтетике: заливка 10 / 30 / 49% давала score 0.0000, заливка 51% — 0.5546,
+    а 80 и 100% — одинаковые 1.1091. То есть метрика не отличала тонкую
+    татуировку от чистой кожи и не отличала половину рисунка от целого.
+
+    Дефект не поймали тесты, потому что все они строили пятно с заливкой 100% —
+    единственную точку, где ступенька не проявляется. Это ровно тот случай, ради
+    которого в проекте записано: синтетика обязана покрывать ДИАПАЗОН.
+
+    Считается теперь ПОПИКСЕЛЬНОЕ отклонение от кожи, и оно даёт три числа:
+
+    * ``score`` — среднее отклонение по окну. Растёт и от контраста, и от доли
+      закрашенного, нигде не имеет ступенек. Это то, по чему судят перенос;
+    * ``peak`` — 95-й процентиль отклонения: насколько ТЁМНЫЕ самые тёмные
+      чернила. Отличает выцветшую примету от уменьшившейся: размытие сохраняет
+      среднее и роняет пик;
+    * ``coverage`` — доля пикселей окна, отклонившихся заметно. Это
+      диагностика оператору: доля около нуля означает, что окно задано много
+      шире приметы, и порог входа она не возьмёт не потому, что приметы нет.
+
+    На сплошном пятне обе версии дают одно и то же число — старые замеры и
+    старые пороги остаются сравнимыми.
     """
     import numpy as np
     from PIL import Image
@@ -176,31 +337,54 @@ def distinctiveness(image, box) -> dict | None:
         return None
     inner = arr[y0:y1, x0:x1]
 
-    # Кольцо: тот же центр, сторона в SURROUND_SCALE раз больше, минус середина.
-    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
-    half = int((x1 - x0) * SURROUND_SCALE / 2)
-    sx0, sy0 = max(0, cx - half), max(0, cy - half)
-    sx1, sy1 = min(w, cx + half), min(h, cy + half)
-    ring = arr[sy0:sy1, sx0:sx1].copy()
-    iy0, ix0 = y0 - sy0, x0 - sx0
-    mask = np.ones(ring.shape[:2], dtype=bool)
-    mask[max(0, iy0):max(0, iy0) + (y1 - y0),
-         max(0, ix0):max(0, ix0) + (x1 - x0)] = False
-    if mask.sum() < 16:
+    skin, origin = _ring_pixels(arr, (x0, y0, x1, y1), points, bone, half_width)
+    if skin is None:
         return None
-    skin = ring[mask]
 
-    in_lum, in_sat = _median_stats(inner)
-    sk_lum, sk_sat = _median_stats(skin.reshape(-1, 1, 3))
+    # СИММЕТРИЧНО ОПОРЕ: сама примета тоже меряется только на теле. Без этого
+    # окно шире конечности набирало «приметность» из фона: на ровной коже,
+    # снятой поперёк тёмного фона, окно с radius 0.45 давало score 1.184 —
+    # прибор рапортовал татуировку там, где её нет, и опора при этом была
+    # правильная. Чистить надо оба конца сравнения, а не один.
+    if origin == "limb":
+        import numpy as _np
+
+        gy, gx = _np.mgrid[y0:y1, x0:x1]
+        uv = limb_uv(points, bone, gx.astype(float), gy.astype(float),
+                     half_width=half_width)
+        on_limb = uv[2]
+        if int(on_limb.sum()) < MIN_RING_PX:
+            return None
+        inner = inner[on_limb].reshape(-1, 1, 3)
+
+    in_lum, in_sat = _luma_sat(inner)
+    sk_lum_px, sk_sat_px = _luma_sat(skin.reshape(-1, 1, 3))
+    sk_lum, sk_sat = float(np.median(sk_lum_px)), float(np.median(sk_sat_px))
     base = max(sk_lum, 1e-3)
+
+    # Отклонение каждого пикселя от кожи. Знак сохраняем: тату темнее кожи,
+    # шрам светлее. Направление отличия — часть подписи приметы, и склеивать
+    # два разных объекта в один модулем нельзя.
+    d_lum = (in_lum - sk_lum) / base
+    d_sat = in_sat - sk_sat
+    dev = np.abs(d_lum) + np.abs(d_sat)
+
+    spread = float(np.quantile(sk_lum_px, 0.9)
+                   - np.quantile(sk_lum_px, 0.1)) / base
     return {
-        # Знак сохраняем: тату темнее кожи, шрам светлее. Направление отличия —
-        # часть подписи приметы, и терять его в модуле значит склеить два
-        # разных объекта.
-        "luma_contrast": round((in_lum - sk_lum) / base, 4),
-        "sat_contrast": round(in_sat - sk_sat, 4),
-        "score": round(abs(in_lum - sk_lum) / base + abs(in_sat - sk_sat), 4),
-        "pixels": int((x1 - x0) * (y1 - y0)),
+        "luma_contrast": round(float(np.mean(d_lum)), 4),
+        "sat_contrast": round(float(np.mean(d_sat)), 4),
+        "score": round(float(np.mean(dev)), 4),
+        "peak": round(float(np.quantile(dev, 0.95)), 4),
+        "coverage": round(float(np.mean(dev > NOISE_FLOOR)), 4),
+        # Сколько пикселей реально СУДИЛОСЬ, а не сколько попало в окно: при
+        # опоре по конечности это разные числа, и полезно именно первое.
+        "pixels": int(dev.size),
+        "baseline": origin,
+        "baseline_spread": round(spread, 4),
+        # Опора «сомнительна» — это не отказ, а честная пометка: число выдано,
+        # но вокруг приметы не только кожа. Без скелета иначе не отличить.
+        "baseline_suspect": bool(spread > MAX_BASELINE_SPREAD),
     }
 
 
@@ -220,8 +404,9 @@ def mark_transferred(reference: dict | None, produced: dict | None, *,
     """
     if reference is None:
         return {"verdict": None, "state": "not_observed",
-                "note": "на референсе область не измерена: кость не видна или "
-                        f"пятно мельче {MIN_MARK_PX}px — переносить нечего "
+                "note": "на референсе область не измерена: кость не видна, "
+                        f"пятно мельче {MIN_MARK_PX}px или вокруг него не "
+                        f"осталось опорной кожи — переносить нечего "
                         f"и судить не о чем"}
     if reference["score"] < min_reference:
         return {"verdict": None, "state": "no_mark_on_reference",
@@ -237,6 +422,7 @@ def mark_transferred(reference: dict | None, produced: dict | None, *,
                         "потеряна: снимать ближе или брать кадр, где эта "
                         "часть тела видна."}
     kept = produced["score"] / max(reference["score"], 1e-6)
+
     # ПОРЯДОК ПРОВЕРОК ВАЖЕН, и первая версия его перепутала.
     #
     # Сначала «сколько дожило», и только потом «то ли это». На ровной коже
@@ -245,31 +431,45 @@ def mark_transferred(reference: dict | None, produced: dict | None, *,
     # чинить не то. Ноль — это отсутствие, а не переворот, и различие тут не
     # педантичное: «примета исчезла» и «на её месте что-то другое» чинятся
     # разными концами пайплайна.
-    #
-    # Знак поэтому судится только когда контраст ЕСТЬ, то есть когда в
-    # результате действительно нашлось что-то приметное.
-    lost = kept < ratio
-    has_contrast = produced["score"] >= min_reference
-    same_side = ((reference["luma_contrast"] >= 0)
-                 == (produced["luma_contrast"] >= 0))
-    ok = bool(not lost and (same_side or not has_contrast))
-    if lost:
+    if kept < ratio:
         return {"verdict": False, "state": "measured", "kept": round(kept, 4),
                 "reference": reference["score"], "produced": produced["score"],
                 "note": (f"ПРИМЕТА ПОТЕРЯНА: сохранилось {kept:.0%} контраста "
                          f"при пороге {ratio:.0%} — в результате там ровная "
                          f"кожа")}
-    if has_contrast and not same_side:
-        why = (f"контраст перевернулся ({reference['luma_contrast']} -> "
-               f"{produced['luma_contrast']}): на месте приметы что-то другое")
-    elif ok:
-        why = f"примета на месте: сохранилось {kept:.0%} исходного контраста"
-    else:
-        why = (f"на месте приметы посторонний контраст ({produced['score']}) "
-               f"при исходном {reference['score']}")
-    return {"verdict": ok, "state": "measured", "kept": round(kept, 4),
+
+    # Дожила по величине — значит контраст ЕСТЬ, и его направление обязано
+    # совпадать. Отдельного условия «а достаточно ли контраста, чтобы судить
+    # знак» здесь больше нет, и это была дыра: оно требовало `produced >=
+    # min_reference` независимо от референса, поэтому при слабой примете
+    # (референс от 0.08 до 0.16) перевёрнутый результат проходил как «на месте».
+    # Пример из разбора: референс 0.10, результат 0.06 противоположного знака —
+    # сохранилось 60%, порог знака не сработал, вердикт был True.
+    #
+    # Судить знак нельзя только в одном случае — когда его нет и на референсе:
+    # цветная татуировка той же светлоты отличается насыщенностью, а знак её
+    # яркости — шум. Тогда об этом говорится вслух, а не подразумевается.
+    if abs(reference["luma_contrast"]) < SIGN_MIN:
+        return {"verdict": True, "state": "measured", "kept": round(kept, 4),
+                "reference": reference["score"], "produced": produced["score"],
+                "note": (f"примета на месте: сохранилось {kept:.0%} исходного "
+                         f"контраста. Направление НЕ проверялось — на референсе "
+                         f"яркость приметы почти как у кожи "
+                         f"({reference['luma_contrast']}), отличие только по "
+                         f"насыщенности")}
+
+    same_side = ((reference["luma_contrast"] >= 0)
+                 == (produced["luma_contrast"] >= 0))
+    if not same_side:
+        return {"verdict": False, "state": "measured", "kept": round(kept, 4),
+                "reference": reference["score"], "produced": produced["score"],
+                "note": (f"контраст перевернулся "
+                         f"({reference['luma_contrast']} -> "
+                         f"{produced['luma_contrast']}): на месте приметы "
+                         f"что-то другое")}
+    return {"verdict": True, "state": "measured", "kept": round(kept, 4),
             "reference": reference["score"], "produced": produced["score"],
-            "note": why}
+            "note": f"примета на месте: сохранилось {kept:.0%} исходного контраста"}
 
 
 #: Ширина мягкого края при вклейке, в долях стороны окна. Резкий край читается
@@ -290,8 +490,37 @@ FEATHER = 0.18
 #: заведомо фон. Это решает «не рисовать мимо конечности». Задачу «не рисовать
 #: поверх одежды» она НЕ решает — для неё нужна сегментация, которой у нас нет,
 #: и пока примету размещает оператор, который знает, где у него татуировка.
-#: ВЫБРАНО 0.22: типичная рука примерно вчетверо длиннее своей ширины.
-LIMB_HALF_WIDTH = 0.22
+#:
+#: Значение по умолчанию для кости, которой нет в таблице ниже.
+LIMB_HALF_WIDTH = 0.15
+
+#: Полуширина КАЖДОЙ кости отдельно, потому что одного числа тут не бывает:
+#: бедро толще предплечья и вдвое, и в долях собственной длины. Здесь стояло
+#: одно значение 0.22 с обоснованием «конечность вчетверо длиннее своей ширины»
+#: — обоснование давало 0.125, то есть противоречило самому числу, и по нему
+#: капсула получалась почти вдвое шире руки.
+#:
+#: Числа ВЫБРАНЫ по стандартным антропометрическим пропорциям (длина сегмента и
+#: его обхват в долях роста), а НЕ замерены на наших кадрах. Это оценка, и
+#: пометка тут важнее самих цифр: замер потребует сегментации тела, которой у
+#: нас пока нет.
+LIMB_HALF_WIDTH_BY_BONE = {
+    "l_forearm": 0.15, "r_forearm": 0.15,     # 26 см длины, ~8 см в поперечнике
+    "l_upperarm": 0.17, "r_upperarm": 0.17,   # 30 см длины, ~10 см
+    "l_thigh": 0.21, "r_thigh": 0.21,         # 40 см длины, ~17 см
+    "l_shin": 0.14, "r_shin": 0.14,           # 40 см длины, ~11 см
+    # Торс и шея цилиндрами не описываются вовсе; числа даны как грубая рамка,
+    # чтобы вклейка не уезжала в фон, а не как модель поверхности.
+    "torso": 0.40,
+    "neck": 0.27,
+}
+
+
+def half_width_for(bone: str, override=None) -> float:
+    """Полуширина конечности для этой кости. `override` побеждает таблицу."""
+    if override is not None:
+        return float(override)
+    return LIMB_HALF_WIDTH_BY_BONE.get(bone, LIMB_HALF_WIDTH)
 
 
 def _load(image):
@@ -316,7 +545,7 @@ def _bone_frame(points: dict, bone: str):
     a, b = points.get(pair[0]), points.get(pair[1])
     if not a or not b:
         return None
-    w, h, _ = points.get("__size__", (0.0, 0.0, 1.0))
+    w, h = _frame_size(points)
     dx, dy = (b[0] - a[0]) * w, (b[1] - a[1]) * h
     length = (dx * dx + dy * dy) ** 0.5
     if length < 1e-6:
@@ -324,8 +553,7 @@ def _bone_frame(points: dict, bone: str):
     return math.degrees(math.atan2(dy, dx)), length
 
 
-def limb_uv(points: dict, bone: str, xs, ys, *,
-            half_width: float = LIMB_HALF_WIDTH):
+def limb_uv(points: dict, bone: str, xs, ys, *, half_width=None):
     """Пиксели -> координаты НА ПОВЕРХНОСТИ конечности. (u, v, внутри?).
 
     Конечность моделируется цилиндром вокруг кости:
@@ -358,13 +586,13 @@ def limb_uv(points: dict, bone: str, xs, ys, *,
     a, b = points.get(pair[0]), points.get(pair[1])
     if not a or not b:
         return None
-    w, h, _ = points.get("__size__", (0.0, 0.0, 1.0))
+    w, h = _frame_size(points)
     ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
     vx, vy = bx - ax, by - ay
     length = (vx * vx + vy * vy) ** 0.5
     if length < 1e-6:
         return None
-    radius = length * half_width
+    radius = length * half_width_for(bone, half_width)
 
     # Вдоль кости и поперёк неё.
     ux, uy = vx / length, vy / length
@@ -380,20 +608,19 @@ def limb_uv(points: dict, bone: str, xs, ys, *,
     return u, v, inside
 
 
-def _uv_to_pixels(points: dict, bone: str, u, v, *,
-                  half_width: float = LIMB_HALF_WIDTH):
+def _uv_to_pixels(points: dict, bone: str, u, v, *, half_width=None):
     """Обратно: точка поверхности -> пиксель в этом кадре."""
     import numpy as np
 
     pair = BONES[bone]
     a, b = points[pair[0]], points[pair[1]]
-    w, h, _ = points["__size__"]
+    w, h = _frame_size(points)
     ax, ay, bx, by = a[0] * w, a[1] * h, b[0] * w, b[1] * h
     vx, vy = bx - ax, by - ay
     length = (vx * vx + vy * vy) ** 0.5
     ux, uy = vx / length, vy / length
     px, py = -uy, ux
-    radius = length * half_width
+    radius = length * half_width_for(bone, half_width)
     d = radius * np.sin(v * (np.pi / 2))
     return (ax + ux * length * u + px * d,
             ay + uy * length * u + py * d)
@@ -401,8 +628,7 @@ def _uv_to_pixels(points: dict, bone: str, u, v, *,
 
 def transfer_cylindrical(source_image, source_points: dict, target_image,
                          target_points: dict, mark: Mark, *,
-                         feather: float = FEATHER,
-                         half_width: float = LIMB_HALF_WIDTH):
+                         feather: float = FEATHER, half_width=None):
     """Перенос примет ПО ПОВЕРХНОСТИ конечности, а не плоской заплаткой.
 
     Отличие от `transfer` одно, и оно видно глазом: примета обёртывается вокруг
@@ -436,14 +662,21 @@ def transfer_cylindrical(source_image, source_points: dict, target_image,
                           "вклеена, рисовать её вслепую значит выдумывать")
         return target, report
 
-    src_stats = distinctiveness(_load(source_image), src_box)
+    source = _load(source_image)
+    src_stats = distinctiveness(source, src_box, points=source_points,
+                                bone=mark.bone, half_width=half_width)
     if src_stats is None or src_stats["score"] < MIN_REFERENCE_CONTRAST:
         report["note"] = "на референсе в этом месте ровная кожа — переносить нечего"
         return target, report
 
-    source = _load(source_image)
-    src_skin = _skin_median(source, src_box)
-    dst_skin = _skin_median(target, dst_box)
+    src_skin = _skin_median(source, src_box, source_points, mark.bone,
+                            half_width)
+    dst_skin = _skin_median(target, dst_box, target_points, mark.bone,
+                            half_width)
+    if src_skin is None or dst_skin is None:
+        report["note"] = ("вокруг приметы не осталось опорной кожи на "
+                          "конечности — окно шире конечности, уменьшить radius")
+        return target, report
 
     # Окно в цели берём с запасом: обёрнутая примета занимает другой участок.
     dx0, dy0, dx1, dy1 = dst_box
@@ -548,15 +781,24 @@ def transfer(source_image, source_points: dict, target_image,
         report["note"] = "область приметы вышла за край референса"
         return target, report
 
-    # Опора: медианная кожа вокруг приметы НА РЕФЕРЕНСЕ.
-    src_stats = distinctiveness(source, src_box)
+    # Опора: медианная кожа вокруг приметы НА РЕФЕРЕНСЕ, и только та, что лежит
+    # на самой конечности — иначе опорой становится фон за рукой.
+    src_stats = distinctiveness(source, src_box, points=source_points,
+                                bone=mark.bone)
     if src_stats is None or src_stats["score"] < MIN_REFERENCE_CONTRAST:
         report["note"] = (f"на референсе в этом месте ровная кожа "
                           f"(контраст {None if src_stats is None else src_stats['score']}) "
                           f"— приметы нет, переносить нечего")
         return target, report
 
-    src_skin = _skin_median(source, src_box)
+    src_skin = _skin_median(source, src_box, source_points, mark.bone)
+    dst_skin = _skin_median(target, dst_box, target_points, mark.bone)
+    if src_skin is None or dst_skin is None:
+        where = "референсе" if src_skin is None else "результате"
+        report["note"] = (f"вокруг приметы в {where} не осталось опорной кожи "
+                          f"на конечности — переносить не от чего. Окно шире "
+                          f"конечности: уменьшить radius приметы")
+        return target, report
     ratio = patch / np.maximum(src_skin, 1e-3)          # отклонение от кожи
 
     # Геометрия: повернуть и растянуть под кость в результате.
@@ -583,7 +825,6 @@ def transfer(source_image, source_points: dict, target_image,
         chans.append(np.asarray(layer, dtype=np.float64))
     ratio = np.stack(chans, axis=-1)
 
-    dst_skin = _skin_median(target, dst_box)
     painted = np.clip(ratio * dst_skin, 0.0, 1.0)
 
     # Мягкий край: резкая граница читается как наклейка даже при точном цвете.
@@ -604,13 +845,13 @@ def transfer(source_image, source_points: dict, target_image,
     # замером (см. LIMB_HALF_WIDTH).
     if dst_frame:
         _, bone_len = dst_frame
-        limb = bone_len * LIMB_HALF_WIDTH
+        limb = bone_len * half_width_for(mark.bone)
         gy, gx = np.mgrid[0:dh, 0:dw]
         px_x = max(0, dx0) + gx
         px_y = max(0, dy0) + gy
         ax_, ay_ = target_points[BONES[mark.bone][0]][:2]
         bx_, by_ = target_points[BONES[mark.bone][1]][:2]
-        W, H, _ = target_points["__size__"]
+        W, H = _frame_size(target_points)
         ax_, ay_, bx_, by_ = ax_ * W, ay_ * H, bx_ * W, by_ * H
         vx, vy = bx_ - ax_, by_ - ay_
         vlen2 = max(vx * vx + vy * vy, 1e-6)
@@ -633,21 +874,20 @@ def transfer(source_image, source_points: dict, target_image,
     return out, report
 
 
-def _skin_median(arr, box):
-    """Медианный цвет кожи ВОКРУГ окна, каналами. Опора для переноса."""
+def _skin_median(arr, box, points=None, bone=None, half_width=None):
+    """Медианный цвет кожи ВОКРУГ окна, каналами. None — опоры нет.
+
+    Здесь стоял тихий запасной вариант: если после вычитания приметы в кольце
+    оставалось мало пикселей, за «кожу» бралось кольцо ЦЕЛИКОМ — вместе с самой
+    приметой, а на живом кадре ещё и вместе с фоном. Опора получалась тем хуже,
+    чем больше её не хватало, и молча. Теперь нехватка опоры — это отказ, и
+    вызывающий обязан сказать об этом в отчёте.
+    """
     import numpy as np
 
-    x0, y0, x1, y1 = box
-    h, w = arr.shape[:2]
-    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
-    half = int((x1 - x0) * SURROUND_SCALE / 2)
-    sx0, sy0 = max(0, cx - half), max(0, cy - half)
-    sx1, sy1 = min(w, cx + half), min(h, cy + half)
-    ring = arr[sy0:sy1, sx0:sx1]
-    mask = np.ones(ring.shape[:2], dtype=bool)
-    iy0, ix0 = max(0, y0 - sy0), max(0, x0 - sx0)
-    mask[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)] = False
-    skin = ring[mask] if mask.sum() >= 16 else ring.reshape(-1, 3)
+    skin, _ = _ring_pixels(arr, box, points, bone, half_width)
+    if skin is None:
+        return None
     return np.median(skin.reshape(-1, 3), axis=0)
 
 
@@ -656,10 +896,20 @@ def marks_report(ref_image, ref_points: dict, out_image, out_points: dict,
     """Все приметы разом. Сводка для гейта и для отчёта."""
     rows = []
     for mark in marks:
-        r = distinctiveness(ref_image, locate(ref_points, mark) or (0, 0, 0, 0))
-        p = distinctiveness(out_image, locate(out_points, mark) or (0, 0, 0, 0))
+        # Скелет прокидывается ОБЯЗАТЕЛЬНО: без него опорой становится всё, что
+        # оказалось рядом в кадре, и ровная кожа получает «приметность» 1.4 от
+        # тёмного фона за рукой. Здесь оба скелета есть, так что отговорок нет.
+        ref_box = locate(ref_points, mark)
+        out_box = locate(out_points, mark)
+        r = (distinctiveness(ref_image, ref_box, points=ref_points,
+                             bone=mark.bone) if ref_box else None)
+        p = (distinctiveness(out_image, out_box, points=out_points,
+                             bone=mark.bone) if out_box else None)
         got = mark_transferred(r, p)
         got["name"] = mark.name
+        if r is not None and r.get("baseline_suspect"):
+            got["note"] += ("; ОПОРА СОМНИТЕЛЬНА: вокруг приметы на референсе "
+                            "не только кожа")
         rows.append(got)
     measured = [r for r in rows if r["state"] == "measured"]
     lost = [r["name"] for r in measured if not r["verdict"]]
