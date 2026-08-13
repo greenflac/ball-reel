@@ -42,6 +42,59 @@ def _say(step: str, ok: bool, detail: str = "") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {step:<22} {detail}")
 
 
+def smoke_verdict(ident, delta, *, driving=None) -> dict:
+    """Сошёлся ли дым: числа -> вердикт. Чистая функция, без карты и без сети.
+
+    ПОРОГИ БЕРУТСЯ ИЗ МОДУЛЕЙ, А НЕ ЛИТЕРАЛАМИ, и это не косметика. Здесь
+    стояли числа 0.35 и 0.25 прямо в теле `main`. Первое случайно совпало с
+    `identity_arcface.SAME_PERSON_MAX`; второе — НЕТ: `pose.SAME_POSE_MAX`
+    равен 0.15, потому что старт-кадр судится строго (ещё ничто не двигалось, и
+    всё сверх этого — уже переосмысление позы генератором, а не движение
+    субъекта). То есть ЦЕЛЕВОЙ путь на своём железе пропускал расхождение,
+    которое шлюзовой путь забраковал бы: бар был мягче собственного на две
+    трети, и заметить это можно было только сличив два файла глазами.
+
+    Второе исправление: худший сустав ПЕЧАТАЛСЯ, но не проверялся, хотя
+    сообщение обещало пользователю бар 0.40. Между тем именно он и есть
+    работающая мера — среднее размывает уехавшую в сторону руку (замер:
+    согнутая рука даёт среднее 0.11 при запястье 0.97).
+
+    Вынесено из `main` отдельной функцией по третьей причине: логика вердикта,
+    живущая внутри CLI, не проверяется тестом и не ломается мутацией, то есть
+    формально защищена и фактически нет.
+    """
+    from .identity_arcface import SAME_PERSON_MAX
+    from .pose import SAME_POSE_MAX, WORST_JOINT_MAX
+
+    face_ok = ident is not None and ident <= SAME_PERSON_MAX
+    face_note = (f"дрифт {ident} (бар {SAME_PERSON_MAX}; выше — поднять "
+                 f"ip_adapter_scale до 0.85)")
+    if ident is None:
+        face_note = ("лицо НЕ НАЙДЕНО на кейфрейме или на референсе — это не "
+                     "«похоже», а отсутствие измерения. Считать провалом.")
+
+    if not delta:
+        # «Не измерено» — это не «в норме». Здесь стояло `delta is None or ...`,
+        # и непроверенная поза шла как пройденная.
+        return {"face_ok": face_ok, "pose_ok": False, "face_note": face_note,
+                "pose_note": (f"НЕ ИЗМЕРЕНА: на driving-кадре {driving} или на "
+                              f"кейфрейме тело не найдено. Считать это "
+                              f"провалом, а не пропуском.")}
+
+    # `pose_delta` кладёт в `worst` ЧИСЛО, а имя сустава отдельно в
+    # `worst_joint`. Клиповая функция в том же модуле кладёт в `worst` КОРТЕЖ
+    # (имя, значение) — одно имя, две формы, и перепутать их легко.
+    pose_ok = (delta["mean"] <= SAME_POSE_MAX
+               and delta["worst"] <= WORST_JOINT_MAX)
+    return {
+        "face_ok": face_ok, "pose_ok": pose_ok, "face_note": face_note,
+        "pose_note": (f"среднее {delta['mean']}, худший сустав "
+                      f"{delta.get('worst_joint')} {delta['worst']} "
+                      f"(бары {SAME_POSE_MAX}/{WORST_JOINT_MAX}; выше — "
+                      f"controlnet_scale до 1.2)"),
+    }
+
+
 def _stop(why: str) -> int:
     print(f"\nОСТАНОВЛЕНО: {why}")
     return 1
@@ -237,22 +290,11 @@ def main(argv: list) -> int:
     if not smoke.get("keyframes"):
         return _stop("кейфрейм не отрисовался — смотреть ошибку выше")
     ident, delta = measure(smoke["keyframes"][0], nodes[0])
-    _say("лицо", ident is not None and ident <= 0.35,
-         f"дрифт {ident} (бар 0.35; выше — поднять ip_adapter_scale до 0.85)")
-    face_ok = ident is not None and ident <= 0.35
-    if delta:
-        pose_ok = delta["mean"] <= 0.25
-        _say("поза", pose_ok,
-             f"среднее {delta['mean']}, худший сустав {delta['worst']} "
-             f"(бары 0.25/0.40; выше — controlnet_scale до 1.2)")
-    else:
-        # «Не измерено» — это не «в норме». Раньше здесь стояло
-        # `delta is None or ...`, и непроверенная поза шла как пройденная.
-        pose_ok = False
-        _say("поза", False,
-             f"НЕ ИЗМЕРЕНА: на driving-кадре "
-             f"{driving_of.get(Path(nodes[0]).stem)} или на кейфрейме тело не "
-             f"найдено. Считать это провалом, а не пропуском.")
+    smoke_check = smoke_verdict(
+        ident, delta, driving=driving_of.get(Path(nodes[0]).stem))
+    face_ok, pose_ok = smoke_check["face_ok"], smoke_check["pose_ok"]
+    _say("лицо", face_ok, smoke_check["face_note"])
+    _say("поза", pose_ok, smoke_check["pose_note"])
     if args.smoke:
         if face_ok and pose_ok:
             print("\n--smoke: числа в норме. Запускать без --smoke.")

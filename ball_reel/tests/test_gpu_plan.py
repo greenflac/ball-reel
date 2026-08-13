@@ -66,3 +66,65 @@ class ResolutionDecidesWhetherIdentityCanBeJudgedAtAll(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheSmokeVERDICTUsesTheModulesOwnBars(unittest.TestCase):
+    """Гейт целевого пути судил мягче собственных порогов, и это никто не ловил.
+
+    Логика вердикта жила внутри `main()` литеральными числами: 0.35 для лица
+    (случайно совпало с `SAME_PERSON_MAX`) и 0.25 для позы, при том что
+    `pose.SAME_POSE_MAX` равен 0.15. Расхождение на две трети, на ЦЕЛЕВОМ
+    пути, и увидеть его можно было только сличив два файла глазами: тест сюда
+    не доставал, мутация тоже — константа, не участвующая в коде, неубиваема.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+
+    def _delta(self, mean, worst, joint="l_wrist"):
+        return {"mean": mean, "worst": worst, "worst_joint": joint}
+
+    def test_a_pose_between_the_two_bars_is_now_rejected(self):
+        # Ровно та щель, что была открыта: 0.20 проходило старый бар 0.25 и не
+        # проходит настоящий 0.15. Числа литеральные намеренно — тест, берущий
+        # вход из константы, которую сторожит, едет вместе с ней.
+        from ball_reel.pose import SAME_POSE_MAX
+
+        self.assertLess(SAME_POSE_MAX, 0.20)
+        got = self.r.smoke_verdict(0.1, self._delta(0.20, 0.30))
+        self.assertFalse(got["pose_ok"], got["pose_note"])
+
+    def test_a_faithful_start_frame_still_passes(self):
+        # Обратная сторона: ужесточение, бракующее всё, — не фикс, а регресс.
+        # 0.043 — верх диапазона, замеренного на живых старт-кадрах (0.018-0.043).
+        got = self.r.smoke_verdict(0.1, self._delta(0.043, 0.12))
+        self.assertTrue(got["pose_ok"], got["pose_note"])
+        self.assertTrue(got["face_ok"], got["face_note"])
+
+    def test_one_limb_gone_astray_is_caught_by_the_worst_joint(self):
+        # Худший сустав ПЕЧАТАЛСЯ, но не проверялся, хотя сообщение обещало
+        # пользователю бар 0.40. Замеренный случай: согнутая рука даёт среднее
+        # 0.11 при запястье 0.97 — среднее её размывает полностью.
+        got = self.r.smoke_verdict(0.1, self._delta(0.11, 0.97))
+        self.assertFalse(got["pose_ok"], got["pose_note"])
+        self.assertIn("0.97", got["pose_note"])
+
+    def test_an_unmeasured_pose_is_a_failure_not_a_pass(self):
+        got = self.r.smoke_verdict(0.1, None, driving="drive/0001.png")
+        self.assertFalse(got["pose_ok"])
+        self.assertIn("НЕ ИЗМЕРЕНА", got["pose_note"])
+        self.assertIn("drive/0001.png", got["pose_note"])
+
+    def test_a_missing_face_is_not_a_pass_either(self):
+        got = self.r.smoke_verdict(None, self._delta(0.02, 0.05))
+        self.assertFalse(got["face_ok"])
+        self.assertIn("НЕ НАЙДЕНО", got["face_note"])
+
+    def test_the_face_bar_bites_from_both_sides(self):
+        from ball_reel.identity_arcface import SAME_PERSON_MAX
+
+        d = self._delta(0.02, 0.05)
+        self.assertTrue(self.r.smoke_verdict(SAME_PERSON_MAX - 0.01, d)["face_ok"])
+        self.assertFalse(self.r.smoke_verdict(SAME_PERSON_MAX + 0.01, d)["face_ok"])
