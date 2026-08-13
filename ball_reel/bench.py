@@ -8,7 +8,7 @@
   2. ЧТО ломается первым — распределение по проверкам;
   3. сколько pollen стоит один ПРИНЯТЫЙ клип (а не один вызов).
 
-Три решения, которые здесь зафиксированы.
+Четыре решения, которые здесь зафиксированы.
 
 **Пишем построчно, а не в конце.** Каждая сессия ложится в JSONL сразу, как
 закончилась. Стенд живёт на чужом API, у которого кончаются деньги, случаются
@@ -26,6 +26,15 @@
 качество генератора, второй про качество продукта, который умеет повторить.
 Смешать их — значит либо польстить себе ретраями, либо занизить результат,
 выбросив то, ради чего ретраи и написаны.
+
+**Упавшая сессия — не пропуск строки, а строка отчёта.** Деньги тратит вызов, а
+не удачный исход: сессия, оборвавшаяся на 429 после платной картинки и платного
+видео, стоила ровно столько же, сколько дошедшая до вердикта. Считать расход по
+дошедшим — занижать цену именно в том сценарии, ради которого стенд написан
+(измерено на бумаге: 4 дошедших + 2 оборвавшихся по 0.08 — это 0.48 pollen, а
+«по дошедшим» выходит 0.32, занижение ровно в 1.5 раза). Поэтому расход
+считается по СОВЕРШЁННЫМ вызовам, а оборвавшиеся сессии видны отдельными
+строками и в сводке, и в печати.
 
 Ничего не чинит и не переспрашивает. Тратит деньги — ровно на то, что напечатал
 перед стартом.
@@ -54,10 +63,28 @@ DEFAULT_ATTEMPTS = 2
 #: жизнью. Интервал Уилсона там честно скажет 5%..100%, но заголовок прочтут
 #: раньше подписи.
 #:
-#: Восемь — это точка, где интервал впервые становится у́же самой доли: при 8
-#: сессиях он ~40 процентных пунктов, при 3 — все 75. Числом это всё ещё грубо,
-#: и стенд об этом говорит; но «грубо» и «бессмысленно» — разные вещи.
-MIN_SESSIONS_FOR_YIELD = 8
+#: **ИЗМЕРЕН** — счётом по той же `wilson`, что печатается наружу. ВЫБРАН здесь
+#: только критерий; число из него следует, а не наоборот.
+#:
+#: Критерий: доля имеет право называться результатом, когда интервал вокруг неё
+#: у́же самой доли, то есть при худшем (самом широком) случае p=0.5 ширина
+#: интервала меньше 50 процентных пунктов. Ширина берётся максимальная по всем
+#: исходам k при данном n: порог обязан держать худший расклад, а не средний.
+#:
+#: Таблица (n → ширина интервала Уилсона в п.п., z=1.96, максимум по k):
+#:
+#:      n:    3     6     8     9    10    11    12    13    15    20
+#:      pp: 73.1  62.4  57.0  54.4  52.6  50.7  49.2  47.7  45.1  40.2
+#:
+#: Первое n, где ширина уходит ниже 50 п.п. — ДВЕНАДЦАТЬ. Прежняя восьмёрка
+#: стояла на арифметической ошибке в этом самом комментарии: там было написано
+#: «~40 п.п. при n=8», а на деле при n=8 интервал 57 п.п. — шире самой доли,
+#: то есть ровно тот случай, который порог и должен отсекать. 40 п.п. наступают
+#: только к n=20. Число исправлено по расчёту, текст — под расчёт.
+#:
+#: Числом это всё ещё грубо (49 п.п. — не точность, а «хотя бы не
+#: бессмыслица»), и стенд говорит об этом вслух рядом с каждой долей.
+MIN_SESSIONS_FOR_YIELD = 12
 
 #: Цена, pollen за единицу. Снято с /image/models и /video/models
 #: [проверено live 2026-08-13]. Держится здесь, чтобы стенд печатал смету ДО
@@ -97,6 +124,49 @@ def attempt_cost(check: str | None, seconds: int, start_model: str,
     return round(cost, 4)
 
 
+def calls_made(session_dir) -> dict:
+    """Сколько ПЛАТНЫХ вызовов реально состоялось — по артефактам на диске.
+
+    Нужно там, где спросить больше некого: сессия оборвалась исключением, и
+    списка попыток от неё не осталось. Файл в каталоге сессии — единственный
+    свидетель, который не зависит от того, как именно порвалось.
+
+    Допущение записано явно: считается состоявшимся тот вызов, который оставил
+    файл. Вызов, оборвавшийся до файла, здесь не виден — значит цена оборванной
+    сессии это НИЖНЯЯ граница расхода, а не точное число. Занижение на один
+    незавершённый вызов честнее, чем выдумать вызовы, которых не было.
+
+    `video_NN_loop.mp4` не считается: луп подрезается локально, ffmpeg денег не
+    берёт. Считать его вторым видео-вызовом — удваивать самую дорогую строку
+    сметы на каждом лупе.
+    """
+    d = Path(session_dir)
+    if not d.is_dir():
+        return {"image": 0, "video": 0}
+    return {"image": len(list(d.glob("start_[0-9][0-9].png"))),
+            "video": len(list(d.glob("video_[0-9][0-9].mp4")))}
+
+
+def session_cost(rec: dict, seconds: int, start_model: str,
+                 video_model: str) -> float:
+    """Цена ОДНОЙ записи журнала — по совершённым вызовам, а не по исходу.
+
+    У дошедшей до вердикта сессии есть список попыток, и он знает больше диска:
+    по имени несработавшей проверки видно, дошла ли попытка до видео-вызова.
+    У оборвавшейся списка нет — там меряем по артефактам (`calls_made`).
+    """
+    attempts = rec.get("attempts") or []
+    if attempts:
+        return round(sum(attempt_cost(a.get("check"), seconds, start_model,
+                                      video_model) for a in attempts), 4)
+    calls = rec.get("calls")
+    if calls is None:
+        calls = calls_made(rec.get("dir") or "")
+    per_video = POLLEN.get(video_model, 0.0) * seconds
+    return round(POLLEN.get(start_model, 0.0) * calls.get("image", 0)
+                 + per_video * calls.get("video", 0), 4)
+
+
 def wilson(successes: int, total: int, z: float = 1.96) -> tuple:
     """Интервал Уилсона для доли. Возвращает (низ, верх) в долях единицы.
 
@@ -114,11 +184,49 @@ def wilson(successes: int, total: int, z: float = 1.96) -> tuple:
     return round(max(0.0, centre - half), 3), round(min(1.0, centre + half), 3)
 
 
+def _made_no_paid_call(rec: dict) -> bool:
+    """Известно ли ТОЧНО, что запись не стоила ни одного вызова.
+
+    Молчание (`calls` нет — старый журнал) толкуется не в свою пользу: считаем,
+    что вызовы были. Иначе любой пробел в журнале начинает улучшать отчёт.
+    """
+    calls = rec.get("calls")
+    return calls is not None and not (calls.get("image", 0)
+                                      + calls.get("video", 0))
+
+
 def summarise(records: list) -> dict:
-    """Свести сессии в числа, которые читает нанимающий."""
+    """Свести сессии в числа, которые читает нанимающий.
+
+    ЗНАМЕНАТЕЛЬ ВЫХОДА ГОДНОГО — решение, принятое явно.
+
+    В знаменатель идут все НАЧАТЫЕ сессии, включая оборвавшиеся на исключении.
+    Обоснование: измеритель (гейт) в момент отказа работал — сломалось изделие,
+    а не прибор. Отказ шлюза (429, таймаут, модерация) — это свойство продукта,
+    который на этом шлюзе живёт, и выброшенная из знаменателя авария значила бы
+    отчёт «выход годного при условии, что API отвечает». Нанимателю сдаётся
+    конвейер целиком, вместе с его внешней зависимостью.
+
+    Ровно одно исключение, и оно противоположного смысла: если про сессию
+    ИЗВЕСТНО, что платных вызовов в ней не случилось вовсе (`calls` пустой), то
+    порвалось до продукта — упал сам стенд, не нашёлся файл, не собрался бриф.
+    Такие считаются отдельно (`aborted_before_any_call`) и в знаменатель не
+    идут: иначе опечатка в стенде обваливает выход годного продукта, и число
+    начинает мерить не то, что подписано.
+
+    Альтернатива («крах — это не измерение, значит вне знаменателя, как
+    отдельный вердикт „не смогли измерить“») имеет право на жизнь и здесь
+    отклонена сознательно: она даёт долю, которую нельзя предъявить как
+    надёжность продукта, а именно за этим числом сюда и приходят. Обе величины
+    в сводке есть — `sessions` (дошли до вердикта) и `sessions_denominator`, —
+    так что читатель волен посчитать и по-другому, но по умолчанию отчёт не
+    льстит себе.
+    """
     sessions = [r for r in records if r.get("kind") == "session"]
     attempts = [a for r in sessions for a in r.get("attempts", [])]
     crashed = [r for r in records if r.get("kind") == "crash"]
+    aborted = [r for r in crashed if _made_no_paid_call(r)]
+    burned = [r for r in crashed if not _made_no_paid_call(r)]
 
     passed_sessions = [r for r in sessions if r.get("passed")]
     passed_attempts = [a for a in attempts if a.get("passed")]
@@ -137,15 +245,21 @@ def summarise(records: list) -> dict:
         else:
             post_video += 1
 
-    spent = round(sum(r.get("pollen", 0.0) for r in sessions), 4)
+    # Деньги считаются по ВСЕМ записям: вызов уже оплачен независимо от того,
+    # чем кончилась сессия. Раньше здесь стояли только `sessions`, и расход
+    # оборвавшихся сессий исчезал из отчёта вместе с ними.
+    spent = round(sum(r.get("pollen", 0.0) for r in records), 4)
+    on_crashes = round(sum(r.get("pollen", 0.0) for r in crashed), 4)
+    denominator = len(sessions) + len(burned)
     per_accepted = (round(spent / len(passed_sessions), 4)
                     if passed_sessions else None)
     durations = sorted(r["seconds"] for r in sessions if r.get("seconds"))
 
     return {
         "sessions": len(sessions),
+        "sessions_denominator": denominator,
         "sessions_passed": len(passed_sessions),
-        "sessions_ci": wilson(len(passed_sessions), len(sessions)),
+        "sessions_ci": wilson(len(passed_sessions), denominator),
         "attempts": len(attempts),
         "attempts_passed": len(passed_attempts),
         "attempts_ci": wilson(len(passed_attempts), len(attempts)),
@@ -155,19 +269,30 @@ def summarise(records: list) -> dict:
         "rejected_before_video": pre_video,
         "rejected_after_video": post_video,
         "pollen_spent": spent,
+        "pollen_on_crashes": on_crashes,
         "pollen_per_accepted_clip": per_accepted,
         "seconds_median": (durations[len(durations) // 2] if durations
                            else None),
         "crashes": len(crashed),
+        # Оборвалось ПОСЛЕ платных вызовов — это отказ продукта, он в
+        # знаменателе. Оборвалось ДО — отказ стенда, он вне знаменателя.
+        "crashed_after_paying": len(burned),
+        "aborted_before_any_call": len(aborted),
     }
 
 
 def yield_is_reportable(sessions: int,
                         floor: int = MIN_SESSIONS_FOR_YIELD) -> tuple:
-    """Можно ли вообще называть долю результатом. (можно, почему нет)."""
+    """Можно ли вообще называть долю результатом. (можно, почему нет).
+
+    Формулировка нарочно про «наблюдения», а не про «сессии»: тот же порог
+    сторожит и строку попыток, и подписывать её словом «сессий» — врать в
+    мелочи там, где весь смысл функции в том, чтобы не врать.
+    """
     if sessions >= floor:
         return True, ""
-    return False, (f"{sessions} сесси(й) — доля НЕ отчитывается как результат "
+    return False, (f"{sessions} наблюдени(й) — доля НЕ отчитывается как "
+                   f"результат "
                    f"(нужно от {floor}). Смотреть счётчики и распределение "
                    f"отказов: они информативны и на малой выборке, в отличие "
                    f"от процента.")
@@ -175,16 +300,24 @@ def yield_is_reportable(sessions: int,
 
 def render(s: dict) -> str:
     """Профиль стенда таблицей. Ведём со штук, процент — только с интервалом."""
-    if not s.get("sessions"):
+    # Знаменатель — начатые сессии, включая оборвавшиеся (см. summarise).
+    # Пусто он или нет, решает именно он: прогон, где все сессии упали, — это
+    # не «сессий не было», а результат, и молчать о нём нельзя.
+    total = s.get("sessions_denominator", s.get("sessions", 0))
+    if not total and not s.get("aborted_before_any_call"):
         return "сессий не было — судить не о чем"
+    if not total:
+        return (f"  ни одна сессия не дошла до платного вызова: "
+                f"{s['aborted_before_any_call']} — это отказ стенда, "
+                f"судить продукт не по чему")
     lo, hi = s["sessions_ci"]
     alo, ahi = s["attempts_ci"]
-    ok_yield, why = yield_is_reportable(s["sessions"])
-    share = (f"доля {s['sessions_passed'] / s['sessions']:.0%}, "
+    ok_yield, why = yield_is_reportable(total)
+    share = (f"доля {s['sessions_passed'] / total:.0%}, "
              f"но истинная лежит между {lo:.0%} и {hi:.0%} — выборка мала"
              if ok_yield else why)
     lines = [
-        f"  сессий:   {s['sessions_passed']}/{s['sessions']} прошло  ({share})",
+        f"  сессий:   {s['sessions_passed']}/{total} прошло  ({share})",
         # Тот же порог и для попыток: «1/1, 100%» здесь читается ровно так же,
         # и защищать только строку сессий значит оставить дверь рядом открытой.
         (f"  попыток:  {s['attempts_passed']}/{s['attempts']} прошло  "
@@ -198,8 +331,18 @@ def render(s: dict) -> str:
            else "— (принятых нет, делить не на что)"),
         f"  медиана сессии: {s['seconds_median']} c",
     ]
-    if s["crashes"]:
-        lines.append(f"  сессий оборвалось на ошибке: {s['crashes']}")
+    # Обрыв — отдельная строка, а не примечание мелким шрифтом: он и в
+    # знаменателе, и в деньгах, и читатель обязан видеть обе стороны.
+    if s.get("crashed_after_paying"):
+        lines.append(
+            f"  оборвалось на отказе API: {s['crashed_after_paying']} "
+            f"(деньги потрачены — {s.get('pollen_on_crashes', 0.0)} pollen, "
+            f"клипа нет; сидят в знаменателе доли)")
+    if s.get("aborted_before_any_call"):
+        lines.append(
+            f"  не дошло до первого платного вызова: "
+            f"{s['aborted_before_any_call']} (отказ стенда, а не продукта — "
+            f"из знаменателя исключены)")
     if s.get("rejected_before_video"):
         lines.append(
             f"  отсеяно ДО видео-вызова: {s['rejected_before_video']} "
@@ -219,11 +362,12 @@ def _session(face: str, n: int, out_dir: Path, *, attempts: int,
     from .produce import produce
 
     started = time.perf_counter()
-    rec: dict = {"kind": "session", "n": n, "face": face}
+    sdir = out_dir / f"s{n:02d}"
+    rec: dict = {"kind": "session", "n": n, "face": face, "dir": str(sdir)}
     try:
         kwargs = {"attempts": attempts, "start_model": start_model,
                   "video_model": video_model,
-                  "out_dir": str(out_dir / f"s{n:02d}")}
+                  "out_dir": str(sdir)}
         if brief is not None:
             kwargs["brief"] = brief
         if subject is not None:
@@ -245,6 +389,10 @@ def _session(face: str, n: int, out_dir: Path, *, attempts: int,
         rec.update({"kind": "crash", "passed": False,
                     "error": f"{type(e).__name__}: {e}"[:400], "attempts": []})
     rec["seconds"] = round(time.perf_counter() - started, 1)
+    # Свидетель платных вызовов. Пишется ВСЕГДА, а не только при обрыве:
+    # у оборвавшейся сессии это единственный источник цены, а у дошедшей —
+    # независимая от списка попыток проверка, что счёт сошёлся.
+    rec["calls"] = calls_made(sdir)
     usage = getattr(pollinations, "LAST_VIDEO_USAGE", None) or {}
     rec["usage"] = usage
     return rec
@@ -295,11 +443,10 @@ def main(argv: list) -> int:
         rec = _session(args.face, n, out, attempts=args.attempts,
                        start_model=args.start_model,
                        video_model=args.video_model)
-        # Цену считаем по факту вызовов этой сессии, а не по смете.
-        rec["pollen"] = round(sum(
-            attempt_cost(a.get("check"), args.seconds, args.start_model,
-                         args.video_model)
-            for a in (rec.get("attempts") or [{}])), 4)
+        # Цену считаем по факту вызовов этой сессии, а не по смете, — и у
+        # оборвавшейся тоже: она успела потратить до того, как упала.
+        rec["pollen"] = session_cost(rec, args.seconds, args.start_model,
+                                     args.video_model)
         records.append(rec)
         with journal.open("a") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
