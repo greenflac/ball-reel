@@ -266,6 +266,61 @@ class PerRunWorkIsNotJudgedByARealtimeBudget(unittest.TestCase):
         self.assertIn("судить не о чем", v["note"])
 
 
+class TimeToFirstResponseIsADifferentMeasurement(unittest.TestCase):
+    """Вехи — про накопленное время от запроса, а не про длительность этапа.
+
+    Разделение не педантичное. Профиль этапов может выглядеть прилично, пока
+    время до первого отклика ужасно: очередь, холодный старт и сеть в
+    длительности этапа не видны вообще. Пользователь чувствует именно
+    накопленное время от своего клика до первого пикселя.
+    """
+
+    def setUp(self):
+        from ball_reel import timing
+
+        self.t = timing
+
+    def test_the_verdict_judges_only_the_first_rung(self):
+        # Лестница прогрессивной отдачи: заглушка мгновенно, вердикт intake
+        # через треть секунды, первый кейфрейм через секунды, финал через
+        # минуты. Требовать 10 мс от финала бессмысленно — вердикт был бы
+        # вечно красным на исправной системе.
+        ladder = [("blurred_upload", 4.0), ("intake_verdict", 310.0),
+                  ("first_keyframe", 9000.0), ("final_clip", 120000.0)]
+        v = self.t.first_paint_verdict(ladder)
+        self.assertTrue(v["ok"])
+        self.assertEqual(v["first"], "blurred_upload")
+        self.assertIn("first_keyframe 9000 мс", v["note"])
+
+    def test_a_first_rung_that_needs_the_server_misses_and_says_why(self):
+        # Один round-trip до бэкенда — это уже десятки миллисекунд, и никакая
+        # оптимизация инференса этого не меняет. Вердикт обязан называть
+        # причину, а не просто «медленно».
+        v = self.t.first_paint_verdict([("server_placeholder", 85.0)])
+        self.assertFalse(v["ok"])
+        self.assertIn("не требует обращения к серверу", v["note"])
+
+    def test_no_milestones_is_reported_not_passed(self):
+        v = self.t.first_paint_verdict([])
+        self.assertFalse(v["ok"])
+        self.assertIsNone(v["first"])
+        self.assertIn("не измерялось", v["note"])
+
+    def test_milestones_are_cumulative_and_ordered(self):
+        got = self.t.Timings()
+        a = got.milestone("first")
+        b = got.milestone("second")
+        self.assertLessEqual(a, b)
+        self.assertEqual([n for n, _ in got.milestones()], ["first", "second"])
+
+    def test_a_milestone_is_not_a_stage(self):
+        # Веха не должна попадать в профиль этапов: это разные величины, и
+        # смешать их — значит сложить длительности с моментами времени.
+        got = self.t.Timings()
+        got.milestone("shown")
+        self.assertEqual(got.summary(), {})
+
+
 class TheProfilePrintsReadably(unittest.TestCase):
     def setUp(self):
         from ball_reel import timing

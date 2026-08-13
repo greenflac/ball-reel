@@ -90,6 +90,25 @@ class Timings:
         self._samples: dict[str, list] = {}
         self._per: dict[str, str] = {}
         self._cold: dict[str, float] = {}
+        self._start = time.perf_counter()
+        self._milestones: list = []
+
+    def milestone(self, name: str) -> float:
+        """Отметить «пользователь что-то УВИДЕЛ», от начала запроса.
+
+        Это ДРУГОЕ измерение, не длительность этапа, и путать их дорого.
+        Профиль этапов может выглядеть прилично, пока время до первого отклика
+        ужасно: очередь, холодный старт и сеть в длительности этапа не видны
+        вообще. Пользователь же чувствует именно накопленное время от своего
+        клика до первого пикселя.
+        """
+        at = (time.perf_counter() - self._start) * 1000.0
+        self._milestones.append((name, round(at, 3)))
+        return at
+
+    def milestones(self) -> list:
+        """Вехи по порядку: [(имя, мс от начала запроса)]."""
+        return list(self._milestones)
 
     @contextmanager
     def stage(self, name: str, *, per: str = PER_RUN):
@@ -364,6 +383,37 @@ def main(argv: list) -> int:
             ensure_ascii=False))
         print(f"\nпрофиль: {args.json}")
     return 0
+
+
+def first_paint_verdict(milestones: list, *,
+                        budget_ms: float = REALTIME_BUDGET_MS) -> dict:
+    """Уложилась ли ПЕРВАЯ веха в бюджет, и что показано на каждой следующей.
+
+    Судит только первую: 10 мс — это бюджет до первого отклика, а не до
+    результата. Требовать его от финального клипа бессмысленно, и вердикт,
+    который так делает, будет вечно красным на исправной системе.
+
+    Практический вывод, ради которого это и меряется: уложиться в первую веху
+    можно ровно одним способом — не ходить за ней на сервер. Всё, что требует
+    хотя бы одного round-trip, в десять миллисекунд не влезет никогда, поэтому
+    первой ступенью может быть только то, что уже есть на клиенте.
+    """
+    if not milestones:
+        return {"budget_ms": budget_ms, "first": None, "ok": False,
+                "ladder": [], "note": "вех нет — время до первого отклика "
+                                      "не измерялось"}
+    name, at = milestones[0]
+    ok = at <= budget_ms
+    ladder = [f"{n} {v:g} мс" for n, v in milestones]
+    if ok:
+        why = (f"первый отклик «{name}» за {at:g} мс — в бюджете {budget_ms:g}")
+    else:
+        why = (f"первый отклик «{name}» за {at:g} мс — мимо бюджета "
+               f"{budget_ms:g} в {at / budget_ms:.0f}x. В такой бюджет влезает "
+               f"только то, что не требует обращения к серверу")
+    return {"budget_ms": budget_ms, "first": name, "first_ms": round(at, 3),
+            "ok": ok, "ladder": milestones,
+            "note": why + ". Лестница: " + " -> ".join(ladder) + "."}
 
 
 def render(summary: dict) -> str:
