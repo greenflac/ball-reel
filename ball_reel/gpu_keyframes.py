@@ -69,6 +69,49 @@ IP_ADAPTER_LORA = "ip-adapter-faceid_sd15_lora.safetensors"
 #: never before, or the gate measures the upscaler's invention.
 WIDTH, HEIGHT = 512, 768
 
+#: Какую долю высоты кадра занимает лицо при ПОЛНОРОСТОВОЙ композиции.
+#: Замерено на живом клипе 1080x1920: лицо 181 px, то есть 9.4% высоты
+#: [проверено live]. Число геометрическое, а не модельное: оно одинаково для
+#: любого генератора, включая тот опенсорс, который поедет в прод.
+FULL_BODY_FACE_SHARE = 0.094
+
+#: Поясная композиция даёт примерно вдвое большую долю — это и есть выход для
+#: карты, на которой полный рост не помещается по разрешению.
+WAIST_UP_FACE_SHARE = 0.19
+
+
+def face_px_at(height: int, share: float = FULL_BODY_FACE_SHARE) -> int:
+    """Сколько пикселей займёт лицо в кадре такой высоты."""
+    return int(height * share)
+
+
+def identity_verifiable(height: int, *, share: float = FULL_BODY_FACE_SHARE,
+                        floor: int | None = None) -> tuple:
+    """Хватит ли разрешения, чтобы гейт вообще МОГ судить лицо.
+
+    Это не про качество картинки, а про то, останется ли работающим главный
+    измеритель проекта. ArcFace отказывается судить лицо мельче своего порога,
+    и на полноростовом вертикальном кадре доля лица фиксирована геометрией —
+    значит порог превращается в требование к РАЗРЕШЕНИЮ, о котором надо знать
+    до аренды карты, а не после.
+
+    Найдено живым прогоном: на 464x832 (wan-fast) лицо вышло 78 px и клип стал
+    непроверяемым, на 1080x1920 (veo) — 181 px и идентичность стала измеримой.
+    Ни та, ни другая модель в прод не поедет, но геометрия останется.
+    """
+    from .identity_arcface import MIN_FACE_PX
+
+    floor = MIN_FACE_PX if floor is None else floor
+    got = face_px_at(height, share)
+    if got >= floor:
+        return True, f"лицо ~{got} px при пороге {floor} — судимо"
+    need = int(floor / share)
+    return False, (
+        f"лицо ~{got} px при пороге {floor}: гейт НЕ СМОЖЕТ судить "
+        f"идентичность. Нужен кадр от {need} px по высоте, либо более тесное "
+        f"кадрирование (по пояс даёт вдвое большую долю), либо честно принять, "
+        f"что на этой конфигурации идентичность не проверяется.")
+
 
 @dataclass
 class GPUPlan:
@@ -122,6 +165,11 @@ def plan(vram_gb: float = 4.0, keyframes: int = 5) -> GPUPlan:
             "at this size a video model (AnimateDiff + ControlNet) becomes "
             "possible and would give CONTINUOUS pose control instead of "
             "per-node — worth benchmarking before committing to keyframes.")
+    ok, why = identity_verifiable(p.height)
+    if not ok:
+        p.notes.append(f"ИДЕНТИЧНОСТЬ НА ПОЛНОМ РОСТЕ: {why}")
+    else:
+        p.notes.append(f"идентичность: {why}")
     p.notes.append(
         f"{keyframes} keyframes pin the trajectory at {keyframes} points; "
         f"between them the interpolation is the video model's guess. Denser "
