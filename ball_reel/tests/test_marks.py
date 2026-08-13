@@ -225,6 +225,24 @@ class DistinctivenessIsMeasuredAgainstNeighbouringSkin(unittest.TestCase):
         self.assertGreater(wide["coverage"], 0.8)
         self.assertLess(sparse["coverage"], 0.2)
 
+    def test_soft_shading_is_not_counted_as_ink(self):
+        # Мутационный аудит показал, что NOISE_FLOOR не сторожил никто: тест
+        # выше гоняет чистую кожу без светотени, а на ней порог шума не влияет
+        # ни на что — с ним и без него coverage одинаковый.
+        #
+        # Здесь кожа с мягким градиентом ±3% яркости, как на круглой руке, и
+        # настоящие чернила на 12.5% окна. С порогом coverage = 0.125, то есть
+        # ровно доля чернил; со снятым порогом = 1.0, то есть «чернила везде».
+        # Диагностика «окно шире приметы» при этом перестаёт работать вовсе.
+        import numpy as np
+
+        a = _skin()
+        a = np.clip(a + np.linspace(-0.03, 0.03, 200)[None, :, None], 0, 1)
+        a[60:140, 60:70] = 0.05
+        got = self.m.distinctiveness(a, (60, 60, 140, 140))
+        self.assertLess(got["coverage"], 0.3)
+        self.assertGreater(got["coverage"], 0.05)
+
     def test_peak_separates_a_faded_mark_from_a_shrunken_one(self):
         # Две разные поломки с одинаковой средней: примета уменьшилась вдвое,
         # либо выцвела вдвое. Чинятся они разным, и слепить их в одно число
