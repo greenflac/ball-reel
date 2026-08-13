@@ -124,6 +124,22 @@ class CostIsPerAcceptedClipNotPerCall(unittest.TestCase):
         self.assertIsNone(s["pollen_per_accepted_clip"])
         self.assertGreater(s["pollen_spent"], 0)
 
+    def test_a_rejection_before_the_video_call_costs_only_the_image(self):
+        # Главное достоинство дешёвого экрана: он бракует ДО того, как
+        # потрачены основные деньги. Если считать такой попытке полную цену,
+        # себестоимость завышается в разы, а достоинство становится невидимым.
+        cheap = self.b.attempt_cost("start_identity", 4, "kontext", "wan-fast")
+        self.assertAlmostEqual(cheap, 0.04, places=4)
+
+    def test_a_rejection_after_the_video_call_costs_both(self):
+        full = self.b.attempt_cost("loop", 4, "kontext", "wan-fast")
+        self.assertAlmostEqual(full, 0.04 + 0.04, places=4)
+
+    def test_a_passing_attempt_costs_the_full_price_too(self):
+        # check=None означает «прошла», а прошедшая попытка видео вызывала.
+        self.assertAlmostEqual(
+            self.b.attempt_cost(None, 4, "kontext", "wan-fast"), 0.08, places=4)
+
     def test_the_estimate_is_an_upper_bound_and_names_its_parts(self):
         # Смета печатается ДО траты и считает, что все ретраи израсходуются.
         got = self.b.estimate(sessions=10, attempts=2, seconds=4,

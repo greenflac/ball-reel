@@ -258,7 +258,7 @@ def produce(
                     f"start frame did not reproduce the reference pose: "
                     f"{pose['note']} — retried before spending a video call",
                     identity=_identity_summary(start_check),
-                    pose_distance=pose["median"]))
+                    pose_distance=pose["median"], check="start_pose"))
                 continue
         if start_drift is None or start_drift > bar:
             why = (f"start frame not the same person ({start_drift:.2f} > "
@@ -268,7 +268,13 @@ def produce(
                 n, strat.id, start, [], 1.0 if start_drift is None else
                 round(start_drift, 4), 0.0, False,
                 f"{why} — retried before spending a video call",
-                identity=_identity_summary(start_check)))
+                identity=_identity_summary(start_check),
+                # Два РАЗНЫХ отказа, и путать их дорого: «не тот человек» —
+                # это про генератор, «нечего судить» — про то, что лицо в
+                # кадре мельче порога и вердикт невозможен. Первое чинится
+                # другой моделью старт-кадра, второе — кадрированием.
+                check=("start_identity" if start_drift is not None
+                       else "start_not_verifiable")))
             continue
 
         # 3. start frame -> jump video (Seedance image-to-video). The video call
@@ -367,9 +373,21 @@ def produce(
 #: потом движение, анатомия, поза, одежда, луп. Имена стабильны, потому что по
 #: ним строится статистика «что ломается первым» — а такая статистика бесполезна,
 #: если категории переименовываются вместе с формулировкой сообщения.
-CHECK_ORDER = ("not_verifiable", "identity_median", "identity_p90",
+#: Первые три — ЭКРАН СТАРТ-КАДРА, он отрабатывает ДО единого видео-вызова и
+#: потому дешёвый. Он не был представлен в таксономии вовсе, и первый же живой
+#: прогон это обнажил: пятнадцать сессий подряд отсеялись именно здесь, а в
+#: статистику попали как «error» — то есть самый частый отказ пайплайна был
+#: невидим для отчёта, который эту статистику и продаёт.
+CHECK_ORDER = ("start_not_verifiable", "start_identity", "start_pose",
+               "not_verifiable", "identity_median", "identity_p90",
                "motion_amount", "motion_physical", "anatomy", "pose_wander",
                "garment", "loop")
+
+#: Где проходит граница трат. Проверки левее неё стоят одну картинку, правее —
+#: ещё и видео-вызов. Разделение попадает в отчёт: «отсеяли до видео» и
+#: «отсеяли после» — это разные деньги, и смешивать их в одном проценте брака
+#: значит скрывать главное достоинство дешёвого экрана.
+PRE_VIDEO_CHECKS = ("start_not_verifiable", "start_identity", "start_pose")
 
 
 def verdict(**kw) -> tuple:

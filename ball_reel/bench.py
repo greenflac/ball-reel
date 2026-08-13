@@ -54,9 +54,32 @@ POLLEN = {"kontext": 0.04, "flux": 0.002, "nanobanana": 0.00003,
 
 def estimate(sessions: int, attempts: int, seconds: int,
              start_model: str, video_model: str) -> float:
-    """Смета до старта. Верхняя граница: считает, что все ретраи израсходуются."""
+    """Смета до старта. Верхняя граница: считает, что все ретраи израсходуются
+    И что каждая попытка дошла до видео."""
     per_attempt = POLLEN.get(start_model, 0.0) + POLLEN.get(video_model, 0.0) * seconds
     return round(per_attempt * attempts * sessions, 3)
+
+
+def attempt_cost(check: str | None, seconds: int, start_model: str,
+                 video_model: str) -> float:
+    """Сколько стоила ОДНА попытка на самом деле.
+
+    Попытка, отсеянная экраном старт-кадра, не доходит до видео-вызова и стоит
+    только картинку. Считать ей полную цену — значит завышать себестоимость в
+    разы и заодно прятать главное достоинство дешёвого экрана: он бракует ДО
+    того, как потрачены основные деньги.
+
+    Замерено живьём: на сложной рефке (профиль) экран отсеял 15 сессий из 15,
+    ни один видео-вызов не состоялся, и смета в 2.4 pollen обернулась расходом
+    примерно в 1.2 — ровно вдвое меньше, потому что дорогая половина каждой
+    попытки не случилась.
+    """
+    from .produce import PRE_VIDEO_CHECKS
+
+    cost = POLLEN.get(start_model, 0.0)
+    if check not in PRE_VIDEO_CHECKS:
+        cost += POLLEN.get(video_model, 0.0) * seconds
+    return round(cost, 4)
 
 
 def wilson(successes: int, total: int, z: float = 1.96) -> tuple:
@@ -85,12 +108,19 @@ def summarise(records: list) -> dict:
     passed_sessions = [r for r in sessions if r.get("passed")]
     passed_attempts = [a for a in attempts if a.get("passed")]
 
+    from .produce import PRE_VIDEO_CHECKS
+
     first_fail: dict = {}
+    pre_video = post_video = 0
     for a in attempts:
         if a.get("passed"):
             continue
-        first_fail[a.get("check") or "error"] = \
-            first_fail.get(a.get("check") or "error", 0) + 1
+        name = a.get("check") or "error"
+        first_fail[name] = first_fail.get(name, 0) + 1
+        if name in PRE_VIDEO_CHECKS:
+            pre_video += 1
+        else:
+            post_video += 1
 
     spent = round(sum(r.get("pollen", 0.0) for r in sessions), 4)
     per_accepted = (round(spent / len(passed_sessions), 4)
@@ -106,6 +136,9 @@ def summarise(records: list) -> dict:
         "attempts_ci": wilson(len(passed_attempts), len(attempts)),
         "first_failing_check": dict(sorted(first_fail.items(),
                                            key=lambda kv: -kv[1])),
+        # Отсев ДО видео-вызова — это сэкономленные деньги, а не просто брак.
+        "rejected_before_video": pre_video,
+        "rejected_after_video": post_video,
         "pollen_spent": spent,
         "pollen_per_accepted_clip": per_accepted,
         "seconds_median": (durations[len(durations) // 2] if durations
@@ -134,6 +167,10 @@ def render(s: dict) -> str:
     ]
     if s["crashes"]:
         lines.append(f"  сессий оборвалось на ошибке: {s['crashes']}")
+    if s.get("rejected_before_video"):
+        lines.append(
+            f"  отсеяно ДО видео-вызова: {s['rejected_before_video']} "
+            f"(дешёвый экран), ПОСЛЕ: {s.get('rejected_after_video', 0)}")
     if s["first_failing_check"]:
         lines.append("  что ломается ПЕРВЫМ:")
         for name, n in s["first_failing_check"].items():
@@ -226,9 +263,10 @@ def main(argv: list) -> int:
                        start_model=args.start_model,
                        video_model=args.video_model)
         # Цену считаем по факту вызовов этой сессии, а не по смете.
-        rec["pollen"] = estimate(1, len(rec.get("attempts") or [1]),
-                                 args.seconds, args.start_model,
-                                 args.video_model)
+        rec["pollen"] = round(sum(
+            attempt_cost(a.get("check"), args.seconds, args.start_model,
+                         args.video_model)
+            for a in (rec.get("attempts") or [{}])), 4)
         records.append(rec)
         with journal.open("a") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")

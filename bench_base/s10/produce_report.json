@@ -1,0 +1,72 @@
+{
+  "face_photo": "face.jpg",
+  "passed": false,
+  "clip_path": "",
+  "start_frame": "",
+  "clip_frames": [],
+  "note": "no attempt held identity across a moving clip in 2 tries. Best median drift n/a (bar 0.35). Returning the best attempt, flagged NOT passing \u2014 do not ship blind.",
+  "attempts": [
+    {
+      "n": 0,
+      "strategy_id": "energy_led",
+      "start_frame": "bench_base/s10/start_00.png",
+      "video_frames": [],
+      "worst_identity_drift": 1.0,
+      "motion": 0.0,
+      "passed": false,
+      "reason": "start frame unusable: identity NOT VERIFIABLE: 1 frame(s) had a face under 70px and 0 had none. The face is too small in this clip to identify \u2014 frame it closer. \u2014 retried before spending a video call",
+      "clip_path": "",
+      "identity": {
+        "median": null,
+        "p90": null,
+        "worst": null,
+        "worst_frame": null,
+        "coverage": 0.0,
+        "judgeable": 0,
+        "frames": 1,
+        "too_small": 1,
+        "no_face": 0,
+        "face_px_min": 59,
+        "face_px_max": 59,
+        "note": "identity NOT VERIFIABLE: 1 frame(s) had a face under 70px and 0 had none. The face is too small in this clip to identify \u2014 frame it closer."
+      },
+      "loop_ratio": null,
+      "seamless": false,
+      "worst_jump": null,
+      "pose_distance": null,
+      "limb_wobble": null,
+      "check": null
+    },
+    {
+      "n": 1,
+      "strategy_id": "energy_led",
+      "start_frame": "bench_base/s10/start_01.png",
+      "video_frames": [],
+      "worst_identity_drift": 0.4922,
+      "motion": 0.0,
+      "passed": false,
+      "reason": "start frame not the same person (0.49 > 0.35) \u2014 retried before spending a video call",
+      "clip_path": "",
+      "identity": {
+        "median": 0.4922,
+        "p90": 0.4922,
+        "worst": 0.4922,
+        "worst_frame": "start_01.png",
+        "coverage": 1.0,
+        "judgeable": 1,
+        "frames": 1,
+        "too_small": 0,
+        "no_face": 0,
+        "face_px_min": 71,
+        "face_px_max": 71,
+        "note": "identity via ArcFace cosine distance: median 0.4922, p90 0.4922, worst 0.4922 on 1/1 judgeable frame(s) (coverage 100%; 0 face(s) under 70px, 0 with no face). 1 judgeable frame(s) past 0.35."
+      },
+      "loop_ratio": null,
+      "seamless": false,
+      "worst_jump": null,
+      "pose_distance": null,
+      "limb_wobble": null,
+      "check": null
+    }
+  ]
+}
