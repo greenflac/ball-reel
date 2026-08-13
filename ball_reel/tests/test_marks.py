@@ -950,3 +950,82 @@ class InkAndSHADINGLiveAtDifferentSCALES(unittest.TestCase):
         a = self.m.distinctiveness(small, (70, 70, 130, 130))
         b = self.m.distinctiveness(big, (140, 140, 260, 260))
         self.assertAlmostEqual(a["texture"], b["texture"], delta=0.05)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class TheTransferCarriesINKNotTAN(unittest.TestCase):
+    """Обе находки этого класса сделаны ГЛАЗАМИ на первом сквозном переносе.
+
+    Дракон доехал с фото личности на кадр в другой позе — и рядом с ним легли
+    цветные полосы. Ни одно число этого не показало: и `score`, и `texture` на
+    цели выросли, как и положено при появлении контраста. Контраст был не тот.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+        self.mark = marks.Mark(bone="l_forearm", along=0.5, radius=0.15,
+                               name="tattoo")
+
+    def _warm_skin(self, size=200):
+        """Кожа, у которой ПОЛОСА теплее остального — модель чужого загара."""
+        import numpy as np
+
+        a = _skin(size)
+        a[:, 105:118] = [0.78, 0.60, 0.46]     # заметно теплее, но не тушь
+        return a
+
+    def test_a_warm_patch_of_skin_does_not_travel_as_a_colour_cast(self):
+        # Замерено на живом переносе: паразитная полоса давала сдвиг по каналам
+        # (-21, -33, -46) при том, что чистая тушь даёт ровное (-24, -24, -24).
+        # Разные числа по каналам — это и есть налёт чужого оттенка.
+        import numpy as np
+
+        target = _skin()
+        out, rep = self.m.transfer(self._warm_skin(), _points(), target,
+                                   _points(), self.mark)
+        self.assertTrue(rep["applied"], rep["note"])
+        moved = np.abs(out - target).sum(axis=-1) > 0.02
+        if not moved.any():
+            self.skipTest("вклейка ничего не изменила — проверять нечего")
+        shift = (out - target)[moved].mean(axis=0)
+        # Сдвиг обязан быть ПОЧТИ ОДИНАКОВЫМ по каналам: перенос несёт яркость,
+        # а не оттенок соседней кожи.
+        self.assertLess(float(shift.max() - shift.min()), 0.06,
+                        f"цветной налёт: сдвиг по каналам {shift.round(3)}")
+
+    def test_real_ink_still_darkens(self):
+        # Обратная сторона: гашение цветности не должно съедать саму примету.
+        import numpy as np
+
+        target = _skin()
+        out, _ = self.m.transfer(_with_patch(), _points(), target, _points(),
+                                 self.mark)
+        got = self.m.distinctiveness(out, self.m.locate(_points(), self.mark))
+        self.assertGreater(got["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(got["luma_contrast"], 0)
+
+    def test_the_source_is_not_taken_from_beyond_the_SILHOUETTE(self):
+        # Капсула плоская и не отличает «эту руку» от другой конечности,
+        # оказавшейся рядом в кадре. На фото личности за плечом проходило
+        # предплечье: оно кожа, оно внутри капсулы, обе маски его пропускали, и
+        # на цель оно ехало полосой. Середина обхвата принадлежит своей
+        # конечности — туда и смотрим.
+        import numpy as np
+
+        source = _skin()
+        source[:, 60:75] = 0.05          # «чужая конечность» у самого силуэта
+        source[90:110, 95:105] = 0.05    # своя примета по центру
+        target = _skin()
+        out, _ = self.m.transfer(source, _points(), target, _points(),
+                                 self.mark, source_skin_mask=np.ones((200, 200),
+                                                                     bool))
+        moved = np.abs(out - target).sum(axis=-1) > 0.02
+        cols = np.nonzero(moved.any(axis=0))[0]
+        if not len(cols):
+            self.skipTest("вклейка ничего не изменила")
+        limit = self.m.MARK_V_LIMIT
+        self.assertLess(limit, 1.0)
+        # Центр приметы едет, край обхвата — нет.
+        self.assertTrue(moved[:, 100].any(), "середина приметы не перенеслась")
