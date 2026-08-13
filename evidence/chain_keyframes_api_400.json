@@ -1,0 +1,46 @@
+[
+  {
+    "index": 0,
+    "t": 0.0,
+    "driving_frame": "chain_frames/0001.png",
+    "rendered": "",
+    "url": "",
+    "pose_distance": null,
+    "identity_drift": null,
+    "accepted": false,
+    "reason": "render failed: compose: HTTP 400 {\"success\":false,\"error\":{\"message\":\"Image provider error: OpenRouter Gemini image generation request failed: {\\\"error\\\":{\\\"message\\\":\\\"Gemini"
+  },
+  {
+    "index": 1,
+    "t": 48.0,
+    "driving_frame": "chain_frames/0049.png",
+    "rendered": "",
+    "url": "",
+    "pose_distance": null,
+    "identity_drift": null,
+    "accepted": false,
+    "reason": "render failed: compose: HTTP 400 {\"success\":false,\"error\":{\"message\":\"Image provider error: OpenRouter Gemini image generation request failed: {\\\"error\\\":{\\\"message\\\":\\\"Gemini"
+  },
+  {
+    "index": 2,
+    "t": 68.0,
+    "driving_frame": "chain_frames/0069.png",
+    "rendered": "chain_out/kf_02_r1.png",
+    "url": "",
+    "pose_distance": 0.5914,
+    "identity_drift": 0.5547,
+    "accepted": false,
+    "reason": "pose off by 0.5914 (> 0.25) — node would not pin the motion"
+  },
+  {
+    "index": 3,
+    "t": 92.0,
+    "driving_frame": "chain_frames/0093.png",
+    "rendered": "chain_out/kf_03_r1.png",
+    "url": "",
+    "pose_distance": 0.6516,
+    "identity_drift": 0.3886,
+    "accepted": false,
+    "reason": "pose off by 0.6516 (> 0.25) — node would not pin the motion"
+  }
+]

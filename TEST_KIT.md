@@ -72,7 +72,7 @@ https://pytorch.org/get-started/locally/
 python3 -m ball_reel.codeaudit --quick
 ```
 
-Ожидается `Ran 220 tests ... OK`. Если красное — дальше не идти, дело не в карте.
+Ожидается `Ran 249 tests ... OK`. Если красное — дальше не идти, дело не в карте.
 
 ## 2. Предполёт (бесплатно, ~10 с)
 
