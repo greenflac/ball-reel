@@ -846,3 +846,76 @@ class ThePasteRespectsCLOTHING(unittest.TestCase):
         self.assertTrue(rep["applied"])
         self.assertIn("Одежда НЕ ПРОВЕРЕНА", rep["note"])
         self.assertNotIn("skin_share", rep)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy not installed (live extra)")
+class InkAndSHADINGLiveAtDifferentSCALES(unittest.TestCase):
+    """Второй канал метрики, и почему одного не хватило.
+
+    Управляемый замер на живом кадре (`marktest/make_inked_reference.py` — две
+    рефки, отличающиеся РОВНО татуировкой): дракон закрасил 37% судимых
+    пикселей предплечья и не сдвинул `score` вовсе — 0.3106 на чистой руке
+    против 0.3072 с татуировкой.
+
+    Причина не в вычислении. Одна медиана по кольцу на живой руке даёт 0.31
+    «приметности» БЕЗ приметы, потому что мерит собственную светотень
+    конечности. Порог входа 0.08 калибровался на синтетической ровной коже, где
+    светотени нет вовсе, — и на настоящем кадре оказался вчетверо ниже шума.
+
+    Синтетика этого показать не могла в принципе: у плоской заливки нет ни
+    светотени, ни силуэта.
+    """
+
+    def setUp(self):
+        from ball_reel import marks
+
+        self.m = marks
+
+    def _shaded_limb(self, size=200, inked=False):
+        """Кожа с широкой тенью поперёк — как на круглой руке."""
+        import numpy as np
+
+        a = _skin(size)
+        shade = 1.0 - 0.45 * np.abs(np.linspace(-1, 1, size))[None, :, None] ** 2
+        a = a * shade
+        if inked:
+            for x in range(70, 130, 9):       # тонкие линии: контурный рисунок
+                a[70:130, x:x + 2] *= 0.12
+        return a
+
+    def test_shading_alone_produces_little_TEXTURE(self):
+        # Ключевое разделение: широкая тень меняет яркость сильно, но МЕДЛЕННО.
+        got = self.m.distinctiveness(self._shaded_limb(), (70, 70, 130, 130))
+        self.assertLess(got["texture"], self.m.MIN_TEXTURE_CONTRAST)
+
+    def test_thin_lines_on_the_same_shading_are_seen(self):
+        # Та же тень, добавлены линии. Массовый канал их почти не замечает на
+        # фоне тени — частотный обязан.
+        plain = self.m.distinctiveness(self._shaded_limb(), (70, 70, 130, 130))
+        inked = self.m.distinctiveness(self._shaded_limb(inked=True),
+                                       (70, 70, 130, 130))
+        self.assertGreater(inked["texture"], plain["texture"] * 1.5)
+        self.assertGreater(inked["texture"], self.m.MIN_TEXTURE_CONTRAST)
+
+    def test_a_SOLID_mark_is_kept_by_the_mass_channel(self):
+        # Почему каналов два, а не один. У сплошной заливки высоких частот
+        # внутри НЕТ — только на краю. Выкинуть массовый канал в пользу
+        # частотного значит ослепнуть на закрашенные приметы.
+        solid = self.m.distinctiveness(_with_patch(), (80, 80, 120, 120))
+        self.assertGreater(solid["score"], self.m.MIN_REFERENCE_CONTRAST)
+        self.assertLess(solid["texture"], self.m.MIN_TEXTURE_CONTRAST)
+
+    def test_the_texture_radius_follows_the_LIMB_not_the_pixels(self):
+        # Иначе метрика меняла бы ответ от одного лишь масштаба съёмки: на
+        # вдвое большем снимке линии тату тоже вдвое толще, и радиус, заданный
+        # в пикселях, съел бы их.
+        import numpy as np
+        from PIL import Image
+
+        small = self._shaded_limb(200, inked=True)
+        big = np.asarray(Image.fromarray(
+            (small * 255).astype(np.uint8)).resize((400, 400), Image.BICUBIC),
+            dtype=np.float64) / 255.0
+        a = self.m.distinctiveness(small, (70, 70, 130, 130))
+        b = self.m.distinctiveness(big, (140, 140, 260, 260))
+        self.assertAlmostEqual(a["texture"], b["texture"], delta=0.05)

@@ -38,8 +38,18 @@ from pathlib import Path
 DEFAULT_EVERY = 6
 
 
-def _say(step: str, ok: bool, detail: str = "") -> None:
-    print(f"{'PASS' if ok else 'FAIL'}  {step:<22} {detail}")
+def _say(step: str, ok, detail: str = "") -> None:
+    """Три исхода, а не два. `ok is None` — «не смогли измерить».
+
+    Печать булевым флагом склеивала «проверено и хорошо» с «проверить не
+    вышло»: непроверенное показывалось галочкой. Это тот же дефект, что уже
+    ловили в позе (`delta is None or ...` пропускало неизмеренную позу) и в
+    жидкости (нулевое расстояние от невозможности измерить подавалось как
+    идеальное совпадение). Одна и та же ошибка в трёх местах — значит она в
+    способе печатать, а не в местах.
+    """
+    print(f"{'ПРОПУСК' if ok is None else ('PASS' if ok else 'FAIL'):<7} "
+          f"{step:<22} {detail}")
 
 
 def smoke_verdict(ident, delta, *, driving=None) -> dict:
@@ -332,11 +342,42 @@ def main(argv: list) -> int:
     from . import dwpose
     from .garment import garment_drift
     source = dwpose.pose_points if dwpose.available() else landmarks
-    g = garment_drift(keyframes, [source(k) for k in keyframes])
+    kf_points = [source(k) for k in keyframes]
+    g = garment_drift(keyframes, kf_points)
     _say("одежда", g["stable"], g["note"][:96])
     if not g["stable"]:
         print("      одежда плывёт между узлами. Задать --garment-ref одной "
               "картинкой одежды или зафиксировать сид; см. garment.py.")
+
+    # 4б -------------------------------------------- прилегание и мимика
+    # ДВЕ МЕТРИКИ, КОТОРЫЕ БЫЛИ НАПИСАНЫ И НИКУДА НЕ ПОДАВАЛИСЬ. Счётчик без
+    # ручки — задел; счётчик, к которому ручку так и не приделали, — долг.
+    #
+    # Они меряют РАЗНОЕ, и обе нужны. `garment_drift` выше ловит смену одежды
+    # между узлами по цвету: другая футболка. `garment_fit` ловит, едет ли ТА
+    # ЖЕ ткань вместе с телом или скользит по нему — по материальным точкам
+    # поверхности, а не по цвету. Клип с одинаковой одеждой во всех кадрах
+    # проходит первую проверку и может провалить вторую.
+    #
+    # Ни одна из них не останавливает прогон: обе ни разу не работали на
+    # сгенерированном клипе, только на живой съёмке. Ставить на непроверенном
+    # измерителе бар, который отбрасывает оплаченный результат, — это ровно то
+    # самое «выдать выбранное за измеренное».
+    from .expression import clip_expression
+    from .garment_fit import garment_fit as garment_surface_fit
+
+    with clock.stage("garment_fit", per=PER_RUN):
+        fit = garment_surface_fit(keyframes, kf_points)
+    _say("прилегание", fit["fits"], fit["note"][:110])
+
+    driving_paths = [driving_of.get(Path(c).stem) for c in nodes[:len(keyframes)]]
+    if all(driving_paths):
+        with clock.stage("expression", per=PER_RUN):
+            exp = clip_expression(driving_paths, keyframes)
+        _say("мимика", exp.get("verdict"), exp["note"][:110])
+    else:
+        _say("мимика", None,
+             "не для всех условий известен driving-кадр — сравнивать не с чем")
 
     # 5 --------------------------------------------------------------- сшивка
     from . import pollinations

@@ -121,6 +121,26 @@ MIN_RING_PX = 64
 #: чем молча выдать число. ВЫБРАНО, откалибровать не на чем.
 MAX_BASELINE_SPREAD = 0.45
 
+#: Радиус баланса для высокочастотного канала, в долях ШИРИНЫ конечности.
+#: Ниже — про то, зачем этот канал вообще нужен.
+#:
+#: ИЗМЕРЕНО на управляемой паре (одна и та же рефка, отличается ровно
+#: татуировкой; `marktest/make_inked_reference.py`). Отношение «с драконом» к
+#: «чистой» по радиусу баланса:
+#:     2 px 1.99x | 3 px 1.79x | 5 px 1.58x | 8 px 1.39x | 12 px 1.19x | 20 px 1.00x
+#: Ширина предплечья в кадре — 43 px, то есть 20 px это половина ширины руки, и
+#: там разделение пропадает полностью. ВЫБРАНО 1/8 ширины (здесь 5.4 px): ещё
+#: даёт полуторное разделение и при этом не зависит от размера кадра — на вдвое
+#: большем снимке линии тату тоже вдвое толще.
+TEXTURE_RADIUS_FRACTION = 0.125
+
+#: Ниже этой высокочастотной энергии считать, что в окне ЕСТЬ линейный рисунок,
+#: нельзя. ВЫБРАНО между двумя измеренными точками ОДНОЙ пары: голая рука дала
+#: 0.1006, та же рука с драконом — 0.1589. Это калибровка по одному образцу, и
+#: относиться к ней надо соответственно: порог отделяет эти два числа и ничего
+#: пока не доказывает про другие тела, свет и рисунки.
+MIN_TEXTURE_CONTRAST = 0.13
+
 #: Ниже этого модуля знаковой яркости направление контраста СУДИТЬ НЕЛЬЗЯ.
 #: Цветная татуировка той же светлоты, что кожа, отличается насыщенностью, а
 #: знак её яркости — шум. ВЫБРАНО: половина MIN_REFERENCE_CONTRAST.
@@ -281,6 +301,39 @@ def _ring_pixels(arr, box, points=None, bone=None, half_width=None):
     return ring[keep], origin
 
 
+def _texture_energy(arr, box, base, inner_mask, points, bone, half_width):
+    """Высокочастотная энергия в окне, в долях яркости кожи.
+
+    Локальный баланс строится размытием по Гауссу и вычитается: остаётся то,
+    что меняется БЫСТРЕЕ баланса. Радиус привязан к ширине конечности, а не к
+    пикселям кадра, — иначе метрика меняла бы ответ от одного лишь масштаба
+    съёмки: на вдвое большем снимке и линии тату вдвое толще.
+
+    Без геометрии ширину взять неоткуда, и тогда радиус выводится из окна
+    приметы. Это хуже: окно задаёт оператор, и он может ошибиться.
+    """
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    x0, y0, x1, y1 = box
+    if points is not None and bone is not None:
+        frame = _bone_frame(points, bone)
+        width = (frame[1] * half_width_for(bone, half_width) * 2
+                 if frame else (x1 - x0))
+    else:
+        width = x1 - x0
+    radius = max(1.0, width * TEXTURE_RADIUS_FRACTION)
+
+    lum = (0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2])
+    img = Image.fromarray((np.clip(lum, 0, 1) * 255).astype(np.uint8), mode="L")
+    low = np.asarray(img.filter(ImageFilter.GaussianBlur(radius)),
+                     dtype=np.float64) / 255.0
+    high = np.abs(lum - low)[y0:y1, x0:x1]
+    if inner_mask is not None:
+        high = high[inner_mask]
+    return float(np.mean(high)) / max(base, 1e-3)
+
+
 def distinctiveness(image, box, *, points=None, bone=None,
                     half_width=None) -> dict | None:
     """Насколько область отличается от кожи ВОКРУГ неё. None — судить нельзя.
@@ -346,16 +399,17 @@ def distinctiveness(image, box, *, points=None, bone=None,
     # снятой поперёк тёмного фона, окно с radius 0.45 давало score 1.184 —
     # прибор рапортовал татуировку там, где её нет, и опора при этом была
     # правильная. Чистить надо оба конца сравнения, а не один.
+    inner_mask = None
     if origin == "limb":
         import numpy as _np
 
         gy, gx = _np.mgrid[y0:y1, x0:x1]
         uv = limb_uv(points, bone, gx.astype(float), gy.astype(float),
                      half_width=half_width)
-        on_limb = uv[2]
-        if int(on_limb.sum()) < MIN_RING_PX:
+        inner_mask = uv[2]
+        if int(inner_mask.sum()) < MIN_RING_PX:
             return None
-        inner = inner[on_limb].reshape(-1, 1, 3)
+        inner = inner[inner_mask].reshape(-1, 1, 3)
 
     in_lum, in_sat = _luma_sat(inner)
     sk_lum_px, sk_sat_px = _luma_sat(skin.reshape(-1, 1, 3))
@@ -371,11 +425,34 @@ def distinctiveness(image, box, *, points=None, bone=None,
 
     spread = float(np.quantile(sk_lum_px, 0.9)
                    - np.quantile(sk_lum_px, 0.1)) / base
+
+    # ВТОРОЙ КАНАЛ: высокочастотная энергия. Появился после управляемого замера
+    # на живом кадре, и без него модуль не работал на настоящих татуировках.
+    #
+    # Дракон закрасил 37% судимых пикселей предплечья и НЕ СДВИНУЛ `score`:
+    # 0.3106 на чистой руке против 0.3072 с татуировкой — то есть чуть ниже.
+    # Причина не в вычислении, а в том, ЧТО меряет одна медиана по кольцу: на
+    # живой руке она даёт 0.31 «приметности» без всякой приметы, потому что
+    # мерит собственную светотень конечности. Порог входа 0.08 калибровался на
+    # синтетической ровной коже, где светотени нет вовсе, и на реальном кадре
+    # он оказался вчетверо ниже уровня шума.
+    #
+    # Чернила отличаются от светотени масштабом: линия тонкая, тень широкая.
+    # Отсюда локальный баланс вместо глобального.
+    #
+    # ПОЧЕМУ ОБА КАНАЛА, А НЕ ЗАМЕНА. Сплошная закрашенная примета внутри себя
+    # высоких частот НЕ ИМЕЕТ — только на краю. Высокочастотный канал ловит
+    # контур и тонкие линии, массовый — заливку. Разные приметы, и выкинуть
+    # любой из двух значит ослепнуть на половину случаев.
+    texture = _texture_energy(arr, (x0, y0, x1, y1), base,
+                              inner_mask if origin == "limb" else None,
+                              points, bone, half_width)
     return {
         "luma_contrast": round(float(np.mean(d_lum)), 4),
         "sat_contrast": round(float(np.mean(d_sat)), 4),
         "score": round(float(np.mean(dev)), 4),
         "peak": round(float(np.quantile(dev, 0.95)), 4),
+        "texture": round(texture, 4),
         "coverage": round(float(np.mean(dev > NOISE_FLOOR)), 4),
         # Сколько пикселей реально СУДИЛОСЬ, а не сколько попало в окно: при
         # опоре по конечности это разные числа, и полезно именно первое.
