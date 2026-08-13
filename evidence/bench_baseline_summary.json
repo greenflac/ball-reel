@@ -1,0 +1,21 @@
+{
+  "sessions": 15,
+  "sessions_passed": 0,
+  "sessions_ci": [
+    0.0,
+    0.204
+  ],
+  "attempts": 30,
+  "attempts_passed": 0,
+  "attempts_ci": [
+    0.0,
+    0.114
+  ],
+  "first_failing_check": {
+    "error": 30
+  },
+  "pollen_spent": 2.4,
+  "pollen_per_accepted_clip": null,
+  "seconds_median": 17.5,
+  "crashes": 0
+}
