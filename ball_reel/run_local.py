@@ -606,6 +606,12 @@ def build_parser():
     ad.add_argument("--controlnet-scale", type=float, default=None,
                     help="сила канала позы; подсказка гейта — «до 1.2»")
     ad.add_argument("--steps", type=int, default=None)
+    ad.add_argument("--base", default=None,
+                    help="базовый чекпоинт SD1.5. Умолчание — оригинал 2022 "
+                         "года; фотореалистичные дообучения ТОЙ ЖЕ "
+                         "архитектуры (например emilianJR/epiCRealism) "
+                         "подставляются одной строкой и заметно лучше по коже "
+                         "и свету. Проверять замером, а не верить на слово")
     lora = ad.add_mutually_exclusive_group()
     lora.add_argument("--motion-lora", default="",
                       help="движение КАМЕРЫ отдельно от движения субъекта: "
@@ -752,8 +758,25 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
     with clock.stage("face_embeds", per=PER_RUN):
         embeds = face_embeds(args.face, dtype=cfg.dtype)
 
+    # БАЗУ МОЖНО ПОДМЕНИТЬ, И ЭТО САМЫЙ ДЕШЁВЫЙ РЫЧАГ КАЧЕСТВА.
+    #
+    # Дообучения SD1.5 имеют ТУ ЖЕ архитектуру — размер весов совпадает байт в
+    # байт (3438 МБ), поэтому ControlNet, FaceID со своей LoRA и модуль
+    # движения продолжают работать без единой правки. Слабое место базовой
+    # модели 2022 года — ровно кожа и свет, то есть то, что здесь и нужно.
+    #
+    # Оговорка, которую нельзя терять: модуль движения обучался на БАЗОВОЙ
+    # SD1.5. С фотореалистичными дообучениями он работает, с сильно
+    # стилизованными может конфликтовать. Поэтому подмена — параметр, а не
+    # новое умолчание: менять умолчание без замера значит ровно то, против чего
+    # написан весь измерительный слой.
+    base = args.base or animate.BASE_MODEL
+    if args.base:
+        _say("база", None, f"подменена на {args.base} (умолчание "
+                           f"{animate.BASE_MODEL}); сравнивать с ним замером")
     with clock.stage("build", per=PER_RUN):
-        pipe = animate.build(cfg, motion_lora=motion_lora or None, verbose=False)
+        pipe = animate.build(cfg, motion_lora=motion_lora or None,
+                             base=base, verbose=False)
     active = animate.active_loras(pipe)
     ok, note = lora_verdict(active, motion_lora=motion_lora or None)
     _say("LoRA", ok, note)
