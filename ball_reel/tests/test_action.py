@@ -222,3 +222,78 @@ class WhatThisAxisCannotSee(unittest.TestCase):
 
         src = inspect.getsource(self.a)
         self.assertIn("НЕПРОВЕРЕНО", src)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy not installed (live extra)")
+class TheDrivingMapIsResolvedNotGuessed(unittest.TestCase):
+    """Корень путей ИЩЕТСЯ, а не выводится из глубины манифеста.
+
+    Дефект был тихим ровно там, где дороже всего. Резолвер брал «два уровня
+    вверх от манифеста»: для `kit/conditions/manifest.json` это корень
+    репозитория и всё работало, а для `demo/kit/conditions/manifest.json` —
+    каталог `demo`, и все 16 путей переставали находиться. Ось действия при
+    этом НЕ ПАДАЕТ: она честно отвечает «не смогли измерить». То есть на
+    демо-ките — том самом, что лежит в git ради воспроизводимости, —
+    единственная проверка «то ли движение совершено» замолчала бы, и выглядело
+    бы это штатным третьим исходом.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from ball_reel import action
+
+        self.a = action
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = __import__("pathlib").Path(self.tmp.name)
+
+    def _kit(self, depth: int):
+        """Кит на заданной глубине, с путями от корня, как их пишет skeleton."""
+        import json
+
+        root = self.dir
+        rel = "/".join(["lvl"] * depth) if depth else ""
+        kit = root / rel if rel else root
+        (kit / "conditions").mkdir(parents=True, exist_ok=True)
+        (kit / "driving").mkdir(parents=True, exist_ok=True)
+        table = {}
+        for i in range(3):
+            (kit / "driving" / f"{i:04d}.jpg").write_bytes(b"x")
+            (kit / "conditions" / f"{i:04d}.png").write_bytes(b"x")
+            table[f"{i:04d}"] = f"{rel + '/' if rel else ''}driving/{i:04d}.jpg"
+        mp = kit / "conditions" / "manifest.json"
+        mp.write_text(json.dumps({"driving_frames": table}))
+        return mp, root
+
+    def test_the_map_resolves_at_every_depth_not_just_the_lucky_one(self):
+        import os
+
+        for depth in (0, 1, 2):
+            with self.subTest(depth=depth):
+                mp, root = self._kit(depth)
+                cwd = os.getcwd()
+                os.chdir(root)
+                self.addCleanup(os.chdir, cwd)
+                got = self.a.driving_frames_for(mp)
+                self.assertEqual(len(got), 3)
+                for p in got:
+                    self.assertTrue(os.path.exists(p), p)
+                os.chdir(cwd)
+
+    def test_an_explicit_root_still_wins(self):
+        mp, root = self._kit(0)
+        got = self.a.driving_frames_for(mp, root=root)
+        self.assertTrue(all(str(root) in p for p in got))
+
+    def test_frames_that_exist_nowhere_are_refused_loudly(self):
+        # Молчаливое «не смогли измерить» тут недопустимо: разница между
+        # «кадры не распакованы» и «движение неизмеримо» — это разные починки.
+        import json
+
+        mp = self.dir / "manifest.json"
+        mp.write_text(json.dumps(
+            {"driving_frames": {"0000": "нет-такого/0000.jpg"}}))
+        with self.assertRaises(FileNotFoundError) as e:
+            self.a.driving_frames_for(mp)
+        self.assertIn("не находятся", str(e.exception))

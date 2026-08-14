@@ -336,10 +336,8 @@ def driving_frames_for(manifest, conditions=None, *, root=None) -> list:
     if isinstance(manifest, (str, Path)):
         mpath = Path(manifest)
         data = json.loads(mpath.read_text())
-        base = Path(root) if root else mpath.parent.parent.parent
     else:
-        data = manifest
-        base = Path(root) if root else Path(".")
+        mpath, data = None, manifest
     table = data.get("driving_frames")
     if not table:
         raise ValueError(
@@ -354,8 +352,47 @@ def driving_frames_for(manifest, conditions=None, *, root=None) -> list:
             f"в карте driving_frames нет условий {missing[:5]}"
             f"{'...' if len(missing) > 5 else ''} — манифест не от этого "
             f"набора условий.")
-    return [str(base / table[k]) if not Path(table[k]).is_absolute()
-            else table[k] for k in keys]
+    rel = [table[k] for k in keys]
+    if root is not None:
+        return [str(Path(root) / r) if not Path(r).is_absolute() else r
+                for r in rel]
+    base = _root_where_they_exist(rel, mpath)
+    if base is None:
+        raise FileNotFoundError(
+            f"driving-кадры из манифеста не находятся ни от одного разумного "
+            f"корня. В манифесте записано {rel[0]!r}; пробовали каталог "
+            f"манифеста и три уровня выше, плюс текущий. Либо кадры не "
+            f"распакованы, либо манифест переехал без них. Задать корень явно: "
+            f"driving_frames_for(..., root=...)")
+    return [str(base / r) if not Path(r).is_absolute() else r for r in rel]
+
+
+def _root_where_they_exist(rel: list, mpath):
+    """Корень ИЩЕТСЯ, а не выводится из глубины манифеста.
+
+    ПОЧЕМУ НЕ «ДВА УРОВНЯ ВВЕРХ». Так и было, и это молча ломалось на первом же
+    ките, лежащем не на той глубине: `kit/conditions/manifest.json` даёт корень
+    репозитория и работает, а `demo/kit/conditions/manifest.json` — каталог
+    `demo`, и все 16 путей перестают находиться. Ось действия при этом не
+    падает, а честно отвечает «не смогли измерить» — то есть на демо-ките
+    единственная проверка того, ТО ЛИ движение совершено, замолчала бы, и
+    выглядело бы это как штатный третий исход.
+
+    Глубина каталога — не факт, а догадка о раскладке. Факт — существуют ли
+    файлы, и спросить об этом дешевле, чем угадать.
+    """
+    first = rel[0] if rel else None
+    if first is None:
+        return Path(".")
+    tries = [Path(".")]
+    if mpath is not None:
+        here = mpath.parent
+        tries = [here, here.parent, here.parent.parent,
+                 here.parent.parent.parent, Path(".")]
+    for base in tries:
+        if (base / first).exists():
+            return base
+    return None
 
 
 def render(res: dict) -> str:
