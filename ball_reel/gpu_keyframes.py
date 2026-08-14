@@ -295,6 +295,17 @@ def face_embeds(face_photo: str, dtype: str = "", device: str = ""):
     return both.unsqueeze(1).to(dtype=getattr(torch, dtype), device=device)
 
 
+def _loaded_adapters(pipe) -> list:
+    """Какие адаптеры РЕАЛЬНО в модели. Спрашиваем её, а не свои аргументы.
+
+    То же правило, по которому гейт не спрашивает генератор, получилось ли у
+    него: список имён, собранный из собственных вызовов, разойдётся с
+    действительностью при первой же правке загрузчика в апстриме.
+    """
+    cfgs = getattr(getattr(pipe, "unet", None), "peft_config", None)
+    return list(cfgs) if cfgs else []
+
+
 def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
     """Собрать пайплайн один раз.
 
@@ -345,14 +356,22 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
         pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder=None,
                              weight_name=cfg.ip_adapter,
                              image_encoder_folder=None)
-        # adapter_name обязателен, как только LoRA становится больше одной.
-        # Без имён второй вызов load_lora_weights ЗАМЕНЯЕТ первый, а не
-        # добавляется к нему: лицо тихо теряет свою половину обусловливания,
-        # и выглядит это как «LoRA реализма испортила идентичность», хотя
-        # испортила её потеря FaceID-LoRA.
-        pipe.load_lora_weights(IP_ADAPTER_REPO, weight_name=IP_ADAPTER_LORA,
-                               adapter_name="faceid")
-        names, weights = ["faceid"], [cfg.faceid_lora_scale]
+        # FaceID-LoRA ЗДЕСЬ НЕ ГРУЗИТСЯ РУКАМИ: `load_ip_adapter` выше уже
+        # загрузил её сам, под именем `faceid_0`. Так устроена ветка FaceID в
+        # diffusers, и в докстринге `animate` это записано верно — а здесь был
+        # ещё один вызов, с рассуждением «без имён второй вызов заменит
+        # первый». Рассуждение верное, применённое не к тому: заменять было
+        # нечего.
+        #
+        # ЦЕНА ДУБЛЯ ИЗМЕРЕНА: в UNet оказывались ДВА адаптера с одной и той же
+        # LoRA — ['faceid_0', 'faceid'], — и вместе с проекцией эмбеддинга они
+        # давили в одну точку втроём. Лицо и кожа расползались радужными
+        # потёками; выглядело как «модель слабая», а было переобусловливание
+        # нашей же сборкой. diffusers об этом предупреждал: «Already found a
+        # `peft_config` attribute in the model. This will lead to having
+        # multiple adapters».
+        names = [n for n in _loaded_adapters(pipe) if n.startswith("faceid")]
+        weights = [cfg.faceid_lora_scale] * len(names)
         if cfg.realism_lora:
             kw = ({"weight_name": cfg.realism_lora_weight}
                   if cfg.realism_lora_weight else {})
