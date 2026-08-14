@@ -317,5 +317,176 @@ class TorchHasThreeStatesNotTwo(unittest.TestCase):
         self.assertEqual((name, reason), ("", ""))
 
 
+#: Шапка nvidia-smi, записанная дословно (пробелы и рамка как есть). Карты в
+#: этой среде нет, поэтому разбор проверяется на записанном выводе — иначе он
+#: был бы неисполним нигде, кроме машины с картой, и мы бы узнали о дефекте
+#: разбора в ту единственную минуту, когда карта есть.
+SMI_HEADER = """\
+Thu Aug 14 05:00:00 2026
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 550.54.14    Driver Version: 550.54.14    CUDA Version: 12.4      |
+|-------------------------------+----------------------+----------------------+
+"""
+
+SMI_CSV = "NVIDIA GeForce RTX 3050 Laptop GPU, 6144, 550.54.14\n"
+
+
+def _fake_smi(csv_out=SMI_CSV, head_out=SMI_HEADER, why=""):
+    """Заглушка запуска nvidia-smi: csv для карт, пустой список для шапки."""
+
+    def run(args, timeout=None):
+        if why:
+            return "", why
+        return (csv_out if args else head_out), ""
+
+    return run
+
+
+class TheDriverIsAskedBeforeTorchIs(unittest.TestCase):
+    """nvidia-smi отвечает за десятые доли секунды и знает почти всё нужное."""
+
+    def setUp(self):
+        from ball_reel import device
+
+        self.d = device
+
+    def test_the_cuda_version_is_read_from_the_header(self):
+        # Именно эта версия — та, которую поддерживает ДРАЙВЕР. Спутать её с
+        # версией сборки torch значит перепутать и лечение.
+        self.assertEqual(self.d.smi_cuda(SMI_HEADER), "12.4")
+
+    def test_a_header_without_cuda_gives_nothing_rather_than_a_guess(self):
+        self.assertIsNone(self.d.smi_cuda("| NVIDIA-SMI 550.54.14 |"))
+        self.assertIsNone(self.d.smi_cuda(""))
+
+    def test_mib_from_the_csv_becomes_gigabytes(self):
+        # 6144 MiB — это 6.0 ГиБ, а не 6.1 ГБ: перепутанные единицы дают
+        # ложный отказ по памяти на карте, которая подходит.
+        card = self.d.smi_cards(SMI_CSV)[0]
+        self.assertEqual(card["vram_gb"], 6.0)
+        self.assertEqual(card["name"], "NVIDIA GeForce RTX 3050 Laptop GPU")
+        self.assertEqual(card["driver"], "550.54.14")
+
+    def test_a_header_line_left_in_the_csv_is_not_taken_for_a_card(self):
+        got = self.d.smi_cards("name, memory.total, driver_version\n" + SMI_CSV)
+        self.assertEqual(len(got), 1)
+
+    def test_two_cards_are_both_read(self):
+        got = self.d.smi_cards(SMI_CSV + "NVIDIA A16, 16380, 550.54.14\n")
+        self.assertEqual([c["name"] for c in got],
+                         ["NVIDIA GeForce RTX 3050 Laptop GPU", "NVIDIA A16"])
+
+    def test_the_probe_puts_the_two_calls_together(self):
+        got = self.d.smi_probe(run=_fake_smi())
+        self.assertEqual(got["cuda"], "12.4")
+        self.assertEqual(got["cards"][0]["vram_gb"], 6.0)
+        self.assertEqual(got["reason"], "")
+
+    def test_a_missing_smi_reports_the_reason_rather_than_an_empty_result(self):
+        # «Карт нет» и «спросить не вышло» — разные вещи: первое отказ,
+        # второе непроверенность. Без причины их не различить.
+        got = self.d.smi_probe(run=_fake_smi(why="nvidia-smi не найден в PATH"))
+        self.assertEqual(got["cards"], [])
+        self.assertIn("не найден", got["reason"])
+
+    def test_cards_without_a_cuda_line_are_still_cards(self):
+        got = self.d.smi_probe(run=_fake_smi(head_out="повреждённая шапка"))
+        self.assertTrue(got["cards"])
+        self.assertIsNone(got["cuda"])
+        self.assertIn("CUDA Version", got["reason"])
+
+
+class TheDriverMustCoverTheBuild(unittest.TestCase):
+    """Правило, а не абзац: драйвер старше сборки — всё падает непонятно."""
+
+    def setUp(self):
+        from ball_reel import device
+
+        self.d = device
+
+    def test_versions_parse_into_comparable_pairs(self):
+        self.assertEqual(self.d.version_pair("12.4"), (12, 4))
+        self.assertEqual(self.d.version_pair("13"), (13, 0))
+        self.assertEqual(self.d.version_pair("6144"), (6144, 0))
+
+    def test_an_unparseable_version_is_none_not_zero(self):
+        # Ноль сравнивается, и любая нераспознанная строка молча означала бы
+        # «драйвер древний» — ложный отказ на ровном месте.
+        for junk in ("", None, "N/A", "не число"):
+            self.assertIsNone(self.d.version_pair(junk), junk)
+
+    def test_an_older_major_does_not_cover_the_build(self):
+        self.assertEqual(self.d.driver_covers("12.4", "13.0"),
+                         self.d.DRIVER_OLD_MAJOR)
+
+    def test_a_newer_driver_covers_an_older_build(self):
+        self.assertEqual(self.d.driver_covers("13.0", "12.6"), self.d.DRIVER_OK)
+        self.assertEqual(self.d.driver_covers("12.6", "12.6"), self.d.DRIVER_OK)
+        self.assertEqual(self.d.driver_covers("12.8", "12.6"), self.d.DRIVER_OK)
+
+    def test_an_older_minor_is_its_own_outcome(self):
+        # Минорная совместимость CUDA 11+ обычно это покрывает, но проверить
+        # без карты нечем: третий исход честнее выдуманного вердикта.
+        self.assertEqual(self.d.driver_covers("12.4", "12.6"),
+                         self.d.DRIVER_OLD_MINOR)
+
+    def test_a_missing_side_is_unknown_not_ok(self):
+        for a, b in ((None, "12.6"), ("12.4", None), (None, None), ("", "")):
+            self.assertEqual(self.d.driver_covers(a, b), self.d.DRIVER_UNKNOWN,
+                             (a, b))
+
+
+class TheCpuBuildIsRecognisedByWhatItWasBuiltWith(unittest.TestCase):
+    """Суффикс `+cpu` не признак: колесо с PyPI его не несёт вовсе."""
+
+    def setUp(self):
+        from ball_reel import device
+
+        self.d = device
+        _install_module(self, "onnxruntime",
+                        _fake_onnxruntime(["CUDAExecutionProvider",
+                                           "CPUExecutionProvider"]))
+
+    def _torch(self, cuda_value, version="2.13.0"):
+        torch = types.ModuleType("torch")
+        torch.__version__ = version
+        torch.version = types.SimpleNamespace(cuda=cuda_value)
+        torch.cuda = types.SimpleNamespace(
+            get_device_name=lambda _i: "RTX 3050")
+        return torch
+
+    def test_a_build_with_cuda_reports_its_version(self):
+        _install_module(self, "torch", self._torch("13.0"))
+        self.assertEqual(self.d.torch_build_cuda(), "13.0")
+        self.assertIn("собран с CUDA 13.0", self.d.describe("cuda"))
+
+    def test_a_clean_version_string_with_no_cuda_is_still_a_cpu_build(self):
+        # Ровно тот случай, ради которого проверка по строке была заменена:
+        # версия чистая, а CUDA в сборке нет.
+        _install_module(self, "torch", self._torch(None))
+        self.assertIsNone(self.d.torch_build_cuda())
+        self.assertIn("СОБРАН БЕЗ CUDA", self.d.describe("cuda"))
+
+    def test_an_absent_torch_is_not_reported_as_a_cpu_build(self):
+        # «Пакета нет» лечится установкой, «сборка без CUDA» — переустановкой
+        # с другого индекса. Пустая строка отличима от None намеренно.
+        _install_module(self, "torch", None)
+        self.assertEqual(self.d.torch_build_cuda(), "")
+
+    def test_a_broken_torch_does_not_raise_from_a_diagnostic(self):
+        class Exploding(types.ModuleType):
+            def __getattr__(self, item):
+                raise OSError("libcudart.so.12: cannot open shared object")
+
+        _install_module(self, "torch", Exploding("torch"))
+        self.assertEqual(self.d.torch_build_cuda(), "")
+
+    def test_an_intel_card_is_not_told_anything_about_cuda(self):
+        # У xpu-сборки torch.version.cuda пуст штатно; писать про CUDA
+        # владельцу Arc — уводить его чинить не то.
+        _install_module(self, "torch", self._torch(None, version="2.5.1+xpu"))
+        self.assertNotIn("CUDA", self.d.describe("xpu"))
+
+
 if __name__ == "__main__":
     unittest.main()

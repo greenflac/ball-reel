@@ -651,3 +651,76 @@ class TheABTableIsReadableOnItsOwn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheEXITCODEFollowsTheGate(unittest.TestCase):
+    """Прогон возвращал 0 при любом исходе — автоматически проверить «сошлось
+    ли» было нельзя. Завтра по этому коду решается, показывать клип или нет.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+
+    def test_a_failed_axis_makes_the_run_fail(self):
+        code, why = self.r.run_verdict(
+            [{"label": "лицо", "ok": True}, {"label": "поза", "ok": False}])
+        self.assertEqual(code, 1)
+        self.assertIn("поза", why)
+
+    def test_nothing_measured_is_NOT_success(self):
+        # Клип из 16 одинаковых кадров даёт ровно такую картину: ни одного
+        # провала, ни одного измерения. Ноль объявил бы его годным.
+        code, why = self.r.run_verdict(
+            [{"label": "лицо", "ok": None}, {"label": "движение", "ok": None}])
+        self.assertEqual(code, 1)
+        self.assertIn("НИ ОДНА", why)
+
+    def test_a_skip_beside_a_pass_is_not_a_failure(self):
+        # Обратная сторона: клип, где часть осей измерить не вышло, а
+        # измеренные сошлись, — годный клип с оговоркой. Заваливать его значит
+        # требовать полноты измерения там, где её физически нет.
+        code, why = self.r.run_verdict(
+            [{"label": "лицо", "ok": True}, {"label": "приметы", "ok": None}])
+        self.assertEqual(code, 0)
+        self.assertIn("не измерено", why)
+
+    def test_an_empty_gate_is_a_failure_not_a_pass(self):
+        code, _ = self.r.run_verdict([])
+        self.assertEqual(code, 1)
+
+
+class OneFrameIsJudgedByONEBar(unittest.TestCase):
+    """Один кадр не может судиться двумя порогами в одном отчёте.
+
+    `measure` обслуживает и дым (резкий одиночный стилл), и покадровый обход
+    клипа, а порог стоял один на оба — 70, то есть пол СТАРТ-КАДРА. В полосе
+    70-99 px строка «лицо по кадрам» печатала число, а клиповый вердикт по бару
+    100 говорил «судить нечем». Два утверждения об одних и тех же пикселях.
+    """
+
+    def test_the_two_bars_are_different_and_ordered(self):
+        from ball_reel.identity_arcface import MIN_FACE_PX, START_MIN_FACE_PX
+
+        # Резкий стилл судится мягче кадра видео: к мелкому лицу на видео
+        # добавляется смаз, и дистанции в полосе 70-99 раздуты.
+        self.assertLess(START_MIN_FACE_PX, MIN_FACE_PX)
+
+    def test_measure_requires_the_caller_to_say_what_it_measures(self):
+        # Порог больше не умолчание в теле функции: вызывающий обязан
+        # объявить, стилл это или кадр видео. Забыть нельзя — аргумент
+        # обязательный и только по имени.
+        import inspect
+
+        from ball_reel import run_local
+
+        # Исходник МОДУЛЯ, а не `main`: прогон разложен на `_run_animatediff` и
+        # `_run_chain`, и смотреть только в `main` значит проверять не там.
+        src = inspect.getsource(run_local)
+        self.assertIn("still=True", src, "дым обязан судиться баром стилла")
+        self.assertIn("still=False", src, "кадры клипа — баром видео")
+        sig = inspect.signature(
+            [f for n, f in inspect.getmembers(run_local, inspect.isfunction)
+             if n == "run_verdict"][0])
+        self.assertIn("rows", sig.parameters)

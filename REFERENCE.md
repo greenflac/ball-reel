@@ -305,8 +305,24 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 **`skeleton.py`**
 - `pose_points(path) -> dict | None` — COCO-18 + синтезированные `neck`, `hip_c` + служебный `__size__` (исходный размер кадра, чтобы не растянуть фигуру при рисовании).
 - `retarget(points, proportions, *, min_visibility=0.5) -> dict` — направления от донора, длины от клиента, обход от бёдер наружу.
-- `draw(points, out_path, *, width=512, height=768, min_visibility=0.5, line_width=4) -> str` — OpenPose-скелет на чёрном фоне цветами конвенции.
-- `render_sequence(frames, out_dir, *, proportions=None, width=512, height=768, from_mediapipe=True) -> {conditions, missing_frames, coverage, size, retargeted, source, warnings}`.
+- `draw(points, out_path, *, width=512, height=768, min_visibility=0.5, line_width=4, framing="full_body") -> str` — OpenPose-скелет на чёрном фоне цветами конвенции.
+- `face_share(points, *, width=512, height=768, framing="full_body") -> float | None` — какую долю высоты кадра займёт лицо при такой кадрировке. `None` — третий исход: не видно шеи или таза, отсчитывать размер лица не от чего.
+- `render_sequence(frames, out_dir, *, proportions=None, width=512, height=768, source=None, framing="full_body") -> dict`. Манифест: `conditions`, `missing_frames`, `coverage`, `joint_coverage`, `partial_frames`, `size`, `retargeted`, `source`, `framing`, `face_share`, `face_px`, `face_share_by_framing`, `face_unmeasured_frames`, `identity_judgeable`, `driving_frames`, `warnings`. Кладётся файлом `manifest.json` РЯДОМ С УСЛОВИЯМИ, а не только возвращается: условия рендерятся дома, а используются на другой машине через часы.
+
+  ~~Параметр `from_mediapipe=True`.~~ **УБРАН.** Он подписывал манифест
+  независимо от того, кто реально отработал, — то есть подпись могла соврать о
+  происхождении условий. Теперь источник выводится из фактического исполнения:
+  `_extractor(source)` берёт DWPose, если веса на месте, иначе MediaPipe, и
+  возвращает своё имя вместе с функцией; в `source` попадает оно. Тот же дефект
+  и то же лечение позже нашлись в `run_local.framing_from_manifest` (флаг
+  `--full-body` описывал НАМЕРЕНИЕ, а условия уже нарисованы): **имя обязано
+  выводиться из того, что действительно исполнилось; манифест — свидетельство,
+  флаг — намерение, при расхождении верим свидетельству.**
+
+  Константы кадрировки: `FRAMINGS = ("full_body", "waist_up")`,
+  `FULL_BODY_MARGIN 0.35` / `WAIST_UP_MARGIN 0.25`, `FACE_TO_TORSO 0.39`,
+  `CROWN_ABOVE_NOSE 0.224`, `FACE_SHARE_TOLERANCE 0.35` (насколько геометрия
+  может разойтись с живым замером, прежде чем манифест это назовёт).
 
 ### 3.2 Решение (что можно обещать и куда идти)
 
@@ -320,7 +336,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 - `_pollen(model, seconds)` — прайс: `wan-fast 0.01`, `seedance-pro 0.025`, `veo 0.08`, `wan/wan-pro 0.1`, `grok-imagine-video-1.5 0.14`, `seedance-2.0 0.18` за секунду видео.
 
 **`subject.py`**
-- `Subject(gender, age, build, hair, skin, outfit, footwear, posture, extra, body_ref, pose_ref)` — пустое поле значит «не задано» и в промт не попадает.
+- `Subject(gender, age, build, hair, skin, outfit, footwear, posture, extra, body_ref, garment_ref, pose_ref)` — пустое поле значит «не задано» и в промт не попадает. Поле `garment_ref` добавлено после первой редакции памятки; на GPU-ветке соответствующий флаг `run_local --garment-ref` **отказывает** (единственный адаптер занят лицом).
 - `.to_prompt() -> str` — фиксированный порядок, чтобы два прогона отличались только там, где отличается субъект.
 - `.specified -> tuple[str,...]`, `.reference_roles -> ((path|"__face__", role), ...)` (лицо всегда первое), `.reference_clause() -> str` («Use the FIRST image for…»), `.start_model(default="kontext") -> str`.
 - `Subject.from_photo(face_photo, **overrides)` — заполняет только пол и возрастную полосу локальным оценщиком; `overrides` побеждают.
@@ -387,16 +403,118 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 **`critic.py`**
 - `score(root, strategy_id, strategy_label, video_frames, reference_frame, bar=DEFAULT_BAR, *, drift_fn=None, max_drift=None, opinion_override=None) -> Scored{strategy_id, strategy_label, worst_drift, motion, opinion, opinion_synthetic, frames, accepted, reason}` — порядок причин: идентичность → движение → мнение.
 **`produce.py`** (сам вердикт вынесен из цикла генерации отдельно)
-- `verdict(*, drift, motion, quality, seam, limbs, wander, bar, min_motion, loop) -> (passed, score, reason)` — чистая функция, тестируемая без единого платного вызова. Сначала «нечего было судить» (`median is None` или `coverage < MIN_COVERAGE`) → `(False, 1.0, "not verifiable")`, затем по порядку: медиана дрифта, p90, движение, плавность, анатомия, уход позы, луп. Возвращается ПЕРВАЯ несработавшая проверка.
+- `_verdict(*, drift, motion, quality, seam, limbs, wander, bar, min_motion, loop, garment=None) -> (passed, score, reason, check)` — чистая функция, тестируемая без единого платного вызова. Сначала «нечего было судить» (`median is None` или `coverage < MIN_COVERAGE`) → `(False, 1.0, "not verifiable", "not_verifiable")`, затем по порядку: `identity_median`, `identity_p90`, `motion_amount`, `motion_physical`, `anatomy`, `pose_wander`, **`garment`**, `loop`. Возвращается ПЕРВАЯ несработавшая проверка.
+- `verdict(**kw) -> (passed, score, reason)` — тонкая обёртка: тройка для тех, кто её распаковывает.
+- `verdict_detail(**kw) -> {passed, score, reason, check}` — то же плюс ИМЯ проверки. Нужно стенду: гистограмма «что ломается первым» строится по именам, а не по тексту сообщения, — текст меняется при первой же правке формулировки, и статистика по нему разъезжается молча.
+- `CHECK_ORDER = ("start_not_verifiable", "start_identity", "start_pose", "not_verifiable", "identity_median", "identity_p90", "motion_amount", "motion_physical", "anatomy", "pose_wander", "garment", "loop")`; `PRE_VIDEO_CHECKS` — первые три, те, что отсекают ДО видео-вызова.
+
+  Раньше здесь была тройка без `garment` и без `check`. Одежда — восьмая
+  проверка, и она появилась потому, что ни один прежний гейт её не видел:
+  идентичность про лицо, поза про скелет, анатомия про длины костей.
 
 - `rank(scored) -> list[Scored]` — принятые вперёд, затем меньший дрифт, больше движения, выше мнение.
 - `_opinion(root, strategy_id)` — читает `fixtures/judge/<sid>.json`, по умолчанию `synthetic=True`.
+
+### 3.5 Слои, добавленные после первой редакции памятки
+
+Сигнатуры сняты с кода 2026-08-14 (`ast`, а не глазами).
+
+**`dwpose.py`** — источник условий по умолчанию
+- `pose_points(path) -> dict | None` — тот же формат, что у `skeleton.pose_points`, поэтому подменяется без правки вызывающих.
+- `available() -> bool`, `why_unavailable() -> str` — второе возвращает готовую команду установки. Отсутствие весов не должно быть тихим откатом: MediaPipe здесь ещё и судья.
+- `decode_yolox`, `expand_box`, `to_normalised`, `usable` — разбор сырой сетки `[1, 8400, 85]`.
+
+**`device.py`** — на чём мы считаем
+- `detect() -> str` — `cuda` | `xpu` | `mps` | `cpu`. Проверяется И наличие атрибута, И доступность: `torch.xpu` существует в сборках без карты.
+- `onnx_providers(device, available=None) -> tuple`, `insightface_ctx`, `dtype_for`, `empty_cache`.
+- `torch_state(device=None) -> tuple` — различает `absent` / `silent` / `ok`, то есть «torch не стоит» ≠ «torch собран без CUDA» ≠ «всё хорошо». Это разные починки.
+- `smi_cuda`, `smi_cards`, `smi_probe`, `driver_covers`, `torch_build_cuda`, `describe`.
+
+**`animate.py`** — целевой локальный генератор
+- `plan(vram_gb, *, waist_up=True, frames=CONTEXT_FRAMES) -> Plan` — инспектируется без карты. Умолчание `waist_up=True`, потому что полный рост роняет долю лица с 0.19 до 0.094 и гейт слепнет.
+- `preflight(vram_gb=None) -> dict` — `{checks[], notes[], ok}`; различает «карты нет» и «torch без CUDA вовсе».
+- `build(cfg, *, motion_lora=None, base=BASE_MODEL, verbose=True)`; `animate(pipe, cfg, *, face_embeds, conditions, prompt, negative="", steps=20, guidance=7.5, controlnet_scale=1.0, ip_adapter_scale=0.7, seed=0)`.
+- `active_loras(pipe) -> list` — что РЕАЛЬНО прицеплено, читается у модели, а не у своих аргументов.
+- `peak_memory()`, `reset_memory_stats()`, `prepare_allocator()`.
+
+**`run_local.py`** — вердикты, вынесенные из CLI
+- `smoke_verdict(ident, delta, *, driving=None) -> {face_ok, pose_ok, face_note, pose_note}` — пороги берутся ИЗ МОДУЛЕЙ (`SAME_PERSON_MAX`, `SAME_POSE_MAX`, `WORST_JOINT_MAX`), а не литералами. Раньше стояли числа 0.35 и 0.25 прямо в теле `main`, и второе не совпадало ни с чем: локальный путь пропускал расхождение позы, которое шлюзовой забраковал бы.
+- `clip_verdict(drift, seam, quality, limbs, garment) -> list` — пять строк: идентичность, луп, движение, анатомия, одежда. Исход ТРЁХЗНАЧНЫЙ (`ok is None` = «нечем судить»), и берётся из собственного сигнала каждого измерителя, а не из нового порога.
+- `wardrobe_rows(frames, points, driving_paths, clock=None) -> list` — одежда, прилегание, мимика. Последние две **не останавливают прогон**.
+- `clip_gate(frames, face, points, clock=None, *, garment=True) -> list`.
+- `framing_from_manifest(manifest, *, full_body) -> tuple` — манифест свидетельство, флаг намерение; при расхождении верим свидетельству. Нет манифеста — третий исход, а не «значит полный рост».
+- `identity_forecast(manifest, height, *, waist_up, plan_px=None) -> dict` — увидит ли гейт лицо на ЭТОМ разрешении, сказать ДО генерации. Доля берётся измеренной по самим условиям, а не из таблицы, и умножается на высоту ПЛАНА, а не условий.
+- `lora_verdict(active, *, motion_lora=None, face_prefix="faceid") -> tuple`.
+- `choose_conditions`, `resolve_driving`, `save_frames`, `frames_to_mp4`, `ab_report`, `build_parser`.
+
+**`garment.py` / `garment_fit.py`** — два независимых отказа одежды
+- `garment_drift(frames, points_by_frame, *, max_drift=GARMENT_DRIFT_MAX) -> dict` — СМЕНА одежды по цвету (хроматичность).
+- `wardrobe_clause(subject) -> str`.
+- `garment_fit(frames, points_by_frame, *, bones=WORN_BONES, stride=1, max_slip=SLIP_MAX, min_pairs=MIN_PAIRS) -> dict` — СКОЛЬЖЕНИЕ той же ткани по телу. `fits` трёхзначен: `None`, когда пар меньше `MIN_PAIRS`.
+- `unwrap(image, points, bone, …)`, `surface_slip(before, after, …)`, `surface_to_pixel(...)` — обратна `marks.limb_uv`, и тест гоняет её туда-обратно через настоящую `limb_uv`.
+
+**`marks.py`** — приметы: измеритель и канал переноса
+- `Mark`, `attach_size`, `locate(points, mark, *, min_visibility=0.5)`.
+- `distinctiveness(image, box, *, points=None, bone=None, half_width=None) -> dict | None` — два канала: массовый `score` и частотный `texture`.
+- `mark_transferred(reference, produced, *, ratio=PRESENT_RATIO, min_reference=MIN_REFERENCE_CONTRAST) -> dict`.
+- `transfer(source_image, source_points, target_image, target_points, mark, *, feather=FEATHER, skin_mask=None, source_skin_mask=None, min_skin_share=None)` и `transfer_cylindrical(...)`.
+- `limb_uv(points, bone, xs, ys, *, half_width=None)`, `half_width_for`, `measured_limb_width`, `marks_report(...)`.
+
+**`bodyparts.py`** — где кожа, где ткань
+- `available(path=None) -> bool`, `why_unavailable()`, `model_path`.
+- `category_mask`, `skin_mask(image, *, model=None)`, `shares(image, *, model=None) -> dict`.
+- `paintable(image, box, *, model=None, min_share=MIN_SKIN_SHARE, mask=None) -> dict`, `edge_coarseness`.
+
+**`expression.py`** — верность мимики
+- `clip_expression(driving_frames, generated_frames, *, face_model=None, min_face_px=MIN_JUDGE_FACE_PX, **kwargs) -> dict` — `verdict` может быть `None`: «нечем судить» (лица мелки, driving застыл).
+- `expression_match(driving, generated, *, match_max=MATCH_MAX, follow_max=FOLLOW_MAX, min_pairs=MIN_PAIRS, min_coverage=MIN_COVERAGE) -> dict`.
+- `read_clip`, `read_expression`, `judged_shapes`, `group_errors`, `frame_distance`.
+
+**`fluid.py`** — реализм вязкой жидкости
+- `fluid_stats(region) -> dict | None`, `hand_region(image_path, points, *, side="l")`, `realism_shift(before, after, reference=None) -> dict`.
+
+**`dataset.py`** — датасет для LoRA личности
+- `plan(target=20, *, price_per_image=0.035, overshoot=OVERSHOOT) -> dict`, `variations`, `prompt_for`, `caption_for(row, trigger)`, `augmentations`.
+- `select(samples, *, bar, min_kept=MIN_DATASET) -> dict`.
+- `independence_report(*, generator, selector, judge) -> dict` — формальная проверка того, что ArcFace не участвует в порождении датасета. Ради неё модуль и написан.
+- `manifest(samples, *, trigger, judge, selector, generator) -> dict`.
+
+**`timing.py`** — латентность
+- `Timings` (контекст-менеджер `stage(name, per=…)`), `profile(frames, *, stages=PROFILE_STAGES, repeats=30, clock=None)`.
+- `latency_verdict(summary, *, budget_ms=10.0, hopeless_factor=10.0, min_samples=20, borderline_band=0.2) -> dict`.
+- `first_paint_verdict(milestones, *, budget_ms=REALTIME_BUDGET_MS) -> dict`, `render`.
+
+**`bench.py`** — живой стенд
+- `estimate(sessions, attempts, seconds, start_model, video_model) -> float`, `attempt_cost`, `calls_made`, `session_cost`.
+- `wilson(successes, total, z=1.96) -> tuple`, `summarise(records) -> dict`, `yield_is_reportable(sessions, floor=12) -> tuple`, `render`.
+
+**`calibrate_marks.py`** — стенд для порогов примет
+- `Recipe`, `Sample`, `default_recipes`, `default_samples`, `design`, `ink_pair`, `measure_pair`.
+- `best_threshold`, `paired_ratios`, `size_hypothesis(rows, channel="texture") -> dict`, `separability(rows) -> dict`.
+- `calibrate(samples=None, recipes=None) -> dict`, `size_sweep`, `resolution_sweep`, `format_table`, `as_markdown`.
 
 ---
 
 ## 4. Все пороги и константы
 
 Колонка «откуда» переносит комментарий рядом с константой в коде.
+
+**Врезка: `SEAMLESS_MAX` и два разных замера одного и того же.**
+
+Пара «старт-кадр обоими ключевыми / только стартовый» записана в репозитории
+двумя разными парами чисел, и это не опечатка одного из документов:
+
+| где | пара | что это |
+|---|---|---|
+| `ball_reel/motion.py`, комментарий у самой константы; повторено в `REPORT.md` | **0.09 / 0.61** | замер, по которому порог 0.30 и ставился — «0.30 сидит между ними, ближе к хорошему» |
+| `POLLINATIONS_CONTRACT.md` §Loop; повторено в `GUIDE.md` | **0.03 / 0.54** | таблица живых прогонов по моделям, там же veo 0.17, wan-fast 0.38, wan 1.71, happyhorse 1.61 |
+
+Порог один и тот же — 0.30 — и **обе пары его подтверждают**: хороший луп сильно
+ниже, плохой сильно выше. Разные прогоны дают разные абсолютные числа, потому
+что метрика нормирована на собственный шаг клипа, а шаг у каждого прогона свой.
+Выбирать одно из двух и стирать второе было бы хуже, чем оставить оба: пропала
+бы информация о разбросе. Правильное чтение — «на seedance-2.0 замерено дважды,
+0.09 и 0.03 с обоими ключевыми против 0.61 и 0.54 с одним».
 
 | константа | модуль | значение | что означает | откалибровано / выбрано |
 |---|---|---|---|---|
@@ -416,7 +534,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 | `WORST_JOINT_MAX` | `pose` | 0.40 | худший одиночный сустав | измерено по клипам: veo 0.13 / wan 0.33 / wan-fast 0.41 / happyhorse 0.49. **Порядок надёжен, точка отсечки — на одном референсе и одном промте, перепроверять** |
 | `LIMB_WOBBLE_MAX` | `pose` | 0.25 | допустимая вариация длины конечности | часть вариации физична (ракурсное укорочение); на четырёх живых клипах максимум был 0.08–0.12 |
 | `DEFAULT_MODEL` / `MODEL_ENV` | `pose` | `~/.mediapipe/pose_landmarker_lite.task` / `BALL_REEL_POSE_MODEL` | где лежат веса позы (5.5 МБ) | — |
-| `SEAMLESS_MAX` | `motion` | 0.30 | стык лупа как доля типичного шага | измерено на seedance-2.0: старт-кадр обоими ключевыми → 0.09, только стартовый → 0.61. (В `POLLINATIONS_CONTRACT.md` та же пара записана как 0.03 / 0.54 — числа из разных прогонов, порог один) |
+| `SEAMLESS_MAX` | `motion` | 0.30 | стык лупа как доля типичного шага | **ДВА РАЗНЫХ ЧИСЛА В РЕПОЗИТОРИИ, оба живые — см. врезку ниже** |
 | `JUMP_MAX` | `motion` | 4.0 | шаг во столько раз больше медианного = телепорт/морфинг | выбрано |
 | `STILL_MIN` | `motion` | 0.15 | ниже — ничего не происходит (используется как `STILL_MIN/10` в `motion_quality`) | выбрано |
 | `END_FRAME_MODELS` | `chain` | `("wan-fast","veo","wan-pro","seedance-2.0")` | модели, реально принимающие второй кейфрейм | сверено живьём с `video_capabilities`: заявленное совпало с замерами (wan 1.71 и happyhorse 1.61 — `end_frame` НЕ заявляют) |
@@ -438,15 +556,30 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 | `CAPABILITIES` | `router` | identity, build, pose_trajectory, loop, audio, object_fidelity | словарь требований | — |
 | `API_CANNOT` | `router` | `("pose_trajectory","object_fidelity")` | чего публичный шлюз не даёт ни за какие деньги | измерено: поза референс-картинкой дала 0.59–0.65 при пороге 0.25; словарь возможностей видео целиком = start_frame/end_frame/audio_output |
 | прайс `_pollen` | `router` | см. §3.2 | pollen за секунду видео | из живого `GET /video/models` |
-| `BASE_MODEL`, `CONTROLNET_OPENPOSE`, `IP_ADAPTER_*` | `gpu_keyframes` | `runwayml/stable-diffusion-v1-5`, `lllyasviel/control_v11p_sd15_openpose`, `h94/IP-Adapter` + `ip-adapter-faceid_sd15.bin` | стек на 4 ГБ | SD1.5, а не SDXL: один UNet SDXL в fp16 ~5 ГБ и не влезает |
+| `BASE_MODEL`, `CONTROLNET_OPENPOSE`, `IP_ADAPTER_*` | `gpu_keyframes` | `runwayml/stable-diffusion-v1-5`, `lllyasviel/control_v11p_sd15_openpose`, **`h94/IP-Adapter-FaceID`** + `ip-adapter-faceid_sd15.bin` + `ip-adapter-faceid_sd15_lora.safetensors` | стек на 4 ГБ | SD1.5, а не SDXL: один UNet SDXL в fp16 ~5 ГБ и не влезает. **Репозиторий исправлен:** ~~`h94/IP-Adapter` + `subfolder="models"`~~ — файлов со словом `faceid` в том репозитории нет вообще, а в `-FaceID` они лежат в КОРНЕ. Проверено по HF API. Первый же вызов упал бы `EntryNotFoundError` — после скачивания ~7 ГБ. FaceID — это адаптер ПЛЮС LoRA; без неё лицо обусловлено наполовину |
+| `BASE_MODEL` | `animate` | `stable-diffusion-v1-5/stable-diffusion-v1-5` | база локального AnimateDiff | **РАСХОЖДЕНИЕ ВНУТРИ КОДА, зафиксировано без правки:** в `gpu_keyframes` база названа `runwayml/stable-diffusion-v1-5`, в `animate` — `stable-diffusion-v1-5/stable-diffusion-v1-5`. Два разных идентификатора HF в одном пакете. **НЕПРОВЕРЕНО**, указывают ли они на одни и те же веса и разрешается ли одно в другое: для ответа нужен доступ к `huggingface.co`, которого в этой среде нет. Если это разные записи кэша, на карте скачается два раза по ~1.7 ГБ. Проверить первым же запуском и записать сюда |
+| `MOTION_ADAPTER`, `MOTION_LORAS`, `CONTEXT_FRAMES` | `animate` | `guoyww/animatediff-motion-adapter-v1-5-3`; `zoom-in/zoom-out/pan-left/pan-right/tilt-up/tilt-down`; 16 | модуль движения и движение КАМЕРЫ (отдельное от движения субъекта) | окно 16 кадров — предел без скользящего окна |
+| `WEIGHTS_GB` | `animate` | unet 1.72, motion_adapter 0.84, controlnet 0.72, text_encoder 0.25, vae 0.17, ip_adapter 0.15 | из чего складывается память | РАСЧЁТ, карты в среде не было |
+| `FULL_BODY_FACE_SHARE` / `WAIST_UP_FACE_SHARE` | `gpu_keyframes`, `animate` | 0.094 / 0.19 | какую долю высоты кадра занимает лицо | **измерено live** на клипе 1080x1920: лицо 181 px = 9.4% высоты. Число геометрическое, не модельное. Отсюда `identity_verifiable(768)`: full_body ~72 px (гейт ослепнет при пороге 100), waist_up ~145 px (судимо) |
+| `CLIP_TOKEN_LIMIT` | `gpu_keyframes` | 77 | предел текстового энкодера SD1.5 | из архитектуры CLIP. Реальный промт пайплайна выходил на ~89 токенов, и хвостом стояла одежда — а одежду в этом стеке задаёт только текст |
+| `MIN_SCORE`, `BOX_PADDING`, `POSE_INPUT` | `dwpose` | 0.3, 1.25, (288, 384) | порог наблюдаемости точки, запас кропа, вход модели | `POSE_INPUT` — **тихое расхождение с тем, что было написано по памяти** (192x256): найдено замером. Там же: YOLOX отдаёт сырую сетку `[1, 8400, 85]`, а не готовые боксы, и нормализация по ImageNet mean/std обязательна — без неё ничего не падает, а среднее расхождение точек 0.457 против 0.014 с ней |
+| `GARMENT_DRIFT_MAX` / `CORE_FRACTION` | `garment` | 0.03 / 0.6 | дрейф цвета одежды между кадрами; какая доля области считается «сердцевиной» | измерено: эталонная съёмка с заведомо одной одеждой 0.024, съёмки разных дней 0.18. Первая версия меры считала сырой RGB и объявляла эталон плывущим (0.265 при баре 0.18) — виновата была яркость; перешли на хроматичность |
+| `SLIP_MAX`, `MIN_LIMB_PX`, `MIN_PAIRS` | `garment_fit` | 0.03, 80, 5 | скольжение ткани по телу, минимальная конечность, минимум пар | ткань, прикреплённая к телу, держится над ОДНОЙ точкой тела; сгенерированная — не обязана |
+| `MIN_MARK_PX`, `MIN_REFERENCE_CONTRAST`, `MIN_TEXTURE_CONTRAST`, `PRESENT_RATIO`, `SIGN_MIN`, `INK_CHROMA_KNEE`, `LIMB_HALF_WIDTH`, … | `marks` | 24, 0.08, 0.1, 0.5, 0.04, 0.25, 0.15 (плюс `LIMB_HALF_WIDTH_BY_BONE` по костям) | пороги метрики примет | помечены в коде как ВЫБРАННЫЕ и вынесены на калибровочный стенд `calibrate_marks`: четыре числа, снятых руками, — это не калибровка, а анекдот (первая версия частотного порога стояла по одной паре и на втором образце пропустила дракона) |
+| `MIN_SKIN_SHARE`, `NATIVE_SIDE` | `bodyparts` | 0.2, 256 | доля кожи в окне вклейки; собственное разрешение маски | цветовой признак «похоже на кожу» ОПРОВЕРГНУТ замером: плечо (кожа) p50 0.063 / p90 0.586, бедро в леггинсах (ткань) p50 0.021 / p90 0.031 — одежда однороднее кожи |
+| `MATCH_MAX`, `FOLLOW_MAX`, `MIN_PAIRS`, `MIN_COVERAGE` | `expression` | 0.04, 0.75, 6, 0.5 | пороги верности мимики | сравнение через нуль-модель, а не с абсолютным нулём |
+| `MIN_REGION_PX`, `HIGHLIGHT_SIGMAS`, `*_SCALE` | `fluid` | 48, 4.0, шкалы осей 0.05 / 1.0 / 0.25 / 0.25 | реализм вязкой жидкости | шкалы осей: раньше делили на сам эталон, и «жидкости нет вообще» оказывалось БЛИЖЕ к референсу, чем тот же гель |
+| `MIN_DATASET`, `REAL_ANCHOR_REPEATS`, `OVERSHOOT` | `dataset` | 12, 5, 2.5 | минимум кадров на LoRA, вес реального фото, запас на отбор | реальное фото повторяется 5 раз, иначе набор уплывает от целевого человека |
+| `REALTIME_BUDGET_MS`, `HOPELESS_FACTOR`, `MIN_TAIL_SAMPLES`, `BORDERLINE_BAND` | `timing` | 10.0, 10.0, 20, 0.2 | бюджет латентности и защита от вердикта по трём замерам | 10 мс названы болью заказчика; p50/p95, а не среднее — латентность живёт в хвосте |
+| `MIN_SESSIONS_FOR_YIELD`, `POLLEN` | `bench` | 12; прайс по моделям | ниже 12 сессий доля не подаётся как результат | «1/1, 100%» — не результат; интервалы Уилсона |
 | `WIDTH, HEIGHT` | `gpu_keyframes` | 512, 768 | максимальный 2:3 кадр в бюджете памяти | расчёт: UNet 1.7 + ControlNet 0.7 + VAE 0.2 + IP-Adapter 0.6 + латенты 0.4 ≈ 3.6 ГБ |
 | `GPUPlan` дефолты | `gpu_keyframes` | steps 24, guidance 6.0, `controlnet_scale` 1.0, `ip_adapter_scale` 0.7, fp16, `estimated_vram_gb` 3.6 | конфиг генерации | РАСЧЁТ, не замер (модуль не исполнялся) |
 | пороги `plan()` | `gpu_keyframes` | <3.5 ГБ → предупреждение и 448x640; ≥8 ГБ → 640x960 и меньше экономий | ветвление по карте | расчёт |
 | `MIN_VRAM_GB` / `MIN_DISK_GB` | `preflight_gpu` | 3.5 / 15 | пороги предполёта (веса ~7 ГБ + кэш и выдача) | согласованы с `gpu_keyframes`; в `GPU_RUNBOOK.md` рекомендуется диск от 30 ГБ |
 | порог весов | `preflight_gpu` | <3 ГБ в `HF_HOME` = качка не закончилась | — | выбрано |
 | `line_width`, `margin` | `skeleton` | 4 px, 0.35 | толщина линий скелета, запас кропа вокруг фигуры | выбрано |
-| `CORE_MODULES` / `MIN_CORE_COVERAGE` | `codeaudit` | 9 модулей / 50% | покрытие требуется только с тех, кто несёт вердикты; с CLI и сетевых обёрток — нет | выбрано |
-| `MUTATIONS` | `codeaudit` | 15 штук | список порогов, снятие которых обязано ронять тесты | список = пороги из §4, на которых стоят вердикты |
+| `CORE_MODULES` / `MIN_CORE_COVERAGE` | `codeaudit` | 9 модулей (`identity_arcface`, `identity`, `motion`, `pose`, `intake`, `router`, `subject`, `skeleton`, `driving`) / 50% | покрытие требуется только с тех, кто несёт вердикты; с CLI и сетевых обёрток — нет | выбрано. Порог не 90 и не 100 намеренно: остаток непокрытого — обёртки над моделью и ffmpeg, «покрыть» их можно только заглушкой, которая проверяет заглушку |
+| `MUTATIONS` | `codeaudit` | **56 записей (55 различных)** | список порогов, снятие которых обязано ронять тесты | список = пороги из §4, на которых стоят вердикты. Было записано «15 штук», в §2 — «23»; обе цифры устарели. Полный прогон 2026-08-14: **мутационное покрытие 100% (56/56), выживших нет, АУДИТ ПРОЙДЕН**. Одна запись дублируется — `timing.REALTIME_BUDGET_MS` с одним и тем же значением `1e9` стоит дважды с разными пояснениями, то есть эта мутация гоняется два раза; на результат не влияет, но 56 ≠ 56 разных порогов |
 | дефолты `live_gen` | `live_gen` | SDXL base, `lora_scale` 0.8, `ip_adapter_scale` 0.6, 30 шагов, guidance 5.0 | самохостовый старт-кадр | выбрано, никогда не исполнялось |
 
 ---
@@ -472,6 +605,15 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 | `VIDEO_API_URL`, `VIDEO_API_KEY` | `live_gen` | **нет; `RuntimeError`** | самохостовый image-to-video провайдер |
 | `TTS_API_URL`, `TTS_API_KEY` | `live_gen` | **нет; `RuntimeError`** | русский TTS |
 | `LIPSYNC_API_URL`, `LIPSYNC_API_KEY` | `live_gen` | **нет; `RuntimeError`** | аудио-driven липсинк |
+| `BALL_REEL_DWPOSE_DET` | `dwpose` (`DET_ENV`) | `~/.dwpose/yolox_l.onnx` | веса детектора DWPose; отсутствие → явное сообщение с командой установки, а не тихий откат |
+| `BALL_REEL_DWPOSE_POSE` | `dwpose` (`POSE_ENV`) | `~/.dwpose/dw-ll_ucoco_384.onnx` | веса позы DWPose |
+| `BALL_REEL_FACE_MODEL` | + `expression` | `~/.mediapipe/face_landmarker.task` | тот же файл, что у `driving`/`metrics`; `expression` читает его же |
+| `PYTORCH_CUDA_ALLOC_CONF` | `animate` | выставляется САМИМ модулем в `expandable_segments:True`, если не задана | фрагментация аллокатора на маленькой карте |
+
+Веса сегментации частей тела (`bodyparts`) переменной окружения **не имеют**:
+путь захардкожен в `DEFAULT_MODEL = "~/.mediapipe/selfie_multiclass_256x256.tflite"`,
+и переопределяется только аргументом функции. Это единственный источник весов в
+пакете без env-переключателя — отмечено как несимметричность, а не как дефект.
 
 Прокси-переменные (`HTTPS_PROXY`, `REQUESTS_CA_BUNDLE`) кодом не читаются — их использует `requests` сам; в `POLLINATIONS_CONTRACT.md` отмечено, что они уже выставлены в среде.
 
@@ -496,8 +638,12 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 | InsightFace `buffalo_l` (detection + recognition + genderage) | тянется при первом вызове из релиза InsightFace, кэш insightface | ~281 МБ по контракту, «~300 МБ» в докстринге | `identity_arcface`, `metrics`, `subject.from_photo`, `live_gen` |
 | `pose_landmarker_lite.task` | `storage.googleapis.com/mediapipe-models/...` → `~/.mediapipe/` | 5.5 МБ | `pose`, `skeleton`, `driving`, `metrics.body_metrics` |
 | `face_landmarker.task` | MediaPipe, вручную → `~/.mediapipe/` | размер в коде не указан | `driving` (блендшейпы), `metrics.face_metrics` (геометрия и мимика) |
-| `runwayml/stable-diffusion-v1-5` + `lllyasviel/control_v11p_sd15_openpose` + `h94/IP-Adapter` (`ip-adapter-faceid_sd15.bin`) | HuggingFace → `HF_HOME` | суммарно ~7 ГБ (по `GPU_RUNBOOK.md`), диск от 15 ГБ по предполёту / от 30 ГБ по рунбуку | `gpu_keyframes` |
-| SDXL base + `ip-adapter-faceid_sdxl.bin` | HuggingFace | размер не указан | `live_gen.start_frame_live` |
+| `runwayml/stable-diffusion-v1-5` + `lllyasviel/control_v11p_sd15_openpose` + **`h94/IP-Adapter-FaceID`** (`ip-adapter-faceid_sd15.bin` + `ip-adapter-faceid_sd15_lora.safetensors`, оба в КОРНЕ репозитория) | HuggingFace → `HF_HOME` | суммарно ~7 ГБ (по `GPU_RUNBOOK.md`), диск от 15 ГБ по предполёту / от 30 ГБ по рунбуку | `gpu_keyframes` |
+| SDXL base + `h94/IP-Adapter-FaceID` (`ip-adapter-faceid_sdxl.bin`, `image_encoder_folder=None`) | HuggingFace | размер не указан | `live_gen.start_frame_live` |
+| `stable-diffusion-v1-5/stable-diffusion-v1-5` + `guoyww/animatediff-motion-adapter-v1-5-3` + тот же ControlNet + тот же FaceID | HuggingFace → `HF_HOME` | по `animate.WEIGHTS_GB`: unet 1.72 + motion 0.84 + controlnet 0.72 + text_encoder 0.25 + vae 0.17 + ip_adapter 0.15 ≈ 3.85 ГБ (РАСЧЁТ) | `animate` (целевой локальный путь) |
+| `guoyww/animatediff-motion-lora-{zoom-in,zoom-out,pan-left,pan-right,tilt-up,tilt-down}` | HuggingFace | не указан | `animate`, движение КАМЕРЫ (опционально) |
+| DWPose: `yolox_l.onnx` + `dw-ll_ucoco_384.onnx` | → `~/.dwpose/` (пути через `BALL_REEL_DWPOSE_DET` / `_POSE`) | в коде не указан | `dwpose`, а через него — умолчание `skeleton.render_sequence` |
+| `selfie_multiclass_256x256.tflite` | `storage.googleapis.com/mediapipe-models/image_segmenter/...` → `~/.mediapipe/` | в коде не указан | `bodyparts`, а через него — `marks.transfer` |
 
 **GPU-установка (из `gpu_keyframes.requirements()` и `GPU_RUNBOOK.md`):**
 `torch` с индексом cu121, `diffusers>=0.27`, `transformers`, `accelerate`, `safetensors`, `insightface`, `onnxruntime-gpu`, `mediapipe`, `pillow`, `numpy`, `requests`.
@@ -521,8 +667,17 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 - **Ограничение kontext**: `width/height/size` игнорируются, всегда 1024x1024 — вертикальный старт-кадр от kontext получить нельзя, 9:16 делает видео-модель через `aspectRatio`. При этом `produce` продолжает передавать `width/height` (безвредно, но бессмысленно).
 - **`chain.render_keyframes` исполнялся живьём и НЕ сошёлся**: `chain_out/keyframes.json` — два узла отвалились по 400 от провайдера картинок, два отклонены гейтом позы (0.5914 и 0.6516 при пороге 0.25), идентичность 0.5547 / 0.3886. `generate_chain` на этих данных отработать не мог (нужно ≥2 принятых узла).
 - **`produce` на своём фото** (`wiretest/produce_report.json`): `passed=False`, одна попытка, «identity not verifiable: 0% кадров с лицом ≥100 px», при этом луп получился (ratio 0.15, seamless) и движение 0.0669. То есть отказ честный, а не молчаливый.
-- **Офлайн-тесты**: `python3 -m unittest discover -s ball_reel/tests` → **148 тестов, OK** (проверено при составлении этой памятки).
-- **Мутационный аудит** (`codeaudit`) уже дал результат: было обнаружено, что снятый `MIN_COVERAGE` не ронял ни одного теста, из-за чего вердикт `produce` вынесли в отдельную чистую функцию `verdict()`. Отмечено там же: подмена константы через `setattr` не работает для порогов, использованных как значения по умолчанию у аргументов (проверено на `LIMB_WOBBLE_MAX`), поэтому мутация правит ИСХОДНИК копии пакета.
+- **Офлайн-тесты**: `python3 -m unittest discover -s ball_reel/tests -p 'test_*.py'` → **`Ran 631 tests`, OK (skipped=1)**, ~46 c (прогон 2026-08-14). ~~148 тестов~~ — число из первой редакции памятки.
+- **Мутационный аудит** (`codeaudit`, полный прогон 2026-08-14): **56/56, покрытие 100%, выживших нет, «АУДИТ ПРОЙДЕН»**. Он уже дал результат по существу: было обнаружено, что снятый `MIN_COVERAGE` не ронял ни одного теста, из-за чего вердикт `produce` вынесли в отдельную чистую функцию `verdict()`. Отмечено там же: подмена константы через `setattr` не работает для порогов, использованных как значения по умолчанию у аргументов (проверено на `LIMB_WOBBLE_MAX`), поэтому мутация правит ИСХОДНИК копии пакета.
+
+  Второй урок оттуда же, про ВЫБОР мутации, а не про тесты: для
+  `marks.INK_CHROMA_KNEE` сначала стояло только значение 99.0, и мутация
+  ВЫЖИЛА — но не потому, что порог не сторожат, а потому, что 99.0 гасит
+  цветность полностью, то есть делает строже. Мутация в сторону «стало строже»
+  не доказывает ничего. Теперь у этого порога в списке ДВЕ стороны.
+- **DWPose исполнён живьём**: веса скачались, инференс отработал. Расхождение с MediaPipe на живом кадре — медиана 0.0121, худший сустав (ухо) 0.0280 при баре гейта 0.25. Три тихих расхождения с документацией найдены замером: вход 288x384 (а не 192x256), YOLOX отдаёт сырую сетку `[1, 8400, 85]`, нормализация по ImageNet mean/std обязательна (без неё ничего не падает, а расхождение точек 0.457 против 0.014).
+- **Стенд `bench` отработал 15 живых сессий** (`evidence/bench_baseline_summary.json`): 0 из 15 сессий и 0 из 30 попыток прошли, все 30 — по `error`, потрачено 2.4 pollen, медиана 17.5 с, 0 падений стенда. Интервалы Уилсона записаны честно (`[0.0, 0.204]` по сессиям), `pollen_per_accepted_clip: null` — делить не на что.
+- **Корпус для `fluid`** собран и лежит в `evidence/fluid_corpus/`: 8 позитивов `real_gel_*`, 13 негативов (`neg_dryskin` 4, `neg_metal` 3, `neg_plastic` 3, `neg_water` 3), 5 промежуточных `mid_cartoon_*` и 6 контролируемых пар в `pairs/` (12 файлов `*__real.png` / `*__fake.png`). Пересчитано по каталогу.
 - **`intake`, `metrics`, `driving`, `pose`, `motion`, `skeleton`, гейт** — `GPU_RUNBOOK.md` называет их проверенными на живых данных.
 
 ### 7.2 Написано, но ни разу не исполнялось
@@ -530,9 +685,13 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 - **`gpu_keyframes.py`** — прямо в докстринге: «written but NOT executed — there is no GPU in the environment it was authored in»; `plan()` всегда добавляет note «UNVERIFIED: … expect the memory numbers to move». Оценки памяти и времени в `GPU_RUNBOOK.md` — расчёт, не замер.
 - **`live_gen.py`** — «NOT RUN in this repo»; все три функции написаны против документированных API и требуют GPU/весов/ключей провайдеров.
 - **`identity_arcface`, модельная часть** — в докстринге «NOT RUN in the offline package» (арифметика косинуса юнит-тестируется отдельно). Фактически при этом на бенче она отрабатывала — калибровка в контракте получена именно ею; читать пометку как «не в офлайн-пакете».
-- **`preflight_gpu.py`** — по коду это чистая проверка, следов запуска на карте нет.
+- **`preflight_gpu.py`** — по коду это чистая проверка, следов запуска на карте нет. (CLI при этом отрабатывает: `--help` печатается, три аргумента `--conditions/--face/--skip-gateway` — проверено запуском.)
 - **Судья (`pollinations.judge_frame` / `opinion_of`)** — в контракте помечен `[из доков, эндпоинт проверен на моделях]`, то есть проверено наличие моделей, а не сам вызов оценки.
 - **`gen.Gateway` в режиме `--live`** — в репозитории нет ни артефактов, ни упоминаний живого запуска.
+- **`animate.py` и `run_local.py` на карте** — та же оговорка, что у `gpu_keyframes`: карты в среде разработки нет. `animate.plan()`/`preflight()` инспектируются на CPU, `WEIGHTS_GB` — расчёт. Прогон на реальной карте и есть их первый тест.
+- **`garment_fit` и `clip_expression` на СГЕНЕРИРОВАННОМ клипе** — работали только на живой съёмке. Именно поэтому в `run_local.wardrobe_rows` они намеренно не останавливают прогон: ставить бар на непроверенном измерителе — это то самое «выдать выбранное за измеренное».
+- **`marks.transfer` / `bodyparts`** — измеритель примет калиброван стендом `calibrate_marks` на синтетике и живых кадрах; на кадрах, ВЫШЕДШИХ ИЗ ГЕНЕРАТОРА, канал переноса не проверялся.
+- **`device.py` на не-NVIDIA карте** — модуль написан ради Intel Arc A580 (`xpu`), но карты в среде нет; ветки `xpu`/`mps` проверены только тестами на подставном torch.
 
 ### 7.3 Не реализовано вообще
 
@@ -554,8 +713,11 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 Плюс из кода и контракта:
 4. **Между кейфреймами траектория остаётся догадкой модели** (`chain.py`, «HONEST LIMIT»): пиннинг только в узлах, плотность узлов — регулятор точности и цены.
 5. **Точка отсечки `WORST_JOINT_MAX=0.40`** получена на одном референсе и одном промте — порядок моделей надёжен, сама планка нет.
-6. **Кондиционер = верификатор** (MediaPipe в обеих ролях), пока не появится DWPose — гейт слабее, чем выглядит.
+6. ~~**Кондиционер = верификатор** (MediaPipe в обеих ролях), пока не появится DWPose — гейт слабее, чем выглядит.~~ **Закрыто:** умолчание `skeleton.render_sequence` — DWPose (`_extractor`), MediaPipe остаётся судьёй. Откат на MediaPipe не молчаливый: манифест получает предупреждение «judge and judged are the same model» вместе с командой установки весов (`dwpose.why_unavailable()`).
 7. **Луп у моделей без `end_frame`** обрезкой до 0.30 не доводится (лучшее 0.41).
-8. **Мелкое лицо в выдаче** — самый частый живой отказ: вердикт «not verifiable», лечится более тесным кадрированием, НЕ апскейлом перед гейтом.
+8. **Мелкое лицо в выдаче** — самый частый живой отказ: вердикт «not verifiable», лечится более тесным кадрированием, НЕ апскейлом перед гейтом. Появился рычаг ДО генерации: `render_sequence(..., framing="waist_up")` и прогноз в манифесте (`face_px`, `identity_judgeable`, `face_share_by_framing`).
 9. **`/account/usage` и `/account/balance` отдают 403** — баланс не прочитать, предполётом может быть только `GET /account/key`.
 10. **`supported_endpoints` в `/v1/models` врут** для видео-моделей; верить `/openapi.json` и `/video/models` (а `video_capabilities` — можно).
+11. **Два имени одной базы SD1.5** — `runwayml/stable-diffusion-v1-5` в `gpu_keyframes` против `stable-diffusion-v1-5/stable-diffusion-v1-5` в `animate`. **НЕПРОВЕРЕНО**, одни ли это веса: нужен доступ к `huggingface.co`, в этой среде его нет.
+12. **Кит `kit/conditions/manifest.json` отрендерен старым `skeleton`** — в нём нет ключей `framing`/`face_share`/`face_px`/`identity_judgeable`. `run_local.framing_from_manifest` честно скажет «манифест не называет кадрировку» и возьмёт намерение флага, то есть прогноз идентичности на этом ките недостоверен. Лечится перерендером условий текущим кодом.
+13. **`marks` в боевой прогон не подключён.** Проверено grep'ом: из `marks` вне тестов и стенда импортируется только геометрия (`garment_fit` берёт `BONES`, `limb_uv`, `half_width_for`); ни `mark_transferred`, ни `transfer`, ни `marks_report` не вызываются ни из `produce`, ни из `run_local`. То есть заявленный дифференциатор измерим и переносим, но в гейт пока не входит. Тот же порядок «сначала счётчик» выдержан, долг записан.

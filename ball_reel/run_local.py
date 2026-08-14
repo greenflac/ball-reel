@@ -91,6 +91,45 @@ def _say(step: str, ok, detail: str = "") -> None:
           f"{step:<22} {detail}")
 
 
+def run_verdict(rows: list) -> tuple:
+    """Строки гейта -> (код возврата, пояснение). Чистая функция.
+
+    ЗАЧЕМ ОНА ПОЯВИЛАСЬ. Прогон возвращал 0 при любом исходе: строки гейта
+    считались, печатались и на код возврата не влияли. Шапка модуля при этом
+    обещает «останавливает всё при провале». То есть автоматическая проверка
+    «сошлось ли» была невозможна — а завтра по этому коду будет решаться,
+    показывать клип или нет.
+
+    Склеено это с другим дефектом, найденным тем же разбором: клип из 16
+    одинаковых кадров не проваливает НИ ОДНОЙ строки — все они дают «не смогли
+    измерить», потому что `worst_jump is None` означает и «мало кадров», и
+    «ничего не движется». Ноль на выходе означал бы «успех».
+
+    Отсюда правило из трёх исходов, а не из двух:
+
+    * хоть одна ИЗМЕРЕННАЯ строка провалилась -> 1;
+    * не измерено НИЧЕГО -> 1, потому что успех надо доказать, а не
+      унаследовать из тишины. «Нечего было судить» — это не «сошлось»;
+    * измерено хоть что-то и провалов нет -> 0.
+
+    Пропуски при этом не считаются провалами: клип, где половину осей измерить
+    не вышло, а измеренные сошлись, — это годный клип с оговоркой, и оговорка
+    остаётся в отчёте.
+    """
+    failed = [r["label"] for r in rows if r.get("ok") is False]
+    measured = [r["label"] for r in rows if r.get("ok") is not None]
+    skipped = [r["label"] for r in rows if r.get("ok") is None]
+    if failed:
+        return 1, (f"ПРОВАЛ по осям: {', '.join(failed)}"
+                   + (f"; не измерено: {', '.join(skipped)}" if skipped else ""))
+    if not measured:
+        return 1, ("НИ ОДНА ось не измерена — судить не по чему. Это не успех: "
+                   "клип из одинаковых кадров даёт ровно такую картину, и "
+                   "нулевой код возврата объявил бы его годным")
+    return 0, (f"измерено {len(measured)}, провалов нет"
+               + (f"; не измерено: {', '.join(skipped)}" if skipped else ""))
+
+
 def _row(r: dict, *, width: int = 110) -> None:
     """Строка вердикта. `width=0` — не резать, а переносить.
 
@@ -840,7 +879,7 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
 
     verdicts, idents, poses = [], [], []
     for frame, cond, drv in zip(paths, conditions, driving_paths):
-        ident, delta = measure(frame, cond)
+        ident, delta = measure(frame, cond, still=False)
         verdicts.append(smoke_verdict(ident, delta, driving=drv))
         # Неизмеренное НЕ подставляется единицей. Раньше сюда шло
         # `ident if ident is not None else 1.0`, и кадр, на котором лицо просто
@@ -1023,7 +1062,7 @@ def main(argv: list) -> int:
     import glob
 
     from .identity import arcface_drift
-    from .identity_arcface import START_MIN_FACE_PX
+    from .identity_arcface import MIN_FACE_PX, START_MIN_FACE_PX
     from .pose import landmarks, pose_delta
 
     conditions = sorted(glob.glob(str(Path(args.conditions) / "*.png")))
@@ -1071,13 +1110,36 @@ def main(argv: list) -> int:
     _say("driving-кадры", found == len(raw_driving) or None,
          f"{found}/{len(raw_driving)} найдено рядом с условиями")
 
-    def measure(keyframe: str, condition: str) -> tuple:
+    def measure(keyframe: str, condition: str, *, still: bool) -> tuple:
+        """Измерить один кадр. `still` выбирает ПОРОГ СУДИМОСТИ ЛИЦА.
+
+        ОДНА ФУНКЦИЯ, ДВА КОНТЕКСТА — и в этом был дефект. `measure`
+        обслуживает и дым (одиночный резкий старт-кадр), и покадровый обход
+        клипа, а порог стоял один на оба: `START_MIN_FACE_PX` = 70.
+
+        Пороги разные не по прихоти. Резкий стилл судится от 70 px: измерено,
+        живой старт-кадр на 91 px дал дистанцию 0.139 и породил полностью
+        прошедший клип. Кадр ВИДЕО судится от 100, потому что к мелкому лицу
+        добавляется смаз, и в полосе 70-99 дистанции раздуты.
+
+        Чем это грозило на демо: в одном отчёте строка «лицо по кадрам»
+        печатала PASS по бару 70, а строка клипового вердикта — «судить нечем»
+        по бару 100. Два утверждения об одних и тех же пикселях, оба наши.
+        Воспроизведено на kit/face.jpg (лица 77-94 px): бар 70 даёт median
+        0.0086 при покрытии 1.0, бар 100 — median None.
+
+        Это ЧЕТВЁРТЫЙ случай одной формы за два дня: второй способ узнать то,
+        что уже кто-то знает. Поэтому порог теперь не «умолчание в теле
+        функции», а решение вызывающего, и вызывающий обязан сказать, что
+        именно он мерит.
+        """
+        bar = START_MIN_FACE_PX if still else MIN_FACE_PX
         # Каждый измеритель тактируется отдельно: они и есть те этапы, которые
         # в продукте с низкой латентностью пришлось бы держать в бюджете, —
         # генерация туда не влезет никогда, а проверка может.
         with clock.stage("arcface", per=PER_FRAME):
             ident = arcface_drift([keyframe], args.face,
-                                  min_face_px=START_MIN_FACE_PX)["median"]
+                                  min_face_px=bar)["median"]
         driving = driving_of.get(Path(condition).stem)
         with clock.stage("landmarks", per=PER_FRAME):
             a = landmarks(driving) if driving else None
@@ -1196,7 +1258,11 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
     for r in runs:
         print(f"\n[{r['label']}] клип: {r.get('clip') or '(не собрался)'}")
     print(f"отчёт: {out / 'report.json'}")
-    return 0
+    # Код возврата — по ГЕЙТУ, а не по факту «дошли до конца». Судится
+    # ПОСЛЕДНИЙ прогон: при замере «с LoRA / без неё» показываем именно его.
+    code, why = run_verdict(runs[-1].get("rows", []) if runs else [])
+    _say("итог", code == 0, why)
+    return code
 
 
 def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
@@ -1259,7 +1325,7 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
                                  seed=args.seed)
     if not smoke.get("keyframes"):
         return _stop("кейфрейм не отрисовался — смотреть ошибку выше")
-    ident, delta = measure(smoke["keyframes"][0], nodes[0])
+    ident, delta = measure(smoke["keyframes"][0], nodes[0], still=True)
     smoke_check = smoke_verdict(
         ident, delta, driving=driving_of.get(Path(nodes[0]).stem))
     face_ok, pose_ok = smoke_check["face_ok"], smoke_check["pose_ok"]
@@ -1288,7 +1354,7 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
                      f"чего собирать")
     poses, idents = [], []
     for kf, cond in zip(keyframes, nodes):
-        i, d = measure(kf, cond)
+        i, d = measure(kf, cond, still=False)
         # Неизмеренное не подставляется единицей: кадр, на котором лицо не
         # нашли, входил в медиану как максимальный дрейф, и отчёт показывал
         # число там, где мерить было нечего.
@@ -1355,7 +1421,9 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
     (out / "report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False, default=str))
     print(f"\nклип: {res.clip_path}\nотчёт: {out / 'report.json'}")
-    return 0
+    code, why = run_verdict(rows)
+    _say("итог", code == 0, why)
+    return code
 
 
 if __name__ == "__main__":

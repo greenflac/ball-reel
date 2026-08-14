@@ -21,8 +21,20 @@ proxy that blocks it breaks image-to-video specifically.
 python3 -m ball_reel.doctor           # free/cheap checks, no video spend
 python3 -m ball_reel.doctor --video   # + one short seedance clip (spends)
 ```
-Expect `ALL CHECKS PASSED (6/6)`. Override the video model/length while shaking
-out plumbing — `wan-fast` is ~18x cheaper than seedance and proves the same path:
+`doctor` now prints its summary in Russian and with **three** counters, not two —
+the line is `ПРОШЛО 6, ОТКАЗОВ 0, НЕПРОВЕРЕНО 0 (из 6)`. It used to be documented
+here as `ALL CHECKS PASSED (6/6)`; that string no longer exists in the code.
+
+The third counter is the point, not decoration. Without `--video` the most
+expensive endpoint is not exercised at all, and the run says so explicitly —
+`НЕПРОВЕРЕНО` — instead of quietly counting as a pass. Same for a check that was
+skipped because an earlier one failed: it reports the reason rather than a
+verdict. **`НЕПРОВЕРЕНО` is not `в порядке`.** The exit code follows: `0` only
+when there are neither failures nor unchecked lines, `1` on a failure, `2` when
+something could not be checked (and `2` also with no API key at all).
+
+Override the video model/length while shaking out plumbing — `wan-fast` is ~18x
+cheaper than seedance and proves the same path:
 ```bash
 BALL_REEL_VIDEO_MODEL=wan-fast BALL_REEL_VIDEO_DURATION=2 python3 -m ball_reel.doctor --video
 ```
@@ -79,6 +91,21 @@ accepted N/3
   live (720x1280 h264, 4.04 s, ~97 s per call). `mvp.py` still uses a frame
   sequence as its stand-in; `produce.py` is the true end-to-end clip.
 - Still not real: lipsync (a wired seam in `live_gen.py`, not built).
+
+**Scope note added 2026-08-14.** This runbook covers the *public gateway* path
+only, and that path is now the **fallback**, not the target. The target is
+`python3 -m ball_reel.run_local` on your own card — `animatediff` by default,
+no outbound call anywhere in the generation path, because "production cannot
+reach the internet" was a requirement rather than a preference. The gateway path
+is kept precisely because it is the one verified live; swapping a measured path
+for an assumed one is a bad trade. For the local path see `GPU_RUNBOOK.md` and
+`TEST_KIT.md` — not this file.
+
+Also note the gate has grown well past `identity + motion` described above. It
+now runs, in this order: not-verifiable → identity median → identity p90 →
+motion amount → motion physical → anatomy → pose wander → **garment** → loop
+(`produce.CHECK_ORDER`), plus, on the local path, garment fit and expression
+fidelity as reported-but-non-blocking rows.
 
 ## The full path, and what it costs
 ```bash
