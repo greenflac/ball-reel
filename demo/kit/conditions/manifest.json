@@ -1,0 +1,98 @@
+{
+  "conditions": [
+    "demo/kit/conditions/0000.png",
+    "demo/kit/conditions/0001.png",
+    "demo/kit/conditions/0002.png",
+    "demo/kit/conditions/0003.png",
+    "demo/kit/conditions/0004.png",
+    "demo/kit/conditions/0005.png",
+    "demo/kit/conditions/0006.png",
+    "demo/kit/conditions/0007.png",
+    "demo/kit/conditions/0008.png",
+    "demo/kit/conditions/0009.png",
+    "demo/kit/conditions/0010.png",
+    "demo/kit/conditions/0011.png",
+    "demo/kit/conditions/0012.png",
+    "demo/kit/conditions/0013.png",
+    "demo/kit/conditions/0014.png",
+    "demo/kit/conditions/0015.png"
+  ],
+  "missing_frames": [],
+  "coverage": 1.0,
+  "joint_coverage": 0.979,
+  "partial_frames": 0,
+  "size": [
+    512,
+    768
+  ],
+  "retargeted": true,
+  "source": "dwpose",
+  "retarget_factors": {
+    "l_shoulder->l_elbow": 1.1960683760683761,
+    "l_elbow->l_wrist": 1.0707503258238689,
+    "r_shoulder->r_elbow": 1.1453593059420526,
+    "r_elbow->r_wrist": 1.0180562931492299,
+    "l_hip->l_knee": 0.7009279924820863,
+    "r_hip->r_knee": 0.6434116885917619
+  },
+  "retarget_origin": {
+    "l_shoulder->l_elbow": "измерено",
+    "l_elbow->l_wrist": "измерено",
+    "r_shoulder->r_elbow": "зеркало",
+    "r_elbow->r_wrist": "зеркало",
+    "l_hip->l_knee": "измерено",
+    "l_knee->l_ankle": "цель не измерена",
+    "r_hip->r_knee": "зеркало",
+    "r_knee->r_ankle": "цель не измерена"
+  },
+  "donor_proportions": {
+    "l_shoulder->l_elbow": 0.585,
+    "l_elbow->l_wrist": 0.5371,
+    "r_shoulder->r_elbow": 0.6109,
+    "r_elbow->r_wrist": 0.5649,
+    "l_hip->l_knee": 0.8513,
+    "l_knee->l_ankle": 0.9467,
+    "r_hip->r_knee": 0.9274,
+    "r_knee->r_ankle": 0.9664
+  },
+  "donor_frames_measured": 71,
+  "framing": "full_body",
+  "face_share": 0.0961,
+  "face_px": 73.8,
+  "face_share_by_framing": {
+    "full_body": 0.0961,
+    "waist_up": 0.1828
+  },
+  "face_unmeasured_frames": 0,
+  "identity_judgeable": false,
+  "driving_frames": {
+    "0000": "demo/kit/driving/0000.jpg",
+    "0001": "demo/kit/driving/0001.jpg",
+    "0002": "demo/kit/driving/0002.jpg",
+    "0003": "demo/kit/driving/0003.jpg",
+    "0004": "demo/kit/driving/0004.jpg",
+    "0005": "demo/kit/driving/0005.jpg",
+    "0006": "demo/kit/driving/0006.jpg",
+    "0007": "demo/kit/driving/0007.jpg",
+    "0008": "demo/kit/driving/0008.jpg",
+    "0009": "demo/kit/driving/0009.jpg",
+    "0010": "demo/kit/driving/0010.jpg",
+    "0011": "demo/kit/driving/0011.jpg",
+    "0012": "demo/kit/driving/0012.jpg",
+    "0013": "demo/kit/driving/0013.jpg",
+    "0014": "demo/kit/driving/0014.jpg",
+    "0015": "demo/kit/driving/0015.jpg"
+  },
+  "warnings": [
+    "2 из 8 костей остались ДОНОРСКИМИ (l_knee->l_ankle, r_knee->r_ankle): l_knee->l_ankle — цель не измерена; r_knee->r_ankle — цель не измерена. В этих местах в кадре тело человека из видео, а не с фото.",
+    "3 кост(и) взяты ЗЕРКАЛОМ измеренной стороны (r_elbow->r_wrist, r_hip->r_knee, r_shoulder->r_elbow): это допущение о двусторонней симметрии, а не замер. Рефка показывает одну сторону.",
+    "кадрировка full_body на 512x768 даёт лицо ~74 px, а ArcFace судит видео от 100 px (старт-кадр от 70): ГЕЙТ ПО ИДЕНТИЧНОСТИ ОСЛЕПНЕТ и вернёт «не смог», а не «похож». Лечится: кадрировка waist_up дала бы ~140 px; высота холста от 1041 px даёт judgeable при текущей кадрировке."
+  ],
+  "cut_from": {
+    "source": "kit",
+    "start": 50,
+    "frames": 16,
+    "of_total": 71,
+    "why": "самое подвижное окно БЕЗ частичных кадров: подвижность 84.3 против 101.4 у самого подвижного (старт 55), но там 5 кадров из 16 с потерянной конечностью, а здесь ни одного. Замерено по условиям полного кита"
+  }
+}

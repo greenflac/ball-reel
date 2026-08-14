@@ -630,7 +630,8 @@ def render_sequence(frames: list, out_dir: str | Path, *,
                     proportions: dict | None = None, width: int = 512,
                     height: int = 768, source=None,
                     framing: str = "full_body",
-                    donor: dict | None = None) -> dict:
+                    donor: dict | None = None,
+                    donor_frames: int | None = None) -> dict:
     """A whole driving segment -> a folder of condition images.
 
     Returns the manifest a GPU run consumes, including `coverage` — the share of
@@ -654,6 +655,15 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     измерена, взята зеркалом или осталась донорской. Флага «retargeted: true»
     для этого мало — на портретной рефке он был правдой ровно на три кости из
     восьми, а читался как «тело перенесено».
+
+    `donor_frames` — на скольких кадрах телосложение донора измерено. Нужен,
+    когда `donor` передан готовым, и это не педантизм. ИЗМЕРЕНО: урезанный кит
+    из 16 кадров, отрендеренный автономно, теряет ТРИ КОСТИ ЦЕЛИКОМ — предплечья
+    не видны в достаточном числе кадров окна, и `MIN_DRIVING_FRAMES` их честно
+    отбрасывает, — а бедро уезжает на 10%. Такой кит выглядит как полный и
+    переносит вдвое меньше тела. Поэтому донор для урезанного кита измеряется по
+    ВСЕЙ последовательности и передаётся снаружи; без счётчика кадров манифест
+    не отличит «измерено по 71» от «пришло неизвестно откуда».
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -668,7 +678,6 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     # иначе после пропусков соответствие уже не восстановить.
     driving: dict = {}
     extract, source_name = _extractor(source)
-    donor_frames = None
     if proportions and donor is None:
         donor, donor_frames = driving_proportions(frames)
     factors, origin = retarget_plan(proportions, donor) if proportions else ({}, {})
@@ -783,6 +792,22 @@ def render_sequence(frames: list, out_dir: str | Path, *,
                 f"ДОНОРСКИМИ ({', '.join(kept)}): "
                 + "; ".join(f"{k} — {origin[k]}" for k in kept)
                 + ". В этих местах в кадре тело человека из видео, а не с фото.")
+        if donor and donor_frames is None:
+            # Телосложение пришло снаружи без счётчика кадров. Молчать нельзя:
+            # донор, измеренный по горстке кадров, теряет кости целиком, и по
+            # манифесту это будет неотличимо от честного замера по всей
+            # последовательности.
+            manifest["warnings"].append(
+                f"телосложение донора ЗАДАНО вызывающим, а не измерено здесь, и "
+                f"число кадров не передано (donor_frames): проверить, что оно "
+                f"снято не меньше чем с {MIN_DRIVING_FRAMES} кадров, по этому "
+                f"манифесту НЕЛЬЗЯ.")
+        elif donor_frames is not None and donor_frames < len(frames):
+            manifest["warnings"].append(
+                f"телосложение донора измерено по {donor_frames} кадрам, а "
+                f"условий здесь {len(frames)}: замер шире этой нарезки. Это "
+                f"НОРМАЛЬНО и сделано намеренно — на коротком окне часть костей "
+                f"не видна в достаточном числе кадров и отбрасывается целиком.")
         if mirrored:
             manifest["warnings"].append(
                 f"{len(mirrored)} кост(и) взяты ЗЕРКАЛОМ измеренной стороны "

@@ -806,7 +806,14 @@ class ThePreflightHasThreeOutcomesToo(unittest.TestCase):
         from ball_reel import preflight_gpu, run_local
 
         self.assertIn("check_packages", inspect.getsource(run_local.main))
-        # Проверка обязана НАЗЫВАТЬ peft в любом исходе: и когда он есть, и
-        # когда нет. Иначе читатель не узнает, что именно проверили.
-        _, _, detail = preflight_gpu.check_packages()
-        self.assertIn("peft", detail.lower())
+        # Спрашивается СПИСОК проверяемого, а не результат проверки. Первая
+        # редакция этого теста звала `check_packages()` и искала «peft» в
+        # выводе — она зеленела ровно потому, что peft в тот момент НЕ БЫЛ
+        # установлен, и покраснела, как только его поставили. Тест, исход
+        # которого зависит от того, что случайно стоит на машине, проверяет
+        # машину, а не код.
+        self.assertIn("peft", [m for m, _, _, _ in preflight_gpu.PACKAGES])
+        # И он обязан быть жёстким требованием, а не «желательным»: без него
+        # diffusers не падает, а грузит модель без адаптера лица.
+        hard = [m for m, _, _, need in preflight_gpu.PACKAGES if need]
+        self.assertIn("peft", hard)

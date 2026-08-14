@@ -816,3 +816,28 @@ class ADrawingNeverInventsAJoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_a_donor_body_handed_in_without_its_frame_count_is_flagged(self):
+        """Урезанный кит — ловушка, и манифест обязан её называть.
+
+        ИЗМЕРЕНО: телосложение, снятое только с 16-кадрового окна вместо всех
+        71, теряет ТРИ кости целиком (предплечья не видны в достаточном числе
+        кадров, `MIN_DRIVING_FRAMES` их отбрасывает) и уводит бедро на 10%.
+        Кит при этом выглядит полным. Значит донор для нарезки берётся снаружи,
+        по всей последовательности, — а без счётчика кадров манифест не отличит
+        честный замер от неизвестно чего.
+        """
+        m = self.s.render_sequence(
+            ["a"], self.dir / "seq6", source=lambda _p: _points(),
+            proportions={"l_hip->l_knee": 0.6}, donor=self.DONOR)
+        self.assertTrue(any("ЗАДАНО вызывающим" in w for w in m["warnings"]))
+
+    def test_a_donor_measured_wider_than_the_cut_is_declared_normal(self):
+        m = self.s.render_sequence(
+            ["a"], self.dir / "seq7", source=lambda _p: _points(),
+            proportions={"l_hip->l_knee": 0.6}, donor=self.DONOR,
+            donor_frames=71)
+        self.assertEqual(m["donor_frames_measured"], 71)
+        note = " ".join(m["warnings"])
+        self.assertNotIn("ЗАДАНО вызывающим", note)
+        self.assertIn("шире этой нарезки", note)
