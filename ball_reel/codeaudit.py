@@ -306,24 +306,97 @@ def run_coverage() -> tuple:
     return (not low), per
 
 
+#: Что линкуется в копию пакета рядом с ним. Пакет копируется, а ДАННЫЕ лежат
+#: в корне репозитория, и без них тесты, работающие на настоящих кадрах, молча
+#: пропускаются — то есть во время каждой мутации не сторожат ничего.
+#: ИЗМЕРЕНО: копия пропускала 8 тестов против 1 в дереве. Семь замолчавших — это
+#: ровно те, что бегут по живым данным (`kit/driving`, `marktest_ref.png`), то
+#: есть самые ценные. Мутация, которую сторожил только такой тест, объявлялась
+#: ВЫЖИВШЕЙ, и на её поиск уходило время.
+DATA_LINKS = ("kit", "demo", "evidence", "marktest")
+
+
+def _stage_copy(tmp: Path) -> Path:
+    """Копия пакета плюс ссылки на данные. Возвращает путь к копии пакета."""
+    import shutil
+
+    dst = tmp / "ball_reel"
+    shutil.copytree("ball_reel", dst,
+                    ignore=shutil.ignore_patterns("__pycache__", "fixtures"))
+    # fixtures нужны офлайн-тестам, но копировать их дорого — линкуем.
+    (dst / "fixtures").symlink_to(Path("ball_reel/fixtures").resolve())
+    for name in DATA_LINKS:
+        src = Path(name)
+        if src.exists():
+            (tmp / name).symlink_to(src.resolve())
+    # Корневые картинки эксперимента с приметами лежат россыпью, а не в папке.
+    for png in Path(".").glob("*.png"):
+        (tmp / png.name).symlink_to(png.resolve())
+    return dst
+
+
+def copy_is_as_strong_as_the_tree() -> tuple:
+    """Молчит ли в копии то, что в дереве говорит. -> (одинаково, примечание).
+
+    САМОПРОВЕРКА АУДИТА, и она обязательна. Мутации гоняются не в рабочем
+    дереве, а в копии, и всё, чего в копии не хватает, превращает тест в
+    пропуск. Пропущенный тест убить мутанта не может — значит аудит тихо
+    слабеет, продолжая печатать «покрытие 100%».
+
+    Направление ошибки безопасное (лишние ВЫЖИВШИЕ, а не лишние убитые), но
+    цена всё равно есть: время на разбор мнимого выжившего и завышенное
+    представление о том, что именно сторожат тесты.
+    """
+    import tempfile
+
+    def count(cwd):
+        r = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover",
+             "-s", "ball_reel/tests", "-p", "test_*.py"],
+            cwd=cwd, capture_output=True, text=True)
+        tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
+        got = 0
+        if "skipped=" in tail:
+            got = int(tail.split("skipped=")[1].split(")")[0])
+        return got
+
+    here = count(None)
+    with tempfile.TemporaryDirectory() as tmp:
+        _stage_copy(Path(tmp))
+        there = count(tmp)
+    if there <= here:
+        return True, f"в копии пропущено {there}, в дереве {here} — не слабее"
+    return False, (
+        f"в копии пропущено {there} тестов против {here} в дереве: "
+        f"{there - here} сторож(а) молчат во время КАЖДОЙ мутации. Обычная "
+        f"причина — данные, лежащие в корне репозитория и не попавшие в копию; "
+        f"добавить их имя в DATA_LINKS")
+
+
 def run_mutation(module: str, name: str, value) -> tuple:
     """Прогнать тесты на копии пакета с испорченной константой.
 
     Возвращает (убит, примечание). «Убит» = хотя бы один тест покраснел, то
     есть порог действительно кем-то сторожится.
+
+    `-f` (failfast) — не оптимизация ради оптимизации, а условие того, что
+    аудит вообще запускают. ИЗМЕРЕНО: убитый мутант с полным прогоном стоит
+    16.2 с, с failfast — 0.3 с. Информации при этом не теряется НИСКОЛЬКО:
+    «убит» означает «покраснел хотя бы один тест», и первого достаточно.
+    Полную цену платят только ВЫЖИВШИЕ мутанты — то есть ровно те, ради
+    которых аудит и существует.
+
+    Без этого 88 мутаций по 921 тесту не влезали в собственный таймаут: прогон
+    требовал от часа до двух с половиной, и аудит переставали запускать. Аудит,
+    который не запускают, не сторожит ничего.
     """
-    import shutil
     import tempfile
 
     rel = Path(module.replace(".", "/") + ".py")
     if not rel.exists():
         return False, f"нет файла {rel}"
     with tempfile.TemporaryDirectory() as tmp:
-        dst = Path(tmp) / "ball_reel"
-        shutil.copytree("ball_reel", dst,
-                        ignore=shutil.ignore_patterns("__pycache__", "fixtures"))
-        # fixtures нужны офлайн-тестам, но копировать их дорого — линкуем.
-        (dst / "fixtures").symlink_to(Path("ball_reel/fixtures").resolve())
+        _stage_copy(Path(tmp))
         target = Path(tmp) / rel
         mutated = _mutate_source(target.read_text(), name, value)
         if not mutated:
@@ -331,7 +404,7 @@ def run_mutation(module: str, name: str, value) -> tuple:
         target.write_text(mutated)
         r = subprocess.run(
             [sys.executable, "-m", "unittest", "discover",
-             "-s", "ball_reel/tests", "-p", "test_*.py"],
+             "-s", "ball_reel/tests", "-p", "test_*.py", "-f"],
             cwd=tmp, capture_output=True, text=True)
         return r.returncode != 0, ""
 
@@ -364,6 +437,16 @@ def main(argv: list) -> int:
         return 0 if (ok_tests and ok_cov) else 1
 
     print("-" * 72)
+    # САМОПРОВЕРКА ДО МУТАЦИЙ. Мутации гоняются в копии пакета, и всё, чего в
+    # копии не хватает, превращает тест в пропуск — а пропущенный тест мутанта
+    # не убьёт. Спрашивать об этом надо ДО часа работы, а не после.
+    same, why = copy_is_as_strong_as_the_tree()
+    print(f"{'PASS' if same else 'FAIL'}  копия для мутаций  {why}")
+    if not same:
+        print("\nОСТАНОВЛЕНО: аудит слабее собственного дерева, и его числа "
+              "завышают то, что на самом деле сторожат тесты.")
+        return 1
+
     print("мутации: ломаем порог — тесты ОБЯЗАНЫ покраснеть")
     survived = []
     for module, name, value, meaning in MUTATIONS:
