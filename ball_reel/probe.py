@@ -36,6 +36,7 @@ from pathlib import Path
 def render(condition: str, face: str, prompt: str, out_path, *,
            base: str = "", negative: str = "", lora: str = "",
            lora_scale: float = 0.8, ip_adapter_scale: float = 0.7,
+           faceid_lora_scale: float = 1.0,
            controlnet_scale: float = 1.0, steps: int = 24,
            guidance: float = 6.0, seed: int = 0, vram: float = 6.0) -> dict:
     """Одно условие + одно лицо -> один кадр. Возвращает отчёт с числами.
@@ -54,6 +55,7 @@ def render(condition: str, face: str, prompt: str, out_path, *,
     if lora:
         cfg.realism_lora, cfg.realism_lora_scale = lora, lora_scale
     cfg.ip_adapter_scale = ip_adapter_scale
+    cfg.faceid_lora_scale = faceid_lora_scale
     cfg.controlnet_scale = controlnet_scale
     cfg.steps, cfg.guidance = steps, guidance
 
@@ -135,6 +137,8 @@ def main(argv: list) -> int:
     ap.add_argument("--lora", default="", help="обученная LoRA личности")
     ap.add_argument("--lora-scale", type=float, default=0.8)
     ap.add_argument("--ip-adapter-scale", type=float, default=0.7)
+    ap.add_argument("--faceid-lora-scale", type=float, default=1.0,
+                    help="вес FaceID-LoRA. Вместе с проекцией они давят В ОДНУ ТОЧКУ: 1.0 + 0.7 на чужой базе даёт радужные потёки вместо лица")
     ap.add_argument("--controlnet-scale", type=float, default=1.0)
     ap.add_argument("--steps", type=int, default=24)
     ap.add_argument("--guidance", type=float, default=6.0)
@@ -170,6 +174,7 @@ def main(argv: list) -> int:
                  negative=args.negative, lora=args.lora,
                  lora_scale=args.lora_scale,
                  ip_adapter_scale=args.ip_adapter_scale,
+                 faceid_lora_scale=args.faceid_lora_scale,
                  controlnet_scale=args.controlnet_scale, steps=args.steps,
                  guidance=args.guidance, seed=args.seed, vram=args.vram)
     print(f"база: {got['base']}")

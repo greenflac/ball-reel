@@ -151,6 +151,12 @@ class GPUPlan:
     #: принципиально. Влияние ручки измеримо только против прогона без неё, а
     #: если она включена с самого начала, базы для сравнения не существует —
     #: остаётся «мне кажется, стало лучше».
+    #: Вес FaceID-LoRA. ЕДИНИЦА БЫЛА ЗАШИТА, и это оказалось дефектом: LoRA
+    #: обучена под ванильную SD1.5, а на фотореалистичном дообучении полный вес
+    #: вместе с проекцией (0.7) переобусловливает — лицо расползается радужными
+    #: потёками. Замерено на живом кадре: 1.0 + 0.7 даёт разложение, и это не
+    #: «модель слабая», а мы давим вдвоём в одну точку.
+    faceid_lora_scale: float = 1.0
     realism_lora: str = ""
     realism_lora_weight: str = ""
     #: Насколько сильно. 1.0 обычно перебивает и лицо тоже.
@@ -346,7 +352,7 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
         # испортила её потеря FaceID-LoRA.
         pipe.load_lora_weights(IP_ADAPTER_REPO, weight_name=IP_ADAPTER_LORA,
                                adapter_name="faceid")
-        names, weights = ["faceid"], [1.0]
+        names, weights = ["faceid"], [cfg.faceid_lora_scale]
         if cfg.realism_lora:
             kw = ({"weight_name": cfg.realism_lora_weight}
                   if cfg.realism_lora_weight else {})
