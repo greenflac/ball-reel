@@ -227,43 +227,79 @@ class TheFramingIsAChoiceTheCutMustCarry(unittest.TestCase):
         self.assertIn("движение тела важнее", src)
 
 
-class BothKitsAreWHOLEInGit(unittest.TestCase):
+class BothKitsAreWHOLE(unittest.TestCase):
     """Полкита в репозитории выглядит как кит и не работает как кит.
 
     ИЗМЕРЕНО и допущено: `demo/kit_waist` попал в git ОДНИМИ driving-кадрами.
-    Условия и фото отсеклись `.gitignore` — там с давних пор стоят `conditions/`
-    и `face.jpg`, а первый кит когда-то добавили через `git add -f`, и про это
-    забыли. Каталог при этом выглядит полным: имя на месте, файлы внутри есть.
+    Условия и фото отсекались `.gitignore` — там с давних пор стоят
+    `conditions/` и `face.jpg`, а первый кит когда-то добавили через
+    `git add -f`, и про это забыли. Каталог при этом выглядел полным.
 
-    Проверять надо ИМЕННО индекс git, а не диск: на машине автора всё лежит, и
-    отсутствие замечается только у того, кто склонировал. То есть у проверяющего.
+    ПОЧЕМУ ДВЕ ПРОВЕРКИ, А НЕ ОДНА. Первая редакция читала только индекс git и
+    ПРОПУСКАЛАСЬ там, где индекса нет, — то есть в копии, на которой гоняются
+    мутации. Самопроверка аудита это и поймала: три сторожа молчали во время
+    каждой мутации. Пропущенный тест не убивает мутанта, и аудит тихо слабеет,
+    продолжая печатать «покрытие 100%».
+
+    Поэтому проверяются обе стороны, и ни одна не требует git:
+    файлы на диске — всегда, индекс — дополнительно, когда индекс есть.
+    Свойство одно и то же («кит целый»), просто у него два носителя, и
+    сломаться они могут порознь: файл на диске автора есть, а в индексе нет —
+    ровно это и случилось.
     """
 
+    PARTS = ("conditions", "driving", "face.jpg")
+
     def setUp(self):
+        self.root = Path(__file__).resolve().parents[2]
+
+    def _tracked(self) -> set:
+        """Индекс git, или пустое множество, если это не рабочее дерево."""
         import subprocess
 
-        self.tracked = set(subprocess.run(
-            ["git", "ls-files"], capture_output=True, text=True,
-            cwd=Path(__file__).resolve().parents[2]).stdout.split())
+        try:
+            r = subprocess.run(["git", "ls-files"], capture_output=True,
+                               text=True, cwd=self.root, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        return set(r.stdout.split()) if r.returncode == 0 else set()
 
-    def _kit(self, name: str):
-        return sorted(p for p in self.tracked if p.startswith(f"demo/{name}/"))
-
-    def test_both_kits_carry_conditions_driving_face_and_manifest(self):
+    def test_both_kits_are_whole_on_disk(self):
+        """Работает везде, включая копию для мутаций: git здесь не нужен."""
         for name in ("kit", "kit_waist"):
+            kit = self.root / "demo" / name
             with self.subTest(kit=name):
-                files = self._kit(name)
-                if not files:
-                    self.skipTest(f"demo/{name} нет в этом дереве")
+                self.assertTrue(kit.is_dir(), f"нет каталога {kit}")
+                for part in self.PARTS:
+                    self.assertTrue(
+                        (kit / part).exists(),
+                        f"demo/{name}: нет {part} — каталог выглядит китом и "
+                        f"им не является")
+                self.assertTrue((kit / "conditions" / "manifest.json").exists(),
+                                f"demo/{name}: нет манифеста условий")
+
+    def test_the_two_kits_have_the_same_shape_on_disk(self):
+        a, b = (sorted(p.name for p in (self.root / "demo" / n).rglob("*")
+                       if p.is_file()) for n in ("kit", "kit_waist"))
+        self.assertEqual(len(a), len(b),
+                         "киты разной полноты: один из них обрезан")
+
+    def test_both_kits_are_whole_in_the_git_index(self):
+        """Дефект, который на диске автора НЕВИДИМ ПО УСТРОЙСТВУ.
+
+        Файлы лежат, каталог полон, всё работает — а у того, кто склонирует,
+        половины нет. То есть у проверяющего.
+        """
+        tracked = self._tracked()
+        if not tracked:
+            self.skipTest("не рабочее дерево git — проверка на диске выше")
+        for name in ("kit", "kit_waist"):
+            files = [f for f in tracked if f.startswith(f"demo/{name}/")]
+            with self.subTest(kit=name):
+                self.assertTrue(files, f"demo/{name} нет в индексе целиком")
                 for part in ("conditions/", "driving/", "face.jpg",
                              "manifest.json"):
-                    self.assertTrue(any(part in f for f in files),
-                                    f"demo/{name}: в git нет {part} — "
-                                    f"каталог выглядит китом и им не является")
-
-    def test_the_two_kits_have_the_same_shape(self):
-        a, b = self._kit("kit"), self._kit("kit_waist")
-        if not a or not b:
-            self.skipTest("оба кита нужны для сравнения")
-        self.assertEqual(len(a), len(b),
-                         "киты разной полноты: один из них обрезан .gitignore")
+                    self.assertTrue(
+                        any(part in f for f in files),
+                        f"demo/{name}: в git нет {part} — склонировавший "
+                        f"получит полкита")
