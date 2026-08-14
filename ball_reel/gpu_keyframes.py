@@ -45,7 +45,27 @@ from pathlib import Path
 #: Base model. SD1.5 rather than SDXL: SDXL's UNet alone is ~5 GB in fp16 and
 #: does not fit, and the ControlNet/IP-Adapter ecosystem for SD1.5 is the one
 #: with mature OpenPose and FaceID adapters.
-BASE_MODEL = "runwayml/stable-diffusion-v1-5"
+def _base_model() -> str:
+    """Имя базы берётся из `animate`, а НЕ дублируется здесь.
+
+    Тут стояло `runwayml/stable-diffusion-v1-5`, а в `animate` —
+    `stable-diffusion-v1-5/stable-diffusion-v1-5`. Первое редиректит на второе,
+    то есть веса ОДНИ И ТЕ ЖЕ, и расхождение выглядело безобидным.
+
+    Безобидным оно не было: кэш HuggingFace ключуется СТРОКОЙ идентификатора, а
+    не тем, куда она ведёт. Два имени — две записи кэша и 1.7 ГБ, скачанных
+    дважды. На карте, где время считают минутами, это выяснилось бы посреди
+    прогона.
+
+    Пятый за два дня случай одной формы: второй способ узнать то, что уже
+    кто-то знает.
+    """
+    from .animate import BASE_MODEL as _BASE
+
+    return _BASE
+
+
+BASE_MODEL = _base_model()
 CONTROLNET_OPENPOSE = "lllyasviel/control_v11p_sd15_openpose"
 
 #: Identity by ADAPTER, not fine-tuning. A LoRA per user does not scale and

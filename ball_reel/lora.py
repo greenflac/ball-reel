@@ -34,6 +34,11 @@
 каждом отчёте, который их печатает. Первый живой прогон закрывает их одной
 строкой — `animate.peak_memory()` уже написана ровно для этого.
 
+**НЕПРОВЕРЕНО** отдельной строкой, потому что это не число, а поведение чужого
+кода: примет ли тренер идентификатор репозитория HF в
+`--pretrained_model_name_or_path`. Его справка говорит про директорию или файл
+чекпоинта. Подробности и лечение — в docstring `command`.
+
 ГЛАВНОЕ, ЧТО ПОКАЗАЛ РАСЧЁТ ПАМЯТИ, и это меняет постановку задачи. На 6 ГБ
 **ранг почти ничего не решает**: ранг 32 стоит 0.19 ГБ, ранг 128 — 0.76 ГБ, а
 решают разрешение и градиентные чекпоинты, которые стоят гигабайты. Значит ранг
@@ -574,17 +579,19 @@ class TrainConfig:
     notes: list = field(default_factory=list)
 
     def render(self) -> str:
+        size = lora_file_mb(self.rank,
+                            train_text_encoder=self.train_text_encoder)
+        ck = "да" if self.gradient_checkpointing else "нет"
         lines = [
             f"ранг {self.rank} / alpha {self.alpha} (масштаб "
-            f"{self.alpha / self.rank:.2f}), файл на выходе ~"
-            f"{lora_file_mb(self.rank, train_text_encoder=self.train_text_encoder)} МБ",
+            f"{self.alpha / self.rank:.2f}), файл на выходе ~{size} МБ",
             f"lr {self.learning_rate:g} (U-Net) / "
             + (f"{self.text_encoder_lr:g} (текст)" if self.train_text_encoder
                else "текстовый энкодер НЕ обучается"),
             f"{self.resolution}x{self.resolution}, батч {self.batch_size}, "
             f"{self.max_train_steps} шагов, {self.optimizer}, "
             f"{self.mixed_precision}",
-            f"чекпоинты градиентов: {'да' if self.gradient_checkpointing else 'нет'}, "
+            f"чекпоинты градиентов: {ck}, "
             f"кэш латентов: {'да' if self.cache_latents else 'нет'}",
         ]
         if self.memory is not None:
@@ -644,10 +651,10 @@ def config(vram_gb: float | None = None, *, rank: int = RANK,
             chosen = step
             break
         if mem.fits is not False:
+            ck = "да" if step["gradient_checkpointing"] else "нет"
             notes.append(
-                f"ступень «чекпоинты {'нет' if not step['gradient_checkpointing'] else 'да'}, "
-                f"{step['resolution']}» формально влезает "
-                f"(остаток {mem.headroom_gb} ГБ), но запас меньше "
+                f"ступень «чекпоинты {ck}, {step['resolution']}» формально "
+                f"влезает (остаток {mem.headroom_gb} ГБ), но запас меньше "
                 f"{MIN_HEADROOM_GB} ГБ — при оценённых активациях это не запас. "
                 f"Спускаемся ниже")
     else:
@@ -948,6 +955,19 @@ def command(cfg: TrainConfig, *, trainer_dir: str, base_model: str | None = None
     на том наборе и узнать об этом через полчаса.
 
     Все имена флагов сверены с живым разборщиком аргументов апстрима.
+
+    **НЕПРОВЕРЕНО, И ЭТО ЕДИНСТВЕННОЕ МЕСТО МОДУЛЯ, ГДЕ МЫ ПИШЕМ ПРОТИВ
+    НЕСВЕРЕННОГО ПОВЕДЕНИЯ.** Справка тренера описывает
+    `--pretrained_model_name_or_path` как «директорию модели в формате diffusers
+    ИЛИ файл чекпоинта StableDiffusion» — про идентификатор репозитория HF там
+    не сказано ничего. Мы по умолчанию передаём именно идентификатор, потому что
+    он один и тот же с генерацией, а расхождение базы между обучением и
+    применением проявляется только тем, что «что-то не то с лицом».
+
+    Если тренер его не примет — это видно СРАЗУ, на первой секунде, и лечится
+    одной строкой: скачать снапшот заранее и передать локальный путь
+    (`huggingface-cli download <repo> --local-dir <dir>`), либо указать локальный
+    `.safetensors`. Порядок действий — в `LORA_RUNBOOK.md`, шаг 5.
     """
     if base_model is None:
         # База — та же, что у генерации. Второе объявление здесь означало бы,
