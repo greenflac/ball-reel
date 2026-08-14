@@ -381,7 +381,7 @@ def produce(
 CHECK_ORDER = ("start_not_verifiable", "start_identity", "start_pose",
                "not_verifiable", "identity_median", "identity_p90",
                "motion_amount", "motion_physical", "anatomy", "pose_wander",
-               "garment", "loop")
+               "garment", "loop", "semantic")
 
 #: Где проходит граница трат. Проверки левее неё стоят одну картинку, правее —
 #: ещё и видео-вызов. Разделение попадает в отчёт: «отсеяли до видео» и
@@ -414,7 +414,8 @@ def verdict_detail(**kw) -> dict:
 
 def _verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
              limbs: dict, wander: dict | None, bar: float, min_motion: float,
-             loop: bool, garment: dict | None = None) -> tuple:
+             loop: bool, garment: dict | None = None,
+             semantic: dict | None = None) -> tuple:
     """Свести измерения в один вердикт: (прошло, оценка, причина, проверка).
 
     Вынесено из `produce` отдельной чистой функцией не ради красоты. Пока эта
@@ -455,6 +456,22 @@ def _verdict(*, drift: dict, motion: float, quality: dict, seam: dict,
          lambda: f"garment drifts between keyframes: {garment.get('note', '')}"),
         ("loop", seam.get("seamless") or not loop,
          lambda: f"does not loop: {seam.get('note', '')}"),
+        # СЕМАНТИКА — ПОСЛЕДНЕЙ, и это не вкус, а цена: ось стоит секунды
+        # (загрузка CLIP 4 с плюс 0.04-0.11 с на кадр), остальные — доли
+        # секунды в numpy. До неё должны доходить только клипы, прошедшие всё
+        # прочее.
+        #
+        # Условие именно `!= "mismatched"`, а НЕ `== "matches"`. Веса CLIP
+        # (~600 МБ) на машине могут отсутствовать, и тогда исход честно
+        # `not_measurable`. Гейт, падающий на этом, выключил бы выпуск везде,
+        # где весов нет. Но и читаться как «прошло» этот исход не должен:
+        # поэтому весь `semantic` кладётся в отчёт целиком, и доля
+        # `not_measurable` видна отдельно. Ноль на выходе, означающий «никто не
+        # смог», этот проект однажды уже принял за успех.
+        ("semantic",
+         semantic is None or semantic.get("verdict") != "mismatched",
+         lambda: f"frame is not what was ordered: "
+                 f"{(semantic or {}).get('note', '')}"),
     )
     for name, ok, why in checks:
         if not ok:
