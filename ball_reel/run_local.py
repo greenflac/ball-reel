@@ -248,7 +248,7 @@ def smoke_verdict(ident, delta, *, driving=None) -> dict:
     }
 
 
-def clip_verdict(drift, seam, quality, limbs, garment) -> list:
+def clip_verdict(drift, seam, quality, limbs, garment, action=None) -> list:
     """Измерения клипа -> строки гейта. Чистая функция, тот же прибор для обоих
     движков.
 
@@ -307,6 +307,23 @@ def clip_verdict(drift, seam, quality, limbs, garment) -> list:
                  "ok": bool(garment.get("stable")) if regions else None,
                  "value": _value((garment or {}).get("worst")),
                  "note": (garment or {}).get("note")})
+
+    # ДЕЙСТВИЕ. Ось добавлена последней намеренно: она единственная сверяет клип
+    # с DRIVING-последовательностью, а не с самим собой, и потому требует карты
+    # «условие -> driving-кадр». Без неё исход `None` — «не смогли измерить», а
+    # НЕ «движение то». Разница дорогая: именно эта дыра пропустила кадр с
+    # лучшим дрейфом лица за день, на котором человек в бальном платье СИДЕЛ.
+    #
+    # Вердикт берётся из `action.verdict`, а не из булева `follows`: у оси три
+    # исхода, и флаг рядом с ними — приглашение схлопнуть их обратно в два.
+    verdict = (action or {}).get("verdict")
+    rows.append({
+        "label": "действие",
+        "ok": None if verdict in (None, "not_measurable") else verdict == "same",
+        "value": _value((action or {}).get("direction")),
+        "note": ((action or {}).get("note")
+                 or "ось действия не запускалась: нет карты на driving-кадры"),
+    })
     return rows
 
 
@@ -765,7 +782,7 @@ def wardrobe_rows(frames: list, points: list, driving_paths: list,
 
 
 def clip_gate(frames: list, face: str, points: list, clock=None, *,
-              garment: bool = True) -> list:
+              garment: bool = True, driving_paths: list | None = None) -> list:
     """Клиповые меры + вердикт. Одна функция на оба движка — см. `clip_verdict`.
 
     `garment=False` — не «не проверять одежду», а «её уже проверили ЭТИ ЖЕ
@@ -796,7 +813,18 @@ def clip_gate(frames: list, face: str, points: list, clock=None, *,
     if garment:
         with stage("garment_clip"):
             gclip = garment_drift(frames, points)
-    rows = clip_verdict(drift, seam, quality, limbs, gclip)
+    # ДЕЙСТВИЕ. Считается только когда известен driving-кадр для КАЖДОГО кадра
+    # клипа: ось сверяет две траектории, выровненные один к одному, и на
+    # неполной карте сравнивала бы сдвинутые последовательности — то есть
+    # браковала бы верный клип. Нет карты -> `None`, и `clip_verdict` напечатает
+    # «не смогли измерить», а не «движение не то».
+    act = None
+    if driving_paths and all(driving_paths) and len(driving_paths) == len(frames):
+        from .action import action_match
+
+        with stage("action"):
+            act = action_match(frames, driving_paths)
+    rows = clip_verdict(drift, seam, quality, limbs, gclip, act)
     return [r for r in rows if garment or r["label"] != "одежда"]
 
 
@@ -949,7 +977,8 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
     # `garment=False`: одежду по ЭТИМ кадрам уже посудил `wardrobe_rows` —
     # у AnimateDiff узлы и кадры клипа это одно и то же множество.
     rows += wardrobe_rows(paths, points, driving_paths, clock)
-    rows += clip_gate(paths, args.face, points, clock, garment=False)
+    rows += clip_gate(paths, args.face, points, clock, garment=False,
+                      driving_paths=driving_paths)
     for r in rows:
         _row(r)
     if next((r for r in rows if r["label"] == "луп" and r["ok"] is False), None):

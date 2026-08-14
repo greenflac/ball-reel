@@ -488,6 +488,8 @@ class TheClipIsJudgedByTheModulesOwnBars(unittest.TestCase):
                       "anatomical": True, "note": "limbs"},
             "garment": {"regions": {"torso": 0.01}, "worst": ("torso", 0.01),
                         "stable": True, "note": "одежда"},
+            "action": {"verdict": "same", "follows": True, "direction": 0.9,
+                       "amplitude": 1.0, "note": "то движение"},
         }
         got.update(over)
         return self.r.clip_verdict(**got)
@@ -513,6 +515,38 @@ class TheClipIsJudgedByTheModulesOwnBars(unittest.TestCase):
     def test_a_faithful_clip_passes_every_row(self):
         for r in self._good():
             self.assertTrue(r["ok"], r)
+
+    def test_a_clip_doing_the_WRONG_movement_is_failed_not_passed(self):
+        """Дыра, через которую прошёл кадр в бальном платье.
+
+        До этой строки гейт не спрашивал, ТО ЛИ движение совершено: поза
+        сверялась с референсом покадрово, движение мерилось в пикселях, одежда
+        — на стабильность. Клип, где человек сидит вместо упражнения, проходил
+        всё.
+        """
+        rows = self._good(action={"verdict": "different", "follows": False,
+                                  "direction": 0.04, "amplitude": 1.0,
+                                  "note": "движение не то"})
+        self.assertFalse(self._row(rows, "действие")["ok"])
+
+    def test_action_without_a_driving_map_is_a_SKIP_not_a_pass(self):
+        # Ось единственная сверяет клип с ДОНОРОМ, поэтому без карты
+        # «условие -> driving-кадр» она молчит. Молчание обязано читаться как
+        # «не смогли», иначе движок chain, где карты нет, получал бы галочку
+        # за непроверенное.
+        rows = self._good(action=None)
+        row = self._row(rows, "действие")
+        self.assertIsNone(row["ok"])
+        self.assertIn("не запускалась", row["note"])
+
+    def test_action_reads_the_verdict_not_the_boolean_beside_it(self):
+        # `follows` при «не смогли измерить» равен None, но даже будь он False,
+        # строка обязана остаться ПРОПУСКОМ: у оси три исхода, и решает
+        # `verdict`, а не флаг рядом с ним.
+        rows = self._good(action={"verdict": "not_measurable", "follows": False,
+                                  "direction": None, "amplitude": None,
+                                  "note": "донор не движется"})
+        self.assertIsNone(self._row(rows, "действие")["ok"])
 
     def test_the_unmeasurable_measures_report_themselves_as_such(self):
         rows = self._good(
