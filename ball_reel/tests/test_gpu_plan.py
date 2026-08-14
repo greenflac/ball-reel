@@ -1045,3 +1045,64 @@ class TheSubjectLoRAReachesTheTARGETEngine(unittest.TestCase):
 
         src = inspect.getsource(run_local._animatediff_once)
         self.assertIn("active_loras", src)
+
+
+class AKnownLimitationIsNotAStopButAMismatchIs(unittest.TestCase):
+    """Предсказанное ограничение не имеет права запрещать прогон.
+
+    ИЗМЕРЕНО НА КАРТЕ, первый же запуск: FaceID-LoRA не прицепилась из-за
+    размерностей модуля движения (640 против 320) — ровно то, что было
+    предсказано и записано в трёх документах ДО запуска. Прогон при этом встал
+    с формулировкой «состояние модели не подтверждает заявленное» и не дал
+    сгенерировать ни кадра.
+
+    Ошибка была в смешении двух разных вопросов. «Что правда» — отвечает
+    `lora_verdict`, и строка про FaceID остаётся КРАСНОЙ: канал личности
+    действительно подключён наполовину. «Делает ли это прогон бессмысленным» —
+    отвечает `run_blocked_by_lora`, и известное ограничение не делает: с ним и
+    живём, ради него и обучается своя LoRA.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+
+    def test_the_faceid_limitation_does_not_stop_the_run(self):
+        blocked, why = self.r.run_blocked_by_lora(
+            ["faceid_0"], faceid_note="size mismatch на motion_modules")
+        self.assertFalse(blocked, why)
+
+    def test_but_it_is_still_reported_red(self):
+        """Не стоп — не значит «в порядке». Строка обязана остаться красной."""
+        ok, note = self.r.lora_verdict(
+            ["faceid_0"], faceid_note="size mismatch на motion_modules")
+        self.assertIs(ok, False)
+        self.assertIn("mismatch", note)
+
+    def test_a_requested_subject_lora_that_did_not_attach_stops_the_run(self):
+        """Главный случай: весь смысл своей LoRA в том, что она доезжает."""
+        blocked, why = self.r.run_blocked_by_lora(
+            ["faceid_0"], subject_lora="lora_out")
+        self.assertTrue(blocked)
+        self.assertIn("НЕ ТО", why)
+
+    def test_an_attached_subject_lora_does_not_stop_the_run(self):
+        blocked, _ = self.r.run_blocked_by_lora(
+            ["faceid_0", "subject"], subject_lora="lora_out")
+        self.assertFalse(blocked)
+
+    def test_a_motion_lora_nobody_asked_for_stops_the_run(self):
+        blocked, why = self.r.run_blocked_by_lora(["faceid_0", "motion_pan-left"])
+        self.assertTrue(blocked)
+        self.assertIn("недействительно", why)
+
+    def test_a_requested_motion_lora_that_is_absent_stops_the_run(self):
+        blocked, why = self.r.run_blocked_by_lora(["faceid_0"],
+                                                  motion_lora="zoom-in")
+        self.assertTrue(blocked)
+
+    def test_a_silent_pipeline_does_not_stop_the_run(self):
+        """«Не знаем, что прицеплено» — не «нет». Останавливать нельзя."""
+        blocked, _ = self.r.run_blocked_by_lora([])
+        self.assertFalse(blocked)

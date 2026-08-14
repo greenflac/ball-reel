@@ -486,6 +486,55 @@ def lora_verdict(active: list, *, motion_lora: str | None = None,
     return True, f"прицеплено: {shown}"
 
 
+def run_blocked_by_lora(active: list, *, motion_lora: str | None = None,
+                        subject_lora: str = "", faceid_note: str = "") -> tuple:
+    """Что из состояния LoRA ОСТАНАВЛИВАЕТ прогон. -> (стоп, почему).
+
+    ОТДЕЛЬНО ОТ `lora_verdict`, и это разделение куплено дорого. На первом же
+    запуске на карте прогон встал на строке, которую мы САМИ объявили ожидаемой:
+    FaceID-LoRA не прицепилась из-за размерностей модуля движения. Это
+    измеренное ограничение связки, предсказанное заранее и записанное в трёх
+    документах, — а код обошёлся с ним как с «состояние модели не подтверждает
+    заявленное» и не дал сгенерировать ни кадра.
+
+    Отсюда правило: `lora_verdict` отвечает, ЧТО ПРАВДА (и красная строка про
+    FaceID остаётся красной — канал личности действительно подключён
+    наполовину). Эта функция отвечает на другой вопрос — ДЕЛАЕТ ЛИ ЭТО ПРОГОН
+    БЕССМЫСЛЕННЫМ. Известное ограничение не делает: с ним и живём, ради него и
+    обучается своя LoRA.
+
+    Останавливают ровно три вещи, и все три — расхождение ЗАКАЗА с реальностью:
+
+    * попросили motion LoRA, её нет — движение камеры не подключено, и
+      приписывать ему разницу нельзя;
+    * НЕ просили, а она есть — «базовый» замер на самом деле с ней, и
+      сравнение «с LoRA / без неё» недействительно;
+    * попросили LoRA личности (`--lora`/`--train-lora`), а её среди
+      прицепленных нет. Это главное: весь смысл своей LoRA в том, что она
+      доезжает, и молча сгенерировать без неё значит показать на демо не то,
+      что заявлено.
+    """
+    if not active:
+        # Пайплайн не ответил. Останавливать нельзя: «не знаем» — не «нет».
+        # Строку про это печатает `lora_verdict`, и она ПРОПУСК, а не отказ.
+        return False, ""
+    names = list(active)
+    shown = ", ".join(names)
+    wanted = f"motion_{motion_lora}" if motion_lora else None
+    got_motion = [n for n in names if n.startswith("motion_")]
+    if wanted and wanted not in names:
+        return True, (f"просили {wanted}, а прицеплено [{shown}] — движение "
+                      f"камеры не подключено, и приписывать ему разницу нельзя")
+    if not wanted and got_motion:
+        return True, (f"motion LoRA {got_motion} прицеплена, хотя её не "
+                      f"просили: замер «без LoRA» на самом деле С НЕЙ, "
+                      f"сравнение недействительно")
+    if subject_lora and not any(n.startswith("subject") for n in names):
+        return True, (f"просили LoRA личности ({subject_lora}), а прицеплено "
+                      f"[{shown}]: прогон покажет НЕ ТО, что заявлено")
+    return False, ""
+
+
 def choose_conditions(paths: list, need: int, *, stride: int = 1,
                       start: int = 0, source_fps: float | None = None) -> tuple:
     """Какие условия попадут в окно модуля движения. (кадры, fps, пояснение).
@@ -968,12 +1017,24 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
                              subject_lora_scale=args.lora_scale,
                              base=base, verbose=False)
     active = animate.active_loras(pipe)
+    faceid_note = getattr(pipe, "_faceid_lora_note", "")
     ok, note = lora_verdict(active, motion_lora=motion_lora or None,
-                            faceid_note=getattr(pipe, "_faceid_lora_note", ""))
+                            faceid_note=faceid_note)
     _say("LoRA", ok, note)
-    if ok is False:
+    # Красная строка выше остаётся красной, но прогон продолжается: см.
+    # `run_blocked_by_lora`. Останавливает только расхождение ЗАКАЗА с
+    # реальностью, а не известное ограничение связки.
+    blocked, why = run_blocked_by_lora(
+        active, motion_lora=motion_lora or None, subject_lora=args.lora,
+        faceid_note=faceid_note)
+    if blocked:
         return {"label": label, "loras": active, "rows": [],
-                "stop": f"состояние модели не подтверждает заявленное: {note}"}
+                "stop": f"состояние модели не подтверждает заявленное: {why}"}
+    if ok is False and faceid_note:
+        print("  ^ известное ограничение связки AnimateDiff + IP-Adapter "
+              "FaceID, предсказанное до запуска. Прогон продолжается: "
+              "проекция эмбеддинга установлена, личность обусловлена "
+              "наполовину. Строка остаётся КРАСНОЙ в отчёте.")
 
     if args.smoke:
         print("\n--smoke: веса собраны, LoRA перечислены выше. Генерация не "
