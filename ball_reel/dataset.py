@@ -945,6 +945,7 @@ def build_dataset(face: str, out_dir, *, trigger: str = "ohwx_person",
 def main(argv: list) -> int:
     import argparse
     import glob
+    from pathlib import Path
 
     ap = argparse.ArgumentParser(
         prog="ball_reel.dataset",
@@ -953,9 +954,37 @@ def main(argv: list) -> int:
     ap.add_argument("--out", default="lora_data", help="куда класть набор")
     ap.add_argument("--trigger", default="ohwx_person")
     ap.add_argument("--generated", default="",
-                    help="каталог с порождёнными кадрами (необязательно): "
-                         "их рисует ВНЕШНИЙ генератор, независимый от судьи")
+                    help="каталог с ГОТОВЫМИ порождёнными кадрами: их рисует "
+                         "внешний генератор, независимый от судьи")
+    ap.add_argument("--generate", type=int, default=0,
+                    help="породить столько кадров ЗДЕСЬ ЖЕ, через шлюз "
+                         "(`ball_reel.synth`), и отобрать их FaceNet. Тратит "
+                         "pollen: без --yes печатается только смета")
+    ap.add_argument("--yes", action="store_true",
+                    help="согласие потратить pollen при --generate")
+    ap.add_argument("--subject", default="a person",
+                    help="как называть человека в запросах при --generate")
     args = ap.parse_args(argv)
+
+    # ПОРОЖДЕНИЕ ЗДЕСЬ, а не отдельной командой накануне. Девять локальных
+    # кадров при пороге двенадцать — это не набор, а один ракурс, и «досыпать
+    # порождённых» было советом, который надо исполнять руками. Совет,
+    # исполняемый руками, исполняется не всегда и не так.
+    if args.generate:
+        from .synth import generate as synth_generate
+
+        if not args.generated:
+            args.generated = str(Path(args.out) / "generated")
+        if not args.yes:
+            est = plan(args.generate)
+            print(f"смета порождения: {args.generate} кадров, ~{est['pollen']} "
+                  f"pollen. Ничего не потрачено — повторить с --yes.")
+            return 0
+        got = synth_generate(args.face, args.generated, count=args.generate,
+                             subject=args.subject)
+        print("\n" + got["note"] + "\n")
+        if not got["ok"]:
+            return 1
 
     gen = sorted(glob.glob(f"{args.generated}/*.png")
                  + glob.glob(f"{args.generated}/*.jpg")) if args.generated else []
