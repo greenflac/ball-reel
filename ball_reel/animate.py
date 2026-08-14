@@ -206,7 +206,16 @@ def preflight(vram_gb: float | None = None) -> dict:
         add("diffusers", False, "не установлен")
 
     for mod, why in (("insightface", "эмбеддинг лица для FaceID"),
-                     ("onnxruntime", "исполняет insightface")):
+                     ("onnxruntime", "исполняет insightface"),
+                     # peft НЕ опционален, хотя выглядит как опциональный.
+                     # Без него diffusers НЕ ПАДАЕТ: он пишет в лог «PEFT
+                     # backend is required» и едет дальше. LoRA при этом не
+                     # применяется вовсе — то есть канал личности обусловлен
+                     # наполовину, а прогон выглядит успешным. Это худший вид
+                     # отказа: он похож на работу.
+                     ("peft", "БЕЗ НЕГО LoRA НЕ ПРИМЕНЯЕТСЯ МОЛЧА — "
+                              "diffusers пишет предупреждение в лог и "
+                              "продолжает, личность остаётся необусловленной")):
         try:
             __import__(mod)
             add(mod, True, why)
