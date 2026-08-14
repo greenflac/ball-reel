@@ -60,7 +60,7 @@ def window_frames() -> int:
 
 def build(src: str | Path = "kit", dst: str | Path = "demo/kit", *,
           start: int = WINDOW_START, frames: int | None = None,
-          source=None) -> dict:
+          framing: str = "full_body", source=None) -> dict:
     """Полный кит -> нарезка в git. Возвращает манифест нарезки.
 
     Телосложение донора меряется по ВСЕМ driving-кадрам источника, а условия
@@ -103,7 +103,7 @@ def build(src: str | Path = "kit", dst: str | Path = "demo/kit", *,
     shutil.copyfile(src / "face.jpg", dst / "face.jpg")
 
     manifest = skeleton.render_sequence(
-        cut, dst / "conditions", proportions=proportions,
+        cut, dst / "conditions", proportions=proportions, framing=framing,
         donor=donor, donor_frames=donor_frames, source=source)
     # Откуда взялось окно — записывается РЯДОМ С НИМ. Иначе через неделю никто
     # не восстановит, что 50 — не круглое число, а размен двух замеров.
@@ -128,8 +128,16 @@ def main(argv: list) -> int:
     ap.add_argument("--src", default="kit")
     ap.add_argument("--dst", default="demo/kit")
     ap.add_argument("--start", type=int, default=WINDOW_START)
+    ap.add_argument("--framing", choices=("full_body", "waist_up"),
+                    default="full_body",
+                    help="ПОЛНЫЙ РОСТ — продуктовый выбор: движение тела важнее "
+                         "удобства измерения. Но на нём лицо выходит 78 px при "
+                         "баре ArcFace 100, и ось личности честно отвечает «не "
+                         "смогли измерить». ПОЯСНАЯ даёт 143.5 px и судимую "
+                         "личность — это не замена, а ВТОРОЙ прогон, которым "
+                         "число по личности вообще добывается")
     args = ap.parse_args(argv)
-    m = build(args.src, args.dst, start=args.start)
+    m = build(args.src, args.dst, start=args.start, framing=args.framing)
     print(f"условий: {len(m['conditions'])}, кадрировка {m['framing']}, "
           f"лицо {m['face_px']} px, судимо: {m['identity_judgeable']}")
     print(f"ретаргет: {len(m['retarget_factors'])} из "

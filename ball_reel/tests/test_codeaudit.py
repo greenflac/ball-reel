@@ -113,3 +113,49 @@ class TheMutationTableIsWellFormed(unittest.TestCase):
             with self.subTest(const=f"{module}.{name}"):
                 self.assertTrue(hasattr(importlib.import_module(module), name),
                                 f"{name} нет в {module}: мутация вхолостую")
+
+
+class TheSkipCounterReadsTheSummaryNotTheLastLine(unittest.TestCase):
+    """Ложная самопроверка выключает аудит так же надёжно, как сломанная.
+
+    ИЗМЕРЕНО: полный прогон аудита остановился на строке «в копии пропущено 4
+    тестов против 0 в дереве» — и до мутаций не дошёл вовсе. Расхождения не
+    было: итог unittest (`OK (skipped=4)`) не является последней строкой
+    stderr. После него печатают mediapipe, absl и TensorFlow Lite, а один раз
+    ещё и traceback из `PoseLandmarker.__del__` при сборке мусора. У дерева
+    хвост оказался длиннее, чем у копии, — отсюда 0 против 4.
+    """
+
+    def setUp(self):
+        import importlib
+
+        self.c = importlib.import_module("ball_reel.codeaudit")
+
+    def test_plain_summary(self):
+        self.assertEqual(self.c._skipped("Ran 10 tests\n\nOK (skipped=4)\n"), 4)
+
+    def test_noise_after_the_summary_does_not_hide_it(self):
+        """Ровно тот случай, на котором аудит встал."""
+        out = ("OK (skipped=4)\n"
+               "I0000 00:00 migration_state_tracking.cc:24] Migration not enabled\n"
+               "Exception ignored in: <function PoseLandmarker.__del__>\n"
+               "TypeError: 'NoneType' object is not callable\n")
+        self.assertEqual(self.c._skipped(out), 4)
+
+    def test_summary_without_skips_is_zero_not_a_miss(self):
+        self.assertEqual(self.c._skipped("OK\nI0000 шум\nещё шум\n"), 0)
+
+    def test_failed_summary_is_read_too(self):
+        self.assertEqual(self.c._skipped("FAILED (errors=1, skipped=2)\nшум\n"), 2)
+        self.assertEqual(self.c._skipped("FAILED (skipped=3, errors=1)\nшум\n"), 3)
+
+    def test_no_summary_at_all_is_zero(self):
+        self.assertEqual(self.c._skipped(""), 0)
+        self.assertEqual(self.c._skipped("всё сломалось до запуска"), 0)
+
+    def test_the_tree_and_the_copy_are_counted_by_the_same_function(self):
+        """Два счётчика для одного числа разошлись бы снова, и снова молча."""
+        import inspect
+
+        src = inspect.getsource(self.c)
+        self.assertEqual(src.count("def _skipped"), 1)

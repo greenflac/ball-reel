@@ -149,3 +149,79 @@ class TheCutCarriesTheWHOLEBodyMeasurement(unittest.TestCase):
         src = __import__("inspect").getsource(self.d)
         self.assertIn("0.979", src, "покрытие суставов выбранного окна")
         self.assertIn("101.4", src, "подвижность отвергнутого окна")
+
+
+class TheFramingIsAChoiceTheCutMustCarry(unittest.TestCase):
+    """Кадрировка решает, БУДЕТ ЛИ у оси личности число вообще.
+
+    ИЗМЕРЕНО на живом ките (512x768, окно 50..65):
+
+        full_body   лицо  73.8 px   identity_judgeable: False
+        waist_up    лицо 140.4 px   identity_judgeable: True
+
+    Бар ArcFace для кадра видео — 100 px. Полный рост выбран владельцем
+    продукта, и это остаётся так: движение тела важнее удобства измерения. Но
+    тогда число по личности не добывается НИКАК, и второй кит — не замена
+    первому, а единственный способ его получить.
+
+    Пока параметр не доходил до рендера, `--framing waist_up` молча собирал бы
+    полный рост: те же 16 png, тот же манифест, `framing: full_body` — и
+    оператор, заказавший судимую кадрировку, получил бы несудимую.
+    """
+
+    def setUp(self):
+        from ball_reel import demo_kit
+
+        self.d = demo_kit
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_the_framing_reaches_the_renderer(self):
+        from ball_reel import pose, skeleton
+
+        seen = {}
+        real_prop, real_drv, real_render = (pose.world_proportions,
+                                            skeleton.driving_proportions,
+                                            skeleton.render_sequence)
+        pose.world_proportions = lambda _p: {"l_hip->l_knee": 0.6}
+        skeleton.driving_proportions = lambda frames, **kw: ({}, len(frames))
+
+        def spy(frames, out_dir, **kw):
+            seen.update(kw)
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            return {"conditions": [], "framing": kw.get("framing"),
+                    "warnings": [], "face_px": 0, "identity_judgeable": False,
+                    "retarget_factors": {}, "retarget_origin": {},
+                    "donor_frames_measured": 0}
+
+        skeleton.render_sequence = spy
+        self.addCleanup(setattr, pose, "world_proportions", real_prop)
+        self.addCleanup(setattr, skeleton, "driving_proportions", real_drv)
+        self.addCleanup(setattr, skeleton, "render_sequence", real_render)
+
+        src = self.dir / "kit"
+        (src / "driving").mkdir(parents=True)
+        for i in range(40):
+            Image.new("RGB", (64, 96), (i, i, i)).save(
+                src / "driving" / f"{i:04d}.jpg")
+        Image.new("RGB", (64, 96), (9, 9, 9)).save(src / "face.jpg")
+
+        self.d.build(src, self.dir / "cut", start=0, frames=8,
+                     framing="waist_up")
+        self.assertEqual(seen.get("framing"), "waist_up",
+                         "кадрировка не доехала до рендера условий")
+
+    def test_default_stays_the_product_choice(self):
+        import inspect
+
+        sig = inspect.signature(self.d.build)
+        self.assertEqual(sig.parameters["framing"].default, "full_body")
+
+    def test_the_cli_offers_both_and_explains_why_there_are_two(self):
+        import inspect
+
+        src = inspect.getsource(self.d.main)
+        self.assertIn("waist_up", src)
+        self.assertIn("ВТОРОЙ прогон", src)
+        self.assertIn("движение тела важнее", src)

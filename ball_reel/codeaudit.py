@@ -366,12 +366,27 @@ def _mutate_source(text: str, name: str, value) -> str:
 
 
 def _skipped(stderr: str) -> int:
-    """Сколько тестов пропущено, по хвосту вывода unittest."""
-    tail = (stderr or "").strip().splitlines()
-    last = tail[-1] if tail else ""
-    if "skipped=" in last:
+    """Сколько тестов пропущено, по итоговой строке unittest.
+
+    ИЩЕТ С КОНЦА, а не берёт последнюю строку, и это не придирка. Итог unittest
+    (`OK (skipped=4)`) — НЕ последнее, что попадает в stderr: после него
+    печатают свои сообщения mediapipe, absl и TensorFlow Lite, а в одном из
+    прогонов ещё и traceback из `PoseLandmarker.__del__` при сборке мусора.
+
+    Чем это стоило: аудит читал у ДЕРЕВА ноль пропусков (итог был не последней
+    строкой) и четыре у КОПИИ (там хвост оказался другим), объявлял копию
+    слабее дерева и ОСТАНАВЛИВАЛСЯ — то есть полный мутационный прогон не
+    доходил до мутаций вообще. Самопроверка, ложно срабатывающая, выключает
+    аудит так же надёжно, как сломанная.
+    """
+    for line in reversed((stderr or "").strip().splitlines()):
+        s = line.strip()
+        if not (s.startswith("OK") or s.startswith("FAILED")):
+            continue
+        if "skipped=" not in s:
+            return 0          # итог найден, пропусков в нём нет
         try:
-            return int(last.split("skipped=")[1].split(")")[0])
+            return int(s.split("skipped=")[1].split(")")[0].split(",")[0])
         except (ValueError, IndexError):
             return 0
     return 0
