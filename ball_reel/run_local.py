@@ -914,6 +914,8 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
                            f"{animate.BASE_MODEL}); сравнивать с ним замером")
     with clock.stage("build", per=PER_RUN):
         pipe = animate.build(cfg, motion_lora=motion_lora or None,
+                             subject_lora=args.lora or None,
+                             subject_lora_scale=args.lora_scale,
                              base=base, verbose=False)
     active = animate.active_loras(pipe)
     ok, note = lora_verdict(active, motion_lora=motion_lora or None,

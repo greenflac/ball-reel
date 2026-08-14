@@ -288,8 +288,9 @@ def preflight(vram_gb: float | None = None) -> dict:
     return report
 
 
-def build(cfg: Plan, *, motion_lora: str | None = None, base: str = BASE_MODEL,
-          verbose: bool = True):
+def build(cfg: Plan, *, motion_lora: str | None = None,
+          subject_lora: str | None = None, subject_lora_scale: float = 0.8,
+          base: str = BASE_MODEL, verbose: bool = True):
     """Собрать пайплайн под уже посчитанный план. Возвращает готовый pipe.
 
     ПОРЯДОК СБОРКИ ВАЖЕН, и он не произвольный:
@@ -381,6 +382,30 @@ def build(cfg: Plan, *, motion_lora: str | None = None, base: str = BASE_MODEL,
     if motion_lora:
         pipe.load_lora_weights(MOTION_LORA_REPO.format(name=motion_lora),
                                adapter_name=f"motion_{motion_lora}")
+
+    # LoRA ЛИЧНОСТИ — та самая, ради которой всё затевается.
+    #
+    # ЗАЧЕМ ОНА ЗДЕСЬ, А НЕ ТОЛЬКО НА ЗАПАСНОМ ПУТИ. Личность сейчас
+    # обусловливается эмбеддингом ArcFace и ИМ ЖЕ судится: генератор
+    # оптимизируется ровно к той величине, которой его меряют. Разорвать круг
+    # может только LoRA, обученная отдельно, — и до этой правки её было некуда
+    # прицепить на целевом пути. Параметр `realism_lora` жил в плане ДРУГОГО
+    # движка (`gpu_keyframes.Plan`), флаг `--lora` печатался в отчёт, а
+    # `animate.build` про него не знал вовсе. Флаг сообщал намерение, которое
+    # ничего не делало.
+    #
+    # Прицеплено или нет — не спрашивается у аргументов: `active_loras` читает
+    # состояние модели, и `run_local` печатает ИМЕННО его.
+    if subject_lora:
+        pipe.load_lora_weights(subject_lora, adapter_name="subject")
+        try:
+            pipe.set_adapters(["subject"], adapter_weights=[subject_lora_scale])
+        except Exception as e:  # noqa: BLE001
+            # Не молча: вес, который не применился, превращает замер «с LoRA
+            # против без» в сравнение двух одинаковых прогонов.
+            if verbose:
+                print(f"  ВНИМАНИЕ: вес LoRA личности не выставлен ({e}); "
+                      f"адаптер прицеплен со своим умолчанием")
 
     # ПОРЯДОК ЭКОНОМИИ — от бесплатного к дорогому, и он не произвольный.
     #

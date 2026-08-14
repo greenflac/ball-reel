@@ -981,3 +981,67 @@ def run_local_module():
     from ball_reel import run_local
 
     return run_local
+
+
+class TheSubjectLoRAReachesTheTARGETEngine(unittest.TestCase):
+    """LoRA личности — то, ради чего всё затевается, — не доходила до генерации.
+
+    Флаг `--lora` существовал, печатался в отчёт и в справку, но клался в
+    `realism_lora` — поле плана ДРУГОГО движка (`gpu_keyframes.Plan`).
+    `animate.build` принимал только `motion_lora`, то есть движение КАМЕРЫ.
+    На целевом пути канала LoRA для личности не было вообще никакого.
+
+    Почему это дороже прочих «написано и не подключено»: личность сейчас
+    обусловливается эмбеддингом ArcFace и ИМ ЖЕ судится — генератор
+    оптимизируется ровно к той величине, которой его меряют. Разорвать круг
+    может только отдельно обученная LoRA, и прицепить её было некуда.
+    """
+
+    def test_the_builder_accepts_a_subject_lora_not_only_a_motion_one(self):
+        import inspect
+
+        from ball_reel import animate
+
+        sig = inspect.signature(animate.build)
+        self.assertIn("subject_lora", sig.parameters)
+        self.assertIn("subject_lora_scale", sig.parameters)
+
+    def test_the_builder_actually_loads_it(self):
+        import inspect
+
+        from ball_reel import animate
+
+        src = inspect.getsource(animate.build)
+        i = src.index("subject_lora:") if "subject_lora:" in src else 0
+        self.assertIn('adapter_name="subject"', src,
+                      "LoRA личности принимается аргументом и не грузится")
+
+    def test_the_flag_reaches_the_animatediff_path(self):
+        """Проверяется ВЫЗОВ по дереву разбора, а не подстрока.
+
+        Подстрочная версия зеленела бы на мёртвом коде: имя встречается в
+        справке аргумента.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        from ball_reel import run_local
+
+        tree = ast.parse(
+            textwrap.dedent(inspect.getsource(run_local._animatediff_once)))
+        passed = {k.arg for n in ast.walk(tree) if isinstance(n, ast.Call)
+                  for k in n.keywords if k.arg}
+        self.assertIn("subject_lora", passed,
+                      "--lora не доходит до animate.build: на целевом движке "
+                      "LoRA личности не прицепляется вовсе")
+
+    def test_what_attached_is_read_from_the_model_not_from_the_flag(self):
+        # Заявление «LoRA подключена» проверяется состоянием пайплайна, а не
+        # списком аргументов: иначе отчёт подтверждает намерение.
+        import inspect
+
+        from ball_reel import run_local
+
+        src = inspect.getsource(run_local._animatediff_once)
+        self.assertIn("active_loras", src)
