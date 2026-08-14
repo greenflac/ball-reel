@@ -62,9 +62,25 @@ COSTS = {
     "драйвер/сборка": "0 мс (переиспользует две предыдущие)",
     "vram": "0 мс после torch",
     "onnxruntime": "23 мс (импорт уже случился в строке выше)",
-    "лицо": "5.2 с — insightface плюс mediapipe на одном кадре",
+    "лицо": "5.2-7.0 с — insightface плюс mediapipe на одном кадре; дороже "
+            "всего остального предполёта вместе взятого",
     "шлюз": "сеть, до 30 с таймаута",
 }
+
+
+#: Границы зелёного предполёта, напечатанные вслух. Зелёная сводка без этого
+#: абзаца читается как «всё хорошо», а она означает ровно «то, что можно было
+#: проверить дёшево, проверено». Разница между этими двумя фразами и есть
+#: разница между честной подготовкой и уверенностью, которая рассыпается на
+#: первом же дорогом шаге.
+NOT_CHECKED_HERE = """
+ЭТОТ ПРЕДПОЛЁТ НЕ ПРОВЕРЯЕТ (и зелёная сводка выше об этом не говорит):
+  - прицепилась ли LoRA лица — это состояние модели, его печатает
+    run_local --smoke строкой LoRA (ПРОПУСК там значит «неизвестно», а не «да»);
+  - влезет ли прогон в память — весь расчёт памяти РАСЧЁТ, замера нет ни одного;
+  - сколько времени займёт генерация — тоже расчёт;
+  - похожи ли будут кадры на человека с фото и то ли это упражнение — это
+    смотрится глазами, метрики этого не видят."""
 
 
 def _ok(name: str, detail: str = "") -> tuple:
@@ -200,14 +216,25 @@ def torch_verdict(version: str, accelerator_available: bool, card: str,
         line = f"{card or device_kind}, torch {version}"
         return True, line + (f", собран с CUDA {built_cuda}" if built_cuda
                              else "")
-    cpu_build = (built_cuda is None) or (not built_cuda and "+cpu" in version)
+    # У сборки под Intel `torch.version.cuda` пуст ШТАТНО, и объявлять её
+    # CPU-сборкой значит послать владельца Arc переустанавливать torch вместо
+    # того, чтобы поднимать Level Zero. Признак — `+xpu` в версии либо уже
+    # выбранное устройство.
+    intel = "xpu" in (device_kind or "") or "xpu" in version.lower()
+    cpu_build = not intel and (
+        (built_cuda is None) or (not built_cuda and "+cpu" in version))
     if cpu_build:
         how = ("torch.version.cuda пуст" if built_cuda is None
                else "по суффиксу +cpu в версии; torch.version.cuda спросить не "
                     "вышло")
+        # Лечение в первых же словах намеренно: `run_local` печатает эту
+        # строку обрезанной до 96 символов, и «что делать» обязано попасть в
+        # обрезок, а не в хвост.
         return False, (
-            f"torch {version} собран БЕЗ CUDA ({how}) — карты он не увидит "
-            f"никогда, и никакой драйвер этого не изменит. Лечение:\n"
+            f"torch {version} собран БЕЗ CUDA — переставить: pip uninstall -y "
+            f"torch torchvision && pip install torch. Признак: {how}; карты "
+            f"такая сборка не увидит никогда, и никакой драйвер этого не "
+            f"изменит.\n"
             f"    python3 -m pip uninstall -y torch torchvision\n"
             f"    python3 -m pip cache purge\n"
             f"    python3 -m pip install torch    # Linux: колесо с PyPI и "
@@ -220,9 +247,9 @@ def torch_verdict(version: str, accelerator_available: bool, card: str,
             f"индекс .../whl/cpu вернёт CPU-колесо обратно.")
     if built_cuda:
         return False, (
-            f"torch {version} собран с CUDA {built_cuda}, но карты не видит. "
-            f"Это НЕ про переустановку torch. Смотреть по порядку: "
-            f"1) nvidia-smi — видит ли карту сам драйвер; "
+            f"torch {version} собран с CUDA {built_cuda}, карты не видит — "
+            f"смотреть драйвер (nvidia-smi), это НЕ про переустановку torch. "
+            f"По порядку: 1) nvidia-smi — видит ли карту сам драйвер; "
             f"2) CUDA Version в шапке nvidia-smi — она должна быть не ниже "
             f"{built_cuda}, иначе нужна сборка под старую CUDA с индекса "
             f"pytorch.org; "
@@ -297,16 +324,21 @@ def driver_verdict(driver_cuda, build_cuda, *, card: str = "") -> tuple:
                       f"сюда первым делом: nvidia-smi | head -3 против "
                       f"python3 -c 'import torch; print(torch.version.cuda)'")
     state = driver_covers(driver_cuda, build_cuda)
-    who = f" на {card}" if card else ""
+    who = f" ({card})" if card else ""
     if state == DRIVER_OLD_MAJOR:
         return False, (
-            f"драйвер{who} поддерживает CUDA {driver_cuda}, а torch собран под "
-            f"{build_cuda} — старший номер ниже, это падение. Лечение, любое "
-            f"из двух: обновить драйвер NVIDIA до поддерживающего CUDA "
-            f"{build_cuda}, ЛИБО поставить сборку torch под CUDA "
-            f"{driver_cuda}: pip uninstall -y torch torchvision && pip install "
-            f"torch --index-url https://download.pytorch.org/whl/cu"
-            f"{driver_cuda.replace('.', '')} (тег сверить на pytorch.org).")
+            f"драйвер даёт CUDA {driver_cuda}, torch собран под {build_cuda} — "
+            f"обновить драйвер или поставить torch под cu"
+            f"{driver_cuda.replace('.', '')}. Старший номер драйвера ниже — это "
+            f"падение{who}, обычно 'no kernel image is available for execution "
+            f"on the device' или просто cuda=False. Лечение, любое из двух: "
+            f"обновить драйвер NVIDIA до поддерживающего CUDA {build_cuda}, "
+            f"ЛИБО pip uninstall -y torch torchvision && pip install torch "
+            f"--index-url https://download.pytorch.org/whl/cu"
+            f"{driver_cuda.replace('.', '')} — ТЕГ СВЕРИТЬ на "
+            f"pytorch.org/get-started/locally: собраны не все cuXXX, и "
+            f"'No matching distribution' там означает «нет колёс под ЭТУ "
+            f"версию Python», а не «нет CUDA».")
     if state == DRIVER_OLD_MINOR:
         return None, (
             f"драйвер{who} даёт CUDA {driver_cuda}, сборка torch — "
@@ -321,10 +353,25 @@ def driver_verdict(driver_cuda, build_cuda, *, card: str = "") -> tuple:
                   f"{build_cuda!r}")
 
 
-def check_driver_build(probe: dict | None = None) -> tuple:
-    from .device import smi_probe, torch_build_cuda
+#: Ответ nvidia-smi за этот процесс. Спрашивать драйвер дважды — это лишние
+#: два подпроцесса и лишние сотни миллисекунд в модуле, который сам себя
+#: оправдывает экономией времени. Тесты передают `probe` явно и кэш не трогают.
+_SMI_PROBE: dict | None = None
 
-    p = probe if probe is not None else smi_probe()
+
+def _probe_once() -> dict:
+    global _SMI_PROBE
+    if _SMI_PROBE is None:
+        from .device import smi_probe
+
+        _SMI_PROBE = smi_probe()
+    return _SMI_PROBE
+
+
+def check_driver_build(probe: dict | None = None) -> tuple:
+    from .device import torch_build_cuda
+
+    p = probe if probe is not None else _probe_once()
     card = p["cards"][0]["name"] if p.get("cards") else ""
     ok, detail = driver_verdict(p.get("cuda"), torch_build_cuda(), card=card)
     fn = _unknown if ok is None else (_ok if ok else _fail)
@@ -344,9 +391,7 @@ def check_smi(probe: dict | None = None) -> tuple:
     Отсутствие `nvidia-smi` — НЕПРОВЕРЕНО, а не отказ: на Intel Arc и на Apple
     его нет и быть не должно, а решение о годности примет строка torch.
     """
-    from .device import smi_probe
-
-    p = probe if probe is not None else smi_probe()
+    p = probe if probe is not None else _probe_once()
     if not p.get("cards"):
         return _unknown("драйвер",
                         f"{p.get('reason') or 'карт не видно'}. Если это "
@@ -359,8 +404,10 @@ def check_smi(probe: dict | None = None) -> tuple:
              else ", версию CUDA драйвера прочитать не вышло")
     if c.get("vram_gb"):
         ok, detail = vram_verdict(c["vram_gb"])
-        if not ok:
+        if ok is False:
             return _fail("драйвер", f"{c['name']}: {detail}")
+        if ok is None:
+            return _unknown("драйвер", f"{c['name']}: {detail}")
     return _ok("драйвер",
                f"{c['name']}, {c.get('vram_gb') or '?'} ГБ, драйвер "
                f"{c.get('driver')}{extra}")
@@ -393,26 +440,33 @@ def vram_verdict(total_gb: float) -> tuple:
                        f"больше или уйти на 448x640.")
     weights, left = weights_headroom(total_gb)
     if weights is None:
-        return True, f"{total_gb:.1f} ГБ (сколько займут веса — не спросить)"
+        # НЕ «в порядке»: карта больше пола, но влезут ли на неё веса — мы не
+        # знаем. Показать это галочкой значит соврать ровно в том месте, где
+        # предполёт и нужен.
+        return None, (f"{total_gb:.1f} ГБ — больше пола {MIN_VRAM_GB}, но "
+                      f"сколько займут веса, спросить не вышло (animate."
+                      f"WEIGHTS_GB не читается). Проверить вручную: python3 -c "
+                      f"\"from ball_reel.animate import WEIGHTS_GB; "
+                      f"print(sum(WEIGHTS_GB.values()))\"")
     if left < 0:
         return False, (
-            f"{total_gb:.1f} ГБ, а ВЕСА локального пути занимают ~{weights} ГБ "
-            f"— не влезают сами по себе, до всяких активаций. Разрешение здесь "
-            f"НИ ПРИ ЧЁМ. Лечение по порядку: 1) выгрузка на CPU "
-            f"(cfg.offload='sequential' — те же кадры, только медленнее); "
-            f"2) снять ControlNet (-0.72 ГБ, но движение перестаёт приходить "
-            f"из driving-видео); 3) путь кейфреймов gpu_keyframes без модуля "
-            f"движения (-0.84 ГБ). См. DEMO_RUNBOOK.md, раздел 5.")
+            f"{total_gb:.1f} ГБ мало на ВЕСА (~{weights} ГБ) — снимать надо "
+            f"веса: cfg.offload='sequential', затем ControlNet, затем путь "
+            f"кейфреймов. Разрешение здесь НИ ПРИ ЧЁМ: веса от него не "
+            f"зависят вовсе, они не влезают до всяких активаций. Подробно: "
+            f"1) выгрузка на CPU (те же кадры, только медленнее); 2) снять "
+            f"ControlNet (-0.72 ГБ, но движение перестаёт приходить из "
+            f"driving-видео); 3) gpu_keyframes без модуля движения "
+            f"(-0.84 ГБ). См. DEMO_RUNBOOK.md, раздел 5.")
     if left < 1.0:
         return True, (
-            f"{total_gb:.1f} ГБ: веса ~{weights} ГБ, на АКТИВАЦИИ остаётся "
-            f"~{left} ГБ — впритык. Если упадёт по памяти, это будут активации, "
-            f"а не веса, и снимать надо их: 1) поставить cfg.vae_tiling=True; "
-            f"2) уменьшить кадры 16 -> 8 (animate.plan(frames=8), условий "
-            f"тоже 8); 3) и только потом разрешение — оно уводит лицо под "
-            f"порог, и идентичность перестаёт проверяться вовсе. Выгрузка "
-            f"здесь не поможет: она про веса. РАСЧЁТ по размерам файлов, не "
-            f"замер.")
+            f"{total_gb:.1f} ГБ: веса ~{weights}, на АКТИВАЦИИ ~{left} ГБ — "
+            f"впритык; если упадёт, снимать активации: vae_tiling, кадры "
+            f"16 -> 8. Это НЕ про веса и не про выгрузку. Порядок: "
+            f"1) cfg.vae_tiling=True; 2) animate.plan(frames=8) и столько же "
+            f"условий; 3) и только потом разрешение — оно уводит лицо под "
+            f"порог, и идентичность перестаёт проверяться вовсе. РАСЧЁТ по "
+            f"размерам файлов, не замер.")
     return True, (f"{total_gb:.1f} ГБ: веса ~{weights} ГБ, на активации "
                   f"~{left} ГБ (расчёт, не замер)")
 
@@ -441,7 +495,7 @@ def check_vram() -> tuple:
     except Exception as e:  # noqa: BLE001
         return _fail("vram", f"не прочитать: {e}")
     ok, detail = vram_verdict(total)
-    return (_ok if ok else _fail)("vram", detail)
+    return (_unknown if ok is None else (_ok if ok else _fail))("vram", detail)
 
 
 # ------------------------------------------------------ onnxruntime (~200 мс)
@@ -476,10 +530,10 @@ def check_onnx_providers() -> tuple:
 
 def disk_verdict(free_gb: float, need_gb: float, why: str) -> tuple:
     if free_gb < need_gb:
-        return False, (f"свободно {free_gb:.1f} ГБ, нужно ~{need_gb:.1f} "
-                       f"({why}): качка встанет на середине, и выяснится это "
-                       f"через двадцать минут. Освободить место или увести "
-                       f"кэш на другой диск: export HF_HOME=/путь/побольше")
+        return False, (f"свободно {free_gb:.1f} ГБ, нужно ~{need_gb:.1f} — "
+                       f"освободить место или export HF_HOME=/другой/диск "
+                       f"({why}). Иначе качка встанет на середине, и "
+                       f"выяснится это через двадцать минут.")
     return True, f"{free_gb:.1f} ГБ свободно, нужно ~{need_gb:.1f} ({why})"
 
 
@@ -492,10 +546,28 @@ def _free_gb(path: Path) -> float:
     """
     import shutil
 
+    return shutil.disk_usage(_existing(path)).free / 1024 ** 3
+
+
+def _existing(path: Path) -> Path:
     p = path.expanduser().resolve()
     while not p.exists() and p != p.parent:
         p = p.parent
-    return shutil.disk_usage(p).free / 1024 ** 3
+    return p
+
+
+def _same_filesystem(a: Path, b: Path) -> bool:
+    """Один ли раздел. По st_dev, а не по совпадению свободных байт.
+
+    Равное свободное место — это не «тот же диск», а совпадение; на нём нельзя
+    строить решение о том, складывать требования или проверять их порознь.
+    """
+    import os
+
+    try:
+        return os.stat(_existing(a)).st_dev == os.stat(_existing(b)).st_dev
+    except OSError:
+        return False
 
 
 def check_disk(path: str = ".") -> tuple:
@@ -515,7 +587,7 @@ def check_disk(path: str = ".") -> tuple:
                                   "порог по умолчанию")
         return (_ok if ok else _fail)("disk", detail)
     need_weights = round(inv["missing_gb"], 1)
-    if cache_free == out_free:
+    if _same_filesystem(Path(path), cache):
         ok, detail = disk_verdict(out_free, need_weights + DISK_OUTPUT_GB,
                                   f"{need_weights} ГБ недостающих весов + "
                                   f"{DISK_OUTPUT_GB} ГБ на кадры и отчёты")
@@ -647,10 +719,14 @@ def check_weights() -> tuple:
                      f"({m['mb']} МБ) из {m['repo']}")
         cmds.append(f'd("{m["repo"]}", allow_patterns=[{m["patterns"][0]}])')
     body = "\n".join("    " + c for c in cmds)
+    roles = ", ".join(m["role"] for m in inv["missing"])
+    # Головная фраза — короткая и с глаголом: `run_local` печатает эту строку
+    # обрезанной до 96 символов, и в обрезок обязано попасть «что делать».
     return _fail("weights",
-                 "; ".join(lines)
-                 + f". Не хватает ~{inv['missing_gb']:.1f} ГБ. Скачать:\n"
-                   f"  python3 - <<'EOF'\n"
+                 f"нет весов ~{inv['missing_gb']:.1f} ГБ — качать "
+                 f"snapshot_download (команда ниже): {roles}.\n  "
+                 + "; ".join(lines)
+                 + f"\n  python3 - <<'EOF'\n"
                    f"  from huggingface_hub import snapshot_download as d\n"
                    f"{body}\n"
                    f"  EOF\n"
@@ -1049,7 +1125,13 @@ def build_checks(args) -> list:
     запускать предполёт заново пять раз. Всё, что стоит миллисекунды,
     выполняется целиком; дорогое не начинается, пока дешёвое красное.
     """
-    size, frames = plan_size(args.vram)
+    vram = args.vram
+    if vram is None:
+        # Спрашиваем драйвер, а не человека: без числа условия не с чем
+        # сравнить, а забытый флаг --vram не должен молча выключать проверку.
+        cards = _probe_once().get("cards") or []
+        vram = cards[0].get("vram_gb") if cards else None
+    size, frames = plan_size(vram)
     return [
         ("миллисекунды", [
             ("пакеты", check_packages),
@@ -1105,12 +1187,20 @@ def main(argv: list) -> int:
                          "наружу не ходит)")
     args = ap.parse_args(argv)
 
-    failed, unknown, passed = [], [], 0
+    failed, unknown, done, passed = [], [], [], 0
     for tier, checks in build_checks(args):
         for label, fn in checks:
+            done.append(label)
             t0 = time.time()
             try:
                 ok, _, detail = fn()
+            except ImportError as e:
+                # Отсутствующий пакет — это не дефект предполёта и не отказ
+                # машины, а непроверенность: строка «пакеты» уже сказала, чего
+                # не хватает, и вторая жалоба на то же самое только путает.
+                ok, detail = None, (f"не выполнена: {e}. Пакета нет — см. "
+                                    f"строку «пакеты», там же и команда "
+                                    f"установки.")
             except Exception as e:  # noqa: BLE001 — предполёт сообщает, а не падает
                 ok, detail = False, (f"{type(e).__name__}: {e} — САМА ПРОВЕРКА "
                                      f"сломалась, это дефект предполёта, а не "
@@ -1131,6 +1221,15 @@ def main(argv: list) -> int:
             if unknown:
                 print(f"НЕПРОВЕРЕНО (это не «в порядке»): "
                       f"{', '.join(unknown)}")
+            # Непроверенное по причине остановки — тоже непроверенное, и
+            # молчать о нём значит оставить читателя с ощущением, что кроме
+            # названных бед всё в порядке. Он этого не знает, и мы тоже.
+            rest = [lbl for t, cs in build_checks(args) for lbl, _ in cs
+                    if lbl not in failed and lbl not in unknown
+                    and lbl not in done]
+            if rest:
+                print(f"НЕ ПРОВЕРЯЛОСЬ ВОВСЕ (остановились раньше): "
+                      f"{', '.join(rest)}")
             return 1
 
     if unknown:
@@ -1142,6 +1241,7 @@ def main(argv: list) -> int:
     print(f"\nВСЁ ГОТОВО ({passed}/{passed}), непроверенного нет. Следующий "
           f"шаг — дым (run_local --smoke), а не полный прогон: он собирает "
           f"веса и печатает, что реально прицеплено к модели.")
+    print(NOT_CHECKED_HERE)
     return 0
 
 

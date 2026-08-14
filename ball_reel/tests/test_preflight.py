@@ -37,7 +37,7 @@ except ImportError:
 CURE_WORDS = ("pip", "curl", "скачать", "лечение", "переставить", "обновить",
               "перерендерить", "export", "python3", "взять", "снять",
               "поставить", "проверить", "запускать", "смотреть", "уменьшить",
-              "освободить", "нужна сборка")
+              "освободить", "нужна сборка", "снимать", "ставить", "качать")
 
 
 def _has_cure(text: str) -> bool:
@@ -127,6 +127,19 @@ class TheCardIsJudgedBeforeAnythingIsRented(unittest.TestCase):
         self.assertTrue(ok)
         self.assertNotIn("впритык", detail)
 
+    def test_a_card_whose_headroom_cannot_be_computed_is_unverified(self):
+        # «Больше пола, а влезут ли веса — неизвестно» это не «в порядке».
+        # Показать такое галочкой значит соврать ровно там, где предполёт и
+        # нужен: `animate` правится параллельно, и его нечитаемость обязана
+        # быть видна, а не проглочена.
+        saved = self.p.weights_headroom
+        self.p.weights_headroom = lambda gb: (None, None)
+        self.addCleanup(lambda: setattr(self.p, "weights_headroom", saved))
+        ok, detail = self.p.vram_verdict(6.0)
+        self.assertIsNone(ok)
+        self.assertIn("спросить не вышло", detail)
+        self.assertFalse(self.p.vram_verdict(2.0)[0])  # пол сторожит и без него
+
 
 class TheTorchBuildIsJudgedByWhatItWasBuiltWith(unittest.TestCase):
     """CPU-сборка, мёртвый драйвер и не-NVIDIA — три беды с разным лечением."""
@@ -176,6 +189,17 @@ class TheTorchBuildIsJudgedByWhatItWasBuiltWith(unittest.TestCase):
         # настоящей причины (сборка без XPU или драйверы Level Zero).
         _, detail = self.p.torch_verdict("2.13.0", False, "", built_cuda="")
         self.assertIn("Arc", detail)
+        self.assertIn("XPU", detail)
+
+    def test_an_intel_build_is_not_called_a_cpu_build(self):
+        # У xpu-сборки torch.version.cuda пуст ШТАТНО. Прочитать это как
+        # «собран без CUDA» значит послать владельца Arc переустанавливать
+        # torch вместо того, чтобы поднимать Level Zero, — ложная тревога в
+        # диагностике дороже её отсутствия.
+        ok, detail = self.p.torch_verdict("2.5.1+xpu", False, "",
+                                          built_cuda=None)
+        self.assertFalse(ok)
+        self.assertNotIn("БЕЗ CUDA", detail)
         self.assertIn("XPU", detail)
 
     def test_an_accelerator_of_any_kind_passes(self):
@@ -375,6 +399,23 @@ class DiskIsMeasuredWhereTheWeightsLand(unittest.TestCase):
         self.assertGreater(floor, 8.0)
         self.assertFalse(self.p.disk_verdict(1.0, floor, "по умолчанию")[0])
 
+    def test_output_space_is_demanded_even_when_all_weights_are_downloaded(self):
+        # Веса скачаны — значит нужного места «ноль»? Нет: кадры, mp4 и отчёты
+        # тоже занимают диск, и прогон, упавший на записи кадра после минут
+        # генерации, теряет ровно то, ради чего всё делалось. Порог сторожится
+        # литералом, а не собой же.
+        seen = []
+        saved_inv, saved_verdict = self.p.weights_inventory, self.p.disk_verdict
+        self.p.weights_inventory = lambda: {"unknown": "", "missing": [],
+                                            "present": [], "missing_gb": 0.0}
+        self.p.disk_verdict = lambda free, need, why: (
+            seen.append(need) or (True, "заглушка"))
+        self.addCleanup(lambda: setattr(self.p, "weights_inventory", saved_inv))
+        self.addCleanup(lambda: setattr(self.p, "disk_verdict", saved_verdict))
+        self.p.check_disk(".")
+        self.assertTrue(seen)
+        self.assertTrue(all(n >= 0.5 for n in seen), seen)
+
     def test_free_space_is_read_for_a_path_that_does_not_exist_yet(self):
         # HF_HOME часто указывает на ещё не созданный каталог; мерить в этом
         # случае нечего — надо подняться до существующего предка, а не упасть.
@@ -494,12 +535,11 @@ class TheJudgesWeightsAreNamedWithTheirCommands(unittest.TestCase):
     def test_dwpose_absence_is_not_a_refusal_when_conditions_are_ready(self):
         from ball_reel import dwpose
 
-        saved = dwpose.why_unavailable
+        saved_why, saved_available = dwpose.why_unavailable, dwpose.available
+        self.addCleanup(lambda: setattr(dwpose, "why_unavailable", saved_why))
+        self.addCleanup(lambda: setattr(dwpose, "available", saved_available))
         dwpose.why_unavailable = lambda: "нет весов DWPose: curl ..."
         dwpose.available = lambda: False
-        self.addCleanup(lambda: setattr(dwpose, "why_unavailable", saved))
-        self.addCleanup(lambda: setattr(dwpose, "available",
-                                        lambda: not dwpose.why_unavailable()))
         ok, _, detail = self.p.check_dwpose(needed=False)
         self.assertIsNone(ok)
         self.assertIn("НЕ НУЖНЫ", detail)
@@ -779,6 +819,37 @@ class ChecksAreOrderedByPriceNotByImportance(unittest.TestCase):
         # нет, — это порядок, выбранный на глаз.
         for label in self._order():
             self.assertIn(label, self.p.COSTS, f"нет замера цены для {label}")
+
+    def test_stopping_early_says_what_it_never_got_to_check(self):
+        # Остановка — это тоже непроверенность, просто по другой причине.
+        # Молчать о ней значит оставить читателя с ощущением, что кроме
+        # названной беды всё в порядке; он этого не знает, и мы тоже.
+        import contextlib
+        import io
+
+        saved = self.p.build_checks
+        self.p.build_checks = lambda args: [
+            ("дёшево", [("дешёвая", lambda: (False, "x", "сломалось"))]),
+            ("дорого", [("дорогая", lambda: (True, "y", "не должна вызваться"))]),
+        ]
+        self.addCleanup(lambda: setattr(self.p, "build_checks", saved))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.p.main(["--skip-gateway"])
+        out = buf.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("НЕ ПРОВЕРЯЛОСЬ ВОВСЕ", out)
+        self.assertIn("дорогая", out)
+        self.assertNotIn("не должна вызваться", out)
+
+    def test_the_green_summary_names_its_own_boundary(self):
+        # «Предполёт зелёный» не равно «всё хорошо»: он равно «то, что можно
+        # было проверить дёшево, проверено». Самое дорогое — прицеплена ли
+        # LoRA и влезет ли память — остаётся за границей, и об этом надо
+        # сказать вслух, иначе зелёная сводка врёт умолчанием.
+        text = self.p.NOT_CHECKED_HERE
+        for must in ("LoRA", "память", "глазами"):
+            self.assertIn(must, text)
 
     def test_each_check_answers_with_one_of_exactly_three_outcomes(self):
         # Пропущенный третий исход — тот самый дефект, из-за которого
