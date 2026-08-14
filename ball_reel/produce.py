@@ -545,7 +545,7 @@ def _identity_summary(drift: dict) -> dict:
 
 
 def _write_report(out_dir: Path, res: Result) -> None:
-    (out_dir / "produce_report.json").write_text(json.dumps(res.to_dict(), indent=2))
+    (out_dir / "produce_report.json").write_text(json.dumps(res.to_dict(), indent=2), encoding="utf-8")
 
 
 def render(res: Result) -> str:

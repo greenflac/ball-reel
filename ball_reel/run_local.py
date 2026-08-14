@@ -1341,7 +1341,7 @@ def main(argv: list) -> int:
     manifest_path = Path(args.conditions) / "manifest.json"
     manifest: dict = {}
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw_driving: dict = manifest.get("driving_frames") or {}
     if not raw_driving:
         _say("манифест", False,
@@ -1513,7 +1513,7 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
               "runs": [{k: v for k, v in r.items() if k != "frames"}
                        for r in runs]}
     (out / "report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     for r in runs:
         print(f"\n[{r['label']}] клип: {r.get('clip') or '(не собрался)'}")
     print(f"отчёт: {out / 'report.json'}")
@@ -1680,7 +1680,7 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
               "clip": res.clip_path, "keyframes": len(keyframes),
               "rows": rows, "chain": res.note}
     (out / "report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     print(f"\nклип: {res.clip_path}\nотчёт: {out / 'report.json'}")
     code, why = run_verdict(rows)
     _say("итог", code == 0, why)

@@ -335,7 +335,7 @@ def driving_frames_for(manifest, conditions=None, *, root=None) -> list:
     """
     if isinstance(manifest, (str, Path)):
         mpath = Path(manifest)
-        data = json.loads(mpath.read_text())
+        data = json.loads(mpath.read_text(encoding="utf-8"))
     else:
         mpath, data = None, manifest
     table = data.get("driving_frames")

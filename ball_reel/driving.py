@@ -108,7 +108,7 @@ class DrivingSpec:
 
     def save(self, path: str | Path, *, with_track: bool = True) -> str:
         Path(path).write_text(json.dumps(self.to_dict(with_track=with_track),
-                                         indent=2))
+                                         indent=2), encoding="utf-8")
         return str(path)
 
     def validate(self) -> list[str]:

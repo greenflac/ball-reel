@@ -859,5 +859,5 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     import json
 
     (out_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False))
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest

@@ -1000,7 +1000,7 @@ def check_driving(conditions: str) -> tuple:
                                 f"Перерендерить условия текущим "
                                 f"skeleton.render_sequence.")
     try:
-        manifest = json.loads(mp.read_text())
+        manifest = json.loads(mp.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
         return _fail("driving", f"манифест {mp} не читается "
                                 f"({type(e).__name__}): перерендерить условия.")

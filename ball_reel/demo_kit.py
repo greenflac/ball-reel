@@ -116,7 +116,7 @@ def build(src: str | Path = "kit", dst: str | Path = "demo/kit", *,
                 "по условиям полного кита"),
     }
     (dst / "conditions" / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False))
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 

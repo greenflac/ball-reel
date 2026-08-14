@@ -120,7 +120,7 @@ def main(argv: list[str]) -> int:
                  real_judge="--no-judge" not in argv)
     text = render(result)
     print(text)
-    (ROOT / "mvp_report.md").write_text("# MVP report\n\n```\n" + text + "\n```\n")
+    (ROOT / "mvp_report.md").write_text("# MVP report\n\n```\n" + text + "\n```\n", encoding="utf-8")
     return 0
 
 

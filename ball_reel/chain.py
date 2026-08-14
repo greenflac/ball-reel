@@ -301,7 +301,7 @@ def _concat(paths: list[str], out_mp4: str | Path) -> str:
     out_mp4 = Path(out_mp4).resolve()
     listing = out_mp4.parent / "segments.txt"
     listing.write_text(
-        "".join(f"file '{Path(p).resolve()}'\n" for p in paths))
+        "".join(f"file '{Path(p).resolve()}'\n" for p in paths), encoding="utf-8")
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
                     "-i", str(listing), "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     str(out_mp4)], check=True, capture_output=True)

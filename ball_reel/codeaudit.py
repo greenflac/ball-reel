@@ -537,10 +537,10 @@ def run_mutation(module: str, name: str, value) -> tuple:
     with tempfile.TemporaryDirectory() as tmp:
         _stage_copy(Path(tmp))
         target = Path(tmp) / rel
-        mutated = _mutate_source(target.read_text(), name, value)
+        mutated = _mutate_source(target.read_text(encoding="utf-8"), name, value)
         if not mutated:
             return False, f"объявление {name} не найдено в {rel}"
-        target.write_text(mutated)
+        target.write_text(mutated, encoding="utf-8")
         r = subprocess.run(
             [sys.executable, "-m", "unittest", "discover",
              "-s", "ball_reel/tests", "-p", "test_*.py", "-f"],

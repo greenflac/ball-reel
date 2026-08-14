@@ -480,7 +480,7 @@ def main(argv: list) -> int:
 
     s = summarise(records)
     (out / "summary.json").write_text(
-        json.dumps(s, indent=2, ensure_ascii=False))
+        json.dumps(s, indent=2, ensure_ascii=False), encoding="utf-8")
     print("\n--- итог ---")
     print(render(s))
     print(f"\nжурнал: {journal}\nсводка: {out / 'summary.json'}")

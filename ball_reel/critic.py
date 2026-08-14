@@ -64,7 +64,7 @@ def _opinion(root: Path, strategy_id: str) -> tuple[float, bool]:
     """Read the (synthetic) opinion verdict for a strategy. (score, synthetic)."""
     v = root / "fixtures" / "judge" / f"{strategy_id}.json"
     if v.exists():
-        d = json.loads(v.read_text())
+        d = json.loads(v.read_text(encoding="utf-8"))
         return float(d.get("opinion", 0.0)), bool(d.get("synthetic", True))
     return 0.0, True
 

@@ -84,7 +84,7 @@ class Gateway:
     def _load_index(self) -> dict:
         idx = self.root / "fixtures" / "index.json"
         if idx.exists():
-            return json.loads(idx.read_text())
+            return json.loads(idx.read_text(encoding="utf-8"))
         return {}
 
     def _cached(self, stage: str, strategy_id: str) -> str | None:

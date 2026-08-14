@@ -380,7 +380,7 @@ def main(argv: list) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"timing": summary, "latency": verdict}, indent=2,
-            ensure_ascii=False))
+            ensure_ascii=False), encoding="utf-8")
         print(f"\nпрофиль: {args.json}")
     return 0
 

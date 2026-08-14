@@ -102,13 +102,13 @@ def main() -> None:
             _save(frozen.copy(), FIX / "start" / "routine_led.png")
             index["start/routine_led"] = "fixtures/start/routine_led.png"
 
-    (FIX / "index.json").write_text(json.dumps(index, indent=2))
+    (FIX / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
 
     judge = FIX / "judge"
     judge.mkdir(parents=True, exist_ok=True)
     for sid, op in [("energy_led", 0.82), ("product_led", 0.71), ("routine_led", 0.90)]:
         (judge / f"{sid}.json").write_text(
-            json.dumps({"opinion": op, "synthetic": True}, indent=2))
+            json.dumps({"opinion": op, "synthetic": True}, indent=2), encoding="utf-8")
 
     print(f"fixtures written under {FIX}")
 
