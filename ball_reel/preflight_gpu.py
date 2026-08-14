@@ -1087,9 +1087,11 @@ def check_gateway() -> tuple:
     try:
         pollinations._key()
     except Exception as e:  # noqa: BLE001
-        return _fail("gateway", f"{e}. Лечение: export "
-                                f"POLLINATIONS_API_KEY=... — без ключа "
-                                f"цепочку нечем сшить.")
+        return _fail("gateway", f"{e}. Лечение:\n  "
+                     + cure.set_env("POLLINATIONS_API_KEY", "sk_...")
+                     + "\n  Локальному пути (--engine animatediff) ключ НЕ "
+                       "нужен: предполёт запускать с --skip-gateway. Ключ "
+                       "нужен порождению набора для LoRA (ball_reel.synth).")
     try:
         r = requests.get(pollinations._base() + "/account/key",
                          headers=pollinations._auth(), timeout=30)

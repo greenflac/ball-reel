@@ -87,3 +87,20 @@ def home(sub: str = "") -> str:
     base = "%USERPROFILE%" if WINDOWS else "~"
     return f"{base}\\{sub}" if (WINDOWS and sub) else (
         f"{base}/{sub}" if sub else base)
+
+
+def set_env(name: str, value: str = "...") -> str:
+    """Задать переменную окружения — командой ТОЙ оболочки, где это печатают.
+
+    `export` есть только в Bourne-совместимых. В CMD это `set`, в PowerShell —
+    `$env:`. Печатать `export` пользователю Windows значит отправить его гуглить
+    вместо того, чтобы починить: та же ошибка, что с `mkdir -p`.
+
+    Для Windows даётся ДВЕ формы: `$env:` действует до закрытия окна, `setx` —
+    навсегда, но подхватывается только в НОВОМ окне. Разница неочевидна и
+    стоит одного потерянного часа: `setx` выполнен, переменной в этом окне нет.
+    """
+    if not WINDOWS:
+        return f"export {name}={value}"
+    return (f'$env:{name} = "{value}"   (в этом окне)\n'
+            f'  setx {name} "{value}"   (навсегда, подхватится в НОВОМ окне)')

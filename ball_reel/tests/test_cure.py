@@ -173,6 +173,37 @@ class TheDetectorItselfCanGoRed(unittest.TestCase):
         with self.assertRaises(AssertionError):
             checker._clean("curl -sSLO a.zip && unzip -o a.zip", "нарочно плохое")
 
+    def test_setting_an_env_var_uses_the_right_shell(self):
+        """`export` есть только в Bourne. В PowerShell это `$env:`."""
+        real = cure.WINDOWS
+        try:
+            cure.WINDOWS = True
+            win = cure.set_env("POLLINATIONS_API_KEY", "sk_x")
+            cure.WINDOWS = False
+            nix = cure.set_env("POLLINATIONS_API_KEY", "sk_x")
+        finally:
+            cure.WINDOWS = real
+        self.assertNotIn("export", win)
+        self.assertIn("$env:", win)
+        self.assertIn("setx", win, "нет постоянной формы — переменная умрёт "
+                                   "вместе с окном, и это неочевидно")
+        self.assertTrue(nix.startswith("export "))
+
+    def test_the_gateway_cure_says_the_local_path_does_not_need_a_key(self):
+        """Отказ шлюза останавливал предполёт там, где ключ вообще не нужен."""
+        import os
+
+        from ball_reel import preflight_gpu
+
+        old = os.environ.pop("POLLINATIONS_API_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__(
+            "POLLINATIONS_API_KEY", old) if old else None)
+        _, ok, detail = preflight_gpu.check_gateway()
+        if ok:
+            self.skipTest("ключ есть — отказу неоткуда взяться")
+        self.assertIn("--skip-gateway", detail)
+        self.assertIn("animatediff", detail)
+
     def test_the_helpers_differ_between_platforms(self):
         """Если бы `cure` печатал одно и то же везде, он был бы бесполезен."""
         real = cure.WINDOWS

@@ -26,6 +26,8 @@ TTS (дёшево) -> видео (только с --video). Каждая стр�
 
 from __future__ import annotations
 
+from . import cure
+
 import os
 import sys
 import time
@@ -78,7 +80,7 @@ def main(argv: list[str]) -> int:
         pollinations._key()
     except RuntimeError as e:
         print(f"{FAIL:<12}ключ            {e}\n"
-              f"Лечение: export POLLINATIONS_API_KEY=... Без ключа проверять "
+              f"Лечение: {cure.set_env('POLLINATIONS_API_KEY', 'sk_...')} Без ключа проверять "
               f"нечего — все точки ниже требуют авторизации. Локальному пути "
               f"(--engine animatediff) ключ не нужен вовсе.")
         return 2
