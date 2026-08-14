@@ -111,6 +111,21 @@ BONE_TO_PROPORTION = {
     ("r_knee", "r_ankle"): "r_knee->r_ankle",
 }
 
+#: Ниже какого множителя ретаргет считается подозрительным, а выше какого —
+#: заведомо ошибкой измерения, а не телосложением. ВЫБРАНЫ. Опорное число:
+#: разница в длине кости между взрослыми людьми одного роста держится в
+#: единицах процентов, а между крайними ростами взрослых — примерно в полтора
+#: раза. Множитель 3 не описывает человека: он описывает промах детектора на
+#: одном из двух тел. Такую кость честнее оставить донорской, чем растянуть.
+MAX_RETARGET_FACTOR = 2.0
+MIN_RETARGET_FACTOR = 0.5
+
+#: Сколько кадров минимум нужно, чтобы медиане пропорций донора можно было
+#: верить. ИЗМЕРЕНО на нашем отрезке: медиана по каждому второму кадру (32 шт)
+#: уходит от медианы по всем на 0.79%, по каждому пятому (13 шт) — на 3.03%.
+#: Отсюда порог: ниже десятка кадров разброс перестаёт усредняться.
+MIN_DRIVING_FRAMES = 10
+
 
 #: Кадрировки, которые умеет строить `_window`. Третьей не предполагается: либо
 #: в кадре вся фигура, либо её верхняя половина.
@@ -196,33 +211,106 @@ def pose_points(path: str | Path) -> dict | None:
     return pts
 
 
-def retarget(points: dict, proportions: dict, *,
+def mirror_key(key: str) -> str:
+    """`l_hip->l_knee` <-> `r_hip->r_knee`. Не сторона — ключ возвращается как есть."""
+    def flip(joint: str) -> str:
+        if joint.startswith("l_"):
+            return "r_" + joint[2:]
+        if joint.startswith("r_"):
+            return "l_" + joint[2:]
+        return joint
+
+    return "->".join(flip(j) for j in key.split("->"))
+
+
+def retarget_plan(target: dict | None, driving: dict | None) -> tuple:
+    """Во сколько раз растянуть каждую кость. -> (множители, происхождение).
+
+    ЧТО ИМЕННО СЧИТАЕТСЯ. Кость donor'а в кадре короче не только потому, что у
+    него другое тело, но и потому, что она направлена в камеру. Первое надо
+    заменить, второе — сохранить: ракурс это и есть движение, за которым мы
+    пришли в видео. Разделяются они делением 3D-пропорций друг на друга:
+
+        множитель = (кость/торс у цели) / (кость/торс у донора)
+
+    Обе величины измерены в 3D и от ракурса не зависят, поэтому их частное —
+    чистая разница телосложений. Умножив на него ДЛИНУ В КАДРЕ, мы меняем тело
+    и не трогаем перспективу.
+
+    ПОЧЕМУ НЕ АБСОЛЮТНАЯ ДЛИНА. Раньше кость ставилась в `пропорция * торс`,
+    без донора. Это молча утверждает, что длина кости в кадре и есть её
+    анатомическая длина, то есть что ракурса не бывает. ИЗМЕРЕНО на нашем
+    отрезке: левое бедро донора занимает от 0.102 до 1.485 длины торса (это
+    диапазон ракурса, нога то в камеру, то вбок), а после такого ретаргета —
+    0.597..0.601, то есть константу. Перспектива стиралась начисто, и
+    ControlNet получал «нога отведена вбок» там, где человек шагал вперёд.
+
+    ЗЕРКАЛО. Портретная рефка показывает одну сторону: на `kit/face.jpg`
+    измерены 3 кости из 8. Прежний код молча пропускал остальные пять — и
+    получалась фигура, у которой левая половина от клиента, а правая от
+    донора. Такого тела нет ни у кого. Поэтому измеренная сторона зеркалится
+    на неизмеренную: люди двусторонне симметричны с точностью до единиц
+    процентов, и это допущение честнее чужой половины. В происхождении оно
+    помечено `зеркало`, а не `измерено`, — считать его замером нельзя.
+
+    Кость, не измеренная ни у цели (даже через зеркало), ни у донора,
+    множителя не получает вовсе: это третий исход, и он называется вслух.
+    """
+    factors: dict = {}
+    origin: dict = {}
+    if not driving:
+        for key in BONE_TO_PROPORTION.values():
+            origin[key] = "донор не измерен"
+        return factors, origin
+    for key in BONE_TO_PROPORTION.values():
+        donor = (driving or {}).get(key)
+        if not donor or donor <= 0:
+            origin[key] = "донор не измерен"
+            continue
+        mine, how = (target or {}).get(key), "измерено"
+        if not mine:
+            mine, how = (target or {}).get(mirror_key(key)), "зеркало"
+        if not mine or mine <= 0:
+            origin[key] = "цель не измерена"
+            continue
+        factor = float(mine) / float(donor)
+        if not MIN_RETARGET_FACTOR <= factor <= MAX_RETARGET_FACTOR:
+            origin[key] = f"отброшен множитель {factor:.2f}"
+            continue
+        factors[key] = factor
+        origin[key] = how
+    return factors, origin
+
+
+def retarget(points: dict, proportions: dict, *, driving: dict | None = None,
              min_visibility: float = 0.5) -> dict:
     """Rescale bone lengths to the target's proportions, keeping directions.
 
     `proportions` is `metrics.body_metrics()["proportions"]` — 3D ratios in
     torso lengths, which is why they had to be measured in 3D: a projected
     ratio would carry the reference photo's camera angle into every frame.
+    `driving` — те же ратио, но у донора; чем они здесь, объяснено в
+    `retarget_plan`.
 
     Directions come from the driving pose (that is the motion), lengths from the
     target (that is the body). Walking outward from the hips means a rescaled
     upper arm carries the forearm and hand with it, instead of detaching them.
+
+    Без `driving` не ретаргетится НИЧЕГО: не с чем сравнить, а прежнее «поставить
+    абсолютную длину» стирало ракурс (см. `retarget_plan`). Молчаливая замена
+    движения на неподвижную анатомию хуже отсутствия ретаргета, потому что
+    выглядит как работа.
     """
     import numpy as np
 
-    if not proportions:
-        return dict(points)
-    neck, hip_c = points.get("neck"), points.get("hip_c")
-    if neck is None or hip_c is None:
-        return dict(points)
-    torso = float(np.hypot(neck[0] - hip_c[0], neck[1] - hip_c[1]))
-    if torso < 1e-6:
+    factors, _ = retarget_plan(proportions, driving)
+    if not factors:
         return dict(points)
 
     out = {k: tuple(v) for k, v in points.items()}
     for parent, child in BONE_TREE:
         key = BONE_TO_PROPORTION.get((parent, child))
-        if key is None or key not in proportions:
+        if key is None or key not in factors:
             continue
         p, c = out.get(parent), out.get(child)
         if p is None or c is None or c[2] < min_visibility:
@@ -231,14 +319,55 @@ def retarget(points: dict, proportions: dict, *,
         length = float(np.linalg.norm(vec))
         if length < 1e-6:
             continue
-        target = float(proportions[key]) * torso
-        shift = vec / length * (target - length)
+        shift = vec / length * (length * factors[key] - length)
         # Move the child and everything hanging off it, so the limb stays whole.
         for name in _descendants(child):
             if name in out:
                 x, y, v = out[name]
                 out[name] = (x + shift[0], y + shift[1], v)
     return out
+
+
+def driving_proportions(frames: list, *, every: int = 1) -> tuple:
+    """Телосложение донора по его же кадрам. -> (пропорции, сколько кадров).
+
+    Медиана по кадрам, а не значение с одного: 3D-оценка MediaPipe шумит от
+    кадра к кадру, и одиночный кадр с рукой за спиной даст множитель, которым
+    потом растянется вся последовательность. ИЗМЕРЕНО: медиана по каждому
+    второму кадру отходит от медианы по всем на 0.79%, по каждому пятому — на
+    3.03%.
+
+    Считает MediaPipe — тот же, что потом СУДИТ позу. Здесь это допустимо и
+    вот почему: он не выбирает, куда ставить сустав (это DWPose), а измеряет
+    ДЛИНЫ КОСТЕЙ донора, то есть величину, которой гейт не пользуется вовсе.
+    3D-ландмарки нужны именно потому, что 2D-длина несёт ракурс, а нам нужна
+    анатомия.
+    """
+    import statistics
+
+    from . import pose
+
+    seen: dict = {}
+    used = 0
+    for f in frames[::max(1, every)]:
+        try:
+            p = pose.world_proportions(f)
+        except Exception:  # noqa: BLE001
+            # Нечитаемый кадр — это минус один замер, а не отказ измерения:
+            # сколько кадров реально сложилось, возвращается вторым значением
+            # и попадает в манифест, а порог `MIN_DRIVING_FRAMES` не даст
+            # выдать медиану по остаткам за телосложение.
+            continue
+        if not p:
+            continue
+        used += 1
+        for key in BONE_TO_PROPORTION.values():
+            if p.get(key):
+                seen.setdefault(key, []).append(float(p[key]))
+    if used < MIN_DRIVING_FRAMES:
+        return {}, used
+    return ({k: round(statistics.median(v), 4)
+             for k, v in seen.items() if len(v) >= MIN_DRIVING_FRAMES}, used)
 
 
 def _descendants(joint: str) -> list:
@@ -500,7 +629,8 @@ def _extractor(source=None):
 def render_sequence(frames: list, out_dir: str | Path, *,
                     proportions: dict | None = None, width: int = 512,
                     height: int = 768, source=None,
-                    framing: str = "full_body") -> dict:
+                    framing: str = "full_body",
+                    donor: dict | None = None) -> dict:
     """A whole driving segment -> a folder of condition images.
 
     Returns the manifest a GPU run consumes, including `coverage` — the share of
@@ -517,6 +647,13 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     числу. Умолчание `full_body` сохраняет прежнее поведение; на потолке
     512x768 оно почти наверняка даст непроверяемую идентичность, и манифест
     скажет об этом прямо, вместе с тем, что дала бы кадрировка по пояс.
+
+    `donor` — телосложение ЧЕЛОВЕКА ИЗ ВИДЕО. Без него ретаргет не с чем
+    сравнивать (см. `retarget_plan`), поэтому по умолчанию оно измеряется прямо
+    здесь, по тем же кадрам. Манифест несёт происхождение КАЖДОЙ кости:
+    измерена, взята зеркалом или осталась донорской. Флага «retargeted: true»
+    для этого мало — на портретной рефке он был правдой ровно на три кости из
+    восьми, а читался как «тело перенесено».
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -531,13 +668,17 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     # иначе после пропусков соответствие уже не восстановить.
     driving: dict = {}
     extract, source_name = _extractor(source)
+    donor_frames = None
+    if proportions and donor is None:
+        donor, donor_frames = driving_proportions(frames)
+    factors, origin = retarget_plan(proportions, donor) if proportions else ({}, {})
     for i, f in enumerate(frames):
         pts = extract(f)
         if pts is None:
             missing.append(i)
             continue
-        if proportions:
-            pts = retarget(pts, proportions)
+        if factors:
+            pts = retarget(pts, proportions, driving=donor)
         # Сколько суставов реально попало в условие. Кадр со скелетом ещё не
         # означает скелет ЦЕЛИКОМ: невидимый локоть выбрасывает вместе с собой
         # предплечье, и в этом кадре рука ничем не ограничена. Поймано глазами
@@ -574,8 +715,16 @@ def render_sequence(frames: list, out_dir: str | Path, *,
     manifest = {
         "conditions": made, "missing_frames": missing, "coverage": coverage,
         "joint_coverage": joint_cover, "partial_frames": partial,
-        "size": [width, height], "retargeted": bool(proportions),
+        "size": [width, height], "retargeted": bool(factors),
         "source": source_name,
+        # Ретаргет ПОКОСТНО, а не одним флагом. «retargeted: true» на
+        # портретной рефке был правдой ровно на три кости из восьми, и читался
+        # как «тело перенесено целиком». Здесь видно, чего это стоило: где
+        # замер, где зеркало, а где кость осталась донорской.
+        "retarget_factors": factors,
+        "retarget_origin": origin,
+        "donor_proportions": donor or {},
+        "donor_frames_measured": donor_frames,
         # Кадрировка и её цена в пикселях лица. `face_share_by_framing` — обе
         # кадрировки сразу: вызывающий выбирает, ещё не заплатив за генерацию.
         "framing": framing,
@@ -614,6 +763,31 @@ def render_sequence(frames: list, out_dir: str | Path, *,
         manifest["warnings"].append(
             "not retargeted: these are the DRIVING person's proportions, so "
             "the output will carry their body, not the target's.")
+    elif not factors:
+        manifest["warnings"].append(
+            f"телосложение с фото ЗАДАНО, но НЕ ПРИМЕНЕНО ни к одной кости: "
+            f"{'; '.join(sorted(set(origin.values()))) or 'причина не записана'}"
+            f". Условия несут тело донора. Чаще всего это значит, что "
+            f"телосложение донора не измерилось: годных кадров "
+            f"{donor_frames if donor_frames is not None else '?'} при "
+            f"необходимых {MIN_DRIVING_FRAMES}.")
+    else:
+        # Кости, оставшиеся донорскими, и кости, взятые зеркалом, — два разных
+        # признания, и оба обязаны прозвучать. Первое означает чужое тело в
+        # кадре, второе — допущение о симметрии, которое замером не является.
+        kept = sorted(k for k, v in origin.items() if k not in factors)
+        mirrored = sorted(k for k, v in origin.items() if v == "зеркало")
+        if kept:
+            manifest["warnings"].append(
+                f"{len(kept)} из {len(BONE_TO_PROPORTION)} костей остались "
+                f"ДОНОРСКИМИ ({', '.join(kept)}): "
+                + "; ".join(f"{k} — {origin[k]}" for k in kept)
+                + ". В этих местах в кадре тело человека из видео, а не с фото.")
+        if mirrored:
+            manifest["warnings"].append(
+                f"{len(mirrored)} кост(и) взяты ЗЕРКАЛОМ измеренной стороны "
+                f"({', '.join(mirrored)}): это допущение о двусторонней "
+                f"симметрии, а не замер. Рефка показывает одну сторону.")
     # ЛИЦО. Три исхода, и они не сводятся к двум.
     if made and share is None:
         manifest["warnings"].append(

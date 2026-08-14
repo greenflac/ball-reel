@@ -724,3 +724,89 @@ class OneFrameIsJudgedByONEBar(unittest.TestCase):
             [f for n, f in inspect.getmembers(run_local, inspect.isfunction)
              if n == "run_verdict"][0])
         self.assertIn("rows", sig.parameters)
+
+
+class ThePreflightHasThreeOutcomesToo(unittest.TestCase):
+    """«Не смогли проверить» — не отказ и не галочка.
+
+    Предполёт научился отвечать третьим исходом (нет `nvidia-smi`, минорная
+    совместимость CUDA, не спросить размер весов), а `run_local` схлопывал его
+    обратно: `if not ok` останавливал прогон на None наравне с отказом. То есть
+    прогон на Apple или в контейнере без smi отменялся по причине «мы не
+    знаем». Та же форма дефекта, что уже ловили в позе и в жидкости.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+
+    @staticmethod
+    def _probe(label, ok):
+        return (label, lambda: (ok, label, f"деталь {label}"))
+
+    def test_unmeasured_does_not_stop_the_run(self):
+        stopped, unknown = self.r.preflight_verdict([
+            self._probe("драйвер", None), self._probe("vram", True)])
+        self.assertIsNone(stopped)
+        self.assertEqual(unknown, ["драйвер"])
+
+    def test_a_real_failure_still_stops_and_is_named(self):
+        stopped, _ = self.r.preflight_verdict([
+            self._probe("пакеты", False), self._probe("torch", True)])
+        self.assertEqual(stopped, "пакеты")
+
+    def test_the_run_stops_at_the_first_failure_not_after_all_of_them(self):
+        # Дорогое не начинается, пока дешёвое красное: `лицо` стоит 7 секунд.
+        called = []
+
+        def watch(label, ok):
+            def fn():
+                called.append(label)
+                return ok, label, ""
+            return label, fn
+
+        self.r.preflight_verdict([watch("пакеты", False), watch("лицо", True)])
+        self.assertEqual(called, ["пакеты"])
+
+    def test_unmeasured_before_a_failure_is_still_reported(self):
+        # Иначе отказ съедает признание «а вот это мы не проверяли вовсе».
+        stopped, unknown = self.r.preflight_verdict([
+            self._probe("драйвер", None), self._probe("веса", False)])
+        self.assertEqual(stopped, "веса")
+        self.assertEqual(unknown, ["драйвер"])
+
+    def test_a_broken_check_is_a_failure_not_a_crash(self):
+        def boom():
+            raise RuntimeError("сама проверка сломалась")
+
+        stopped, _ = self.r.preflight_verdict([("диск", boom)])
+        self.assertEqual(stopped, "диск")
+
+    def test_packages_are_checked_before_torch_and_the_face(self):
+        """Порядок по цене, замеренный: 1 мс против 2.4 с против 7 с.
+
+        Проверяется по исходнику `main()`, потому что сам список собирается
+        внутри неё, а обойти его дороже, чем прочитать.
+        """
+        import inspect
+
+        from ball_reel import run_local
+
+        src = inspect.getsource(run_local.main)
+        order = [src.index(f'("{n}"') for n in ("пакеты", "torch", "лицо")]
+        self.assertEqual(order, sorted(order), "дешёвое обязано идти раньше")
+
+    def test_peft_is_checked_on_the_chain_engine_too(self):
+        # У animatediff его ловит animate.preflight; в цепочке FaceID-LoRA
+        # цепляется тем же peft, а без него diffusers НЕ ПАДАЕТ — грузит
+        # модель без адаптера и рапортует успех.
+        import inspect
+
+        from ball_reel import preflight_gpu, run_local
+
+        self.assertIn("check_packages", inspect.getsource(run_local.main))
+        # Проверка обязана НАЗЫВАТЬ peft в любом исходе: и когда он есть, и
+        # когда нет. Иначе читатель не узнает, что именно проверили.
+        _, _, detail = preflight_gpu.check_packages()
+        self.assertIn("peft", detail.lower())

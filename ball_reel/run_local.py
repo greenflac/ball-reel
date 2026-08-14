@@ -91,6 +91,38 @@ def _say(step: str, ok, detail: str = "") -> None:
           f"{step:<22} {detail}")
 
 
+def preflight_verdict(probes: list) -> tuple:
+    """Прогнать проверки по порядку. -> (на чём остановились, непроверенное).
+
+    ТРИ ИСХОДА, а не два. Проверка возвращает None, когда не смогла ответить:
+    нет `nvidia-smi` (на Apple его и не должно быть), минорная совместимость
+    CUDA, не спросить размер весов. Здесь стояло `if not ok`, и None
+    останавливал прогон наравне с отказом — «не знаю» подавалось как «плохо».
+    Обратная ошибка не лучше: покрасить None в зелёное значит спрятать
+    непроверенное под галочкой.
+
+    Поэтому непроверенное копится и возвращается отдельным списком, а
+    останавливает прогон только настоящий отказ. Живёт функцией, а не телом
+    `main()`, ровно по этой причине: внутри `main()` до этой развилки не
+    добирался ни один тест, и она молча стояла в двух исходах.
+
+    Порядок в `probes` — это цена: дешёвое раньше дорогого, чтобы отсутствующий
+    пакет (1 мс) не находился после импорта torch (2.4 с) и загрузки лица (7 с).
+    """
+    unknown: list = []
+    for label, fn in probes:
+        try:
+            ok, _, detail = fn()
+        except Exception as e:  # noqa: BLE001
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        _say(label, ok, detail[:96])
+        if ok is None:
+            unknown.append(label)
+        elif not ok:
+            return label, unknown
+    return None, unknown
+
+
 def run_verdict(rows: list) -> tuple:
     """Строки гейта -> (код возврата, пояснение). Чистая функция.
 
@@ -1023,8 +1055,10 @@ def main(argv: list) -> int:
             _say("длительность", True, seconds_note)
 
     # 1 -------------------------------------------------------------- предполёт
-    from .preflight_gpu import (check_conditions, check_disk, check_face,
-                                check_gateway, check_pose_model, check_torch,
+    from .preflight_gpu import (check_conditions, check_disk, check_driver_build,
+                                check_driving, check_face, check_face_model,
+                                check_ffmpeg, check_gateway, check_packages,
+                                check_pose_model, check_smi, check_torch,
                                 check_vram, check_weights)
 
     if animatediff:
@@ -1043,21 +1077,30 @@ def main(argv: list) -> int:
             return _stop("предполёт не пройден — чинить и запускать заново")
         probes = [("диск", lambda: check_disk("."))]
     else:
-        probes = [("диск", lambda: check_disk(".")), ("torch", check_torch)]
+        # `peft` в этой ветке не проверяет НИЧТО: у animatediff его ловит
+        # `animate.preflight`, а здесь FaceID-LoRA прицепляется той же самой
+        # библиотекой — и без неё diffusers не падает, а молча грузит модель
+        # без адаптера. Поэтому `пакеты` идут первой строкой: 1 мс на
+        # `find_spec`, и это дешевле всего остального предполёта.
+        probes = [("пакеты", check_packages),
+                  ("диск", lambda: check_disk(".")), ("torch", check_torch),
+                  ("драйвер", check_smi),
+                  ("драйвер/сборка", check_driver_build)]
     probes += [("vram", check_vram), ("веса", check_weights),
+               ("ffmpeg", check_ffmpeg),
                ("модель позы", check_pose_model),
+               ("модель лица", check_face_model),
                ("условия", lambda: check_conditions(args.conditions)),
+               ("driving-кадры", lambda: check_driving(args.conditions)),
                ("лицо", lambda: check_face(args.face))]
     if not animatediff:
         probes.append(("шлюз", check_gateway))
-    for label, fn in probes:
-        try:
-            ok, _, detail = fn()
-        except Exception as e:  # noqa: BLE001
-            ok, detail = False, f"{type(e).__name__}: {e}"
-        _say(label, ok, detail[:96])
-        if not ok:
-            return _stop("предполёт не пройден — чинить и запускать заново")
+    stopped, unknown = preflight_verdict(probes)
+    if unknown:
+        print(f"\nНЕПРОВЕРЕНО (это не «в порядке»): {', '.join(unknown)}. "
+              f"Прогон продолжается, но эти строки ничего не подтвердили.")
+    if stopped:
+        return _stop("предполёт не пройден — чинить и запускать заново")
 
     import glob
 

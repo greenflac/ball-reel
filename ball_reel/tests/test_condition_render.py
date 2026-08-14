@@ -53,11 +53,20 @@ class RetargetingChangesLengthsNotDirections(unittest.TestCase):
 
         return float(np.hypot(pts[b][0] - pts[a][0], pts[b][1] - pts[a][1]))
 
+    #: Телосложение донора: все восемь костей, каждая по половине торса.
+    DONOR = {k: 0.5 for k in
+             ("l_shoulder->l_elbow", "l_elbow->l_wrist",
+              "r_shoulder->r_elbow", "r_elbow->r_wrist",
+              "l_hip->l_knee", "l_knee->l_ankle",
+              "r_hip->r_knee", "r_knee->r_ankle")}
+
     def test_a_longer_target_upper_arm_lengthens_that_bone(self):
         pts = _points()
-        torso = self._bone(pts, "hip_c", "neck")
         before = self._bone(pts, "l_shoulder", "l_elbow")
-        out = self.s.retarget(pts, {"l_shoulder->l_elbow": before / torso * 2})
+        out = self.s.retarget(pts, {"l_shoulder->l_elbow": 1.0},
+                              driving=self.DONOR)
+        # Цель вдвое длиннее донора (1.0 против 0.5) -> кость вдвое длиннее В
+        # КАДРЕ, какой бы она в кадре ни была.
         self.assertAlmostEqual(self._bone(out, "l_shoulder", "l_elbow"),
                                before * 2, places=3)
 
@@ -65,11 +74,9 @@ class RetargetingChangesLengthsNotDirections(unittest.TestCase):
         # If only the elbow moved, the forearm would stretch to compensate and
         # the hand would stay put — a detached limb, not a longer arm.
         pts = _points()
-        torso = self._bone(pts, "hip_c", "neck")
         forearm = self._bone(pts, "l_elbow", "l_wrist")
-        out = self.s.retarget(
-            pts, {"l_shoulder->l_elbow":
-                  self._bone(pts, "l_shoulder", "l_elbow") / torso * 1.5})
+        out = self.s.retarget(pts, {"l_shoulder->l_elbow": 0.75},
+                              driving=self.DONOR)
         self.assertAlmostEqual(self._bone(out, "l_elbow", "l_wrist"),
                                forearm, places=3)
 
@@ -77,12 +84,10 @@ class RetargetingChangesLengthsNotDirections(unittest.TestCase):
         import numpy as np
 
         pts = _points()
-        torso = self._bone(pts, "hip_c", "neck")
         before = np.array([pts["l_elbow"][0] - pts["l_shoulder"][0],
                            pts["l_elbow"][1] - pts["l_shoulder"][1]])
-        out = self.s.retarget(
-            pts, {"l_shoulder->l_elbow":
-                  self._bone(pts, "l_shoulder", "l_elbow") / torso * 1.7})
+        out = self.s.retarget(pts, {"l_shoulder->l_elbow": 0.85},
+                              driving=self.DONOR)
         after = np.array([out["l_elbow"][0] - out["l_shoulder"][0],
                           out["l_elbow"][1] - out["l_shoulder"][1]])
         cos = float(np.dot(before, after)
@@ -91,12 +96,107 @@ class RetargetingChangesLengthsNotDirections(unittest.TestCase):
 
     def test_no_proportions_is_a_no_op(self):
         pts = _points()
-        self.assertEqual(self.s.retarget(pts, {}), dict(pts))
+        self.assertEqual(self.s.retarget(pts, {}, driving=self.DONOR),
+                         dict(pts))
 
     def test_an_invisible_joint_is_not_moved(self):
         pts = _points(l_elbow=(0.62, 0.40, 0.1))
-        out = self.s.retarget(pts, {"l_shoulder->l_elbow": 5.0})
+        out = self.s.retarget(pts, {"l_shoulder->l_elbow": 1.0},
+                              driving=self.DONOR)
         self.assertEqual(out["l_elbow"], pts["l_elbow"])
+
+    def test_the_same_body_leaves_the_pose_untouched(self):
+        """Донор и цель совпали -> условия обязаны не измениться ВОВСЕ.
+
+        Самая дешёвая проверка того, что ретаргет переносит ТЕЛО, а не
+        перерисовывает позу. Прежний код это заваливал: он ставил кости в
+        абсолютную длину `пропорция * торс`, и одинаковые тела всё равно
+        получали выпрямленную, лишённую ракурса фигуру.
+        """
+        # Нога уходит в камеру: в кадре она втрое короче анатомической.
+        pts = _points(l_knee=(0.56, 0.62, 1.0), l_ankle=(0.57, 0.68, 1.0))
+        out = self.s.retarget(pts, dict(self.DONOR), driving=self.DONOR)
+        for joint in ("l_knee", "l_ankle", "l_wrist", "r_wrist"):
+            self.assertAlmostEqual(out[joint][0], pts[joint][0], places=9)
+            self.assertAlmostEqual(out[joint][1], pts[joint][1], places=9)
+
+    def test_foreshortening_survives_retargeting(self):
+        """Ракурс — это движение, и ретаргет обязан его сохранить.
+
+        ИЗМЕРЕНО на живом отрезке: длина левого бедра донора гуляет от 0.102 до
+        1.485 длины торса — это нога то в камеру, то вбок. Прежний ретаргет
+        сводил её к 0.597..0.601, то есть к константе, и ControlNet получал
+        «нога отведена вбок» там, где человек шагал вперёд.
+        """
+        near = _points(l_knee=(0.56, 0.60, 1.0), l_ankle=(0.57, 0.64, 1.0))
+        side = _points(l_knee=(0.75, 0.60, 1.0), l_ankle=(0.90, 0.64, 1.0))
+        target = {"l_hip->l_knee": 0.6}
+        got = []
+        for pts in (near, side):
+            out = self.s.retarget(pts, target, driving=self.DONOR)
+            got.append(self._bone(out, "l_hip", "l_knee"))
+        # Тот же множитель на обоих кадрах, а не одна и та же длина.
+        self.assertNotAlmostEqual(got[0], got[1], places=3)
+        self.assertAlmostEqual(got[0] / self._bone(near, "l_hip", "l_knee"),
+                               got[1] / self._bone(side, "l_hip", "l_knee"),
+                               places=6)
+
+    def test_an_unmeasured_side_is_mirrored_not_left_to_the_donor(self):
+        """Портретная рефка даёт одну сторону — вторая обязана взяться зеркалом.
+
+        ИЗМЕРЕНО на `kit/face.jpg`: измеримы 3 кости из 8. Прежний код молча
+        пропускал остальные пять, и в кадре оказывалось тело, у которого левая
+        половина от клиента, а правая от донора. Асимметрия бедра при этом
+        росла с 0.214 до 0.759 доли длины — такого человека не существует.
+        """
+        factors, origin = self.s.retarget_plan(
+            {"l_hip->l_knee": 0.75}, self.DONOR)
+        self.assertAlmostEqual(factors["l_hip->l_knee"], 1.5, places=6)
+        self.assertAlmostEqual(factors["r_hip->r_knee"], 1.5, places=6)
+        self.assertEqual(origin["l_hip->l_knee"], "измерено")
+        self.assertEqual(origin["r_hip->r_knee"], "зеркало")
+
+    def test_mirroring_is_not_reported_as_measurement(self):
+        # Допущение о симметрии годится для картинки и не годится для отчёта.
+        _, origin = self.s.retarget_plan({"l_elbow->l_wrist": 0.6}, self.DONOR)
+        self.assertNotEqual(origin["r_elbow->r_wrist"], "измерено")
+
+    def test_without_donor_proportions_nothing_is_scaled(self):
+        """Не с чем сравнивать -> не ретаргетим и не притворяемся.
+
+        Прежнее поведение (поставить абсолютную длину) молча утверждало, что
+        длина кости в кадре и есть анатомическая, то есть что ракурса не
+        бывает. Это хуже отсутствия ретаргета, потому что выглядит как работа.
+        """
+        pts = _points()
+        self.assertEqual(self.s.retarget(pts, {"l_hip->l_knee": 0.9}), dict(pts))
+        factors, origin = self.s.retarget_plan({"l_hip->l_knee": 0.9}, None)
+        self.assertEqual(factors, {})
+        self.assertEqual(set(origin.values()), {"донор не измерен"})
+
+    def test_a_bone_the_donor_lacks_stays_the_donors(self):
+        donor = {k: v for k, v in self.DONOR.items() if "knee->" not in k}
+        factors, origin = self.s.retarget_plan(
+            {"l_knee->l_ankle": 0.9, "l_hip->l_knee": 0.6}, donor)
+        self.assertNotIn("l_knee->l_ankle", factors)
+        self.assertEqual(origin["l_knee->l_ankle"], "донор не измерен")
+        self.assertIn("l_hip->l_knee", factors)
+
+    def test_an_absurd_factor_is_refused_rather_than_drawn(self):
+        # Множитель 6 — это не телосложение, а промах детектора на одном из
+        # двух тел. Растянутая втрое нога учит генератор телу, которого нет.
+        factors, origin = self.s.retarget_plan({"l_hip->l_knee": 3.0},
+                                               self.DONOR)
+        self.assertNotIn("l_hip->l_knee", factors)
+        self.assertIn("отброшен", origin["l_hip->l_knee"])
+        self.assertGreater(self.s.MAX_RETARGET_FACTOR, 1.0)
+        self.assertLess(self.s.MIN_RETARGET_FACTOR, 1.0)
+
+    def test_mirror_key_swaps_both_ends_and_leaves_centre_bones(self):
+        self.assertEqual(self.s.mirror_key("l_hip->l_knee"), "r_hip->r_knee")
+        self.assertEqual(self.s.mirror_key("r_elbow->r_wrist"),
+                         "l_elbow->l_wrist")
+        self.assertEqual(self.s.mirror_key("hip_c->neck"), "hip_c->neck")
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy/Pillow not installed (live extra)")
@@ -608,6 +708,58 @@ class ADrawingNeverInventsAJoint(unittest.TestCase):
                                    source=lambda _p: _points())
         self.assertTrue(any("DRIVING person's proportions" in w
                             for w in m["warnings"]))
+
+    #: Донор со всеми восемью костями — чтобы измерять поведение ЦЕЛИ, а не
+    #: полноту донора.
+    DONOR = {k: 0.5 for k in
+             ("l_shoulder->l_elbow", "l_elbow->l_wrist",
+              "r_shoulder->r_elbow", "r_elbow->r_wrist",
+              "l_hip->l_knee", "l_knee->l_ankle",
+              "r_hip->r_knee", "r_knee->r_ankle")}
+
+    def test_the_manifest_names_bones_that_stayed_the_donors(self):
+        """«retargeted: true» — недостаточное признание.
+
+        На живой рефке этот флаг стоял в true, будучи правдой ровно на три
+        кости из восьми: остальные пять несли тело человека из видео. Флаг
+        читался как «тело перенесено» и потому был опаснее прочерка.
+        """
+        # Цель знает только руки; ноги обязаны остаться донорскими и названы.
+        m = self.s.render_sequence(
+            ["a"], self.dir / "seq3", source=lambda _p: _points(),
+            proportions={"l_shoulder->l_elbow": 0.6, "l_elbow->l_wrist": 0.55},
+            donor={k: v for k, v in self.DONOR.items() if "hip->" in k
+                   or "shoulder->" in k or "elbow->" in k})
+        kept = [k for k in self.DONOR if k not in m["retarget_factors"]]
+        self.assertTrue(kept)
+        note = " ".join(m["warnings"])
+        self.assertIn("ДОНОРСКИМИ", note)
+        for bone in kept:
+            self.assertIn(bone, note)
+
+    def test_the_manifest_separates_mirrored_from_measured(self):
+        m = self.s.render_sequence(
+            ["a"], self.dir / "seq4", source=lambda _p: _points(),
+            proportions={"l_hip->l_knee": 0.6}, donor=self.DONOR)
+        self.assertEqual(m["retarget_origin"]["l_hip->l_knee"], "измерено")
+        self.assertEqual(m["retarget_origin"]["r_hip->r_knee"], "зеркало")
+        self.assertTrue(any("ЗЕРКАЛОМ" in w for w in m["warnings"]))
+
+    def test_retargeted_is_false_when_no_bone_was_actually_scaled(self):
+        # Телосложение задано, донор неизмерим -> ни одна кость не тронута, и
+        # флаг обязан это признать, а не отчитаться о намерении.
+        m = self.s.render_sequence(
+            ["a"], self.dir / "seq5", source=lambda _p: _points(),
+            proportions={"l_hip->l_knee": 0.6}, donor={})
+        self.assertFalse(m["retargeted"])
+        self.assertEqual(m["retarget_factors"], {})
+        self.assertTrue(any("НЕ ПРИМЕНЕНО" in w for w in m["warnings"]))
+
+    def test_the_donor_body_is_measured_from_too_few_frames_honestly(self):
+        # Медиана по трём кадрам — это не медиана. Порог назван числом.
+        got, used = self.s.driving_proportions(["a", "b", "c"])
+        self.assertEqual(got, {})
+        self.assertLess(used, self.s.MIN_DRIVING_FRAMES)
 
     def _without_dwpose(self):
         """Машина без весов DWPose — самый частый случай на чужом ноутбуке."""
