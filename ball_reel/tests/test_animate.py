@@ -236,3 +236,56 @@ class MemoryIsPLANNEDBeforeAndMEASUREDAfter(unittest.TestCase):
         if torch.cuda.is_available():
             self.skipTest("карта есть — случай «мерить нечем» не воспроизвести")
         self.assertIsNone(self.a.peak_memory())
+
+
+class FusingQKVWouldDestroyTheIdentityChannel(unittest.TestCase):
+    """Оптимизация памяти, стирающая то, ради чего собран пайплайн.
+
+    ИЗМЕРЕНО НА ЖИВОМ ПРОГОНЕ и воспроизведено на CPU (diffusers 0.39):
+
+        процессоров IP-Adapter до `fuse_qkv_projections()` : 16 из 72
+        после                                              : 0
+        первый шаг генерации  : AttributeError: 'tuple' object has no
+                                attribute 'shape'
+
+    Слияние заменяет ВСЕ процессоры внимания на `FusedAttnProcessor2_0` —
+    включая те шестнадцать, которые и есть канал личности. Падение здесь
+    ПОВЕЗЛО: при активном IP-Adapter diffusers пакует `encoder_hidden_states`
+    в кортеж (текст, эмбеддинг лица), а слитый процессор кортежа не понимает.
+    Не упади оно — вышел бы клип без личности вовсе, и списали бы это на дрейф.
+
+    Проверяется УСЛОВИЕ, а не сам вызов: поднимать веса ради теста нельзя, а
+    решение «сливать или нет» — чистая функция от состава процессоров.
+    """
+
+    def _decide(self, processors, *, fuse_qkv=True):
+        """Тот же предикат, что в `animate.build`, на списке имён классов."""
+        ip = sum(1 for name in processors if "IPAdapter" in name)
+        return bool(fuse_qkv and not ip), ip
+
+    def test_fusing_is_skipped_when_the_adapter_is_attached(self):
+        fuse, ip = self._decide(["IPAdapterAttnProcessor2_0"] * 16
+                                + ["AttnProcessor2_0"] * 56)
+        self.assertEqual(ip, 16)
+        self.assertFalse(fuse, "слияние затёрло бы канал личности")
+
+    def test_fusing_still_happens_without_the_adapter(self):
+        """Без адаптера экономия памяти бесплатна и остаётся в силе."""
+        fuse, ip = self._decide(["AttnProcessor2_0"] * 72)
+        self.assertEqual(ip, 0)
+        self.assertTrue(fuse)
+
+    def test_the_flag_still_wins_when_switched_off(self):
+        fuse, _ = self._decide(["AttnProcessor2_0"] * 72, fuse_qkv=False)
+        self.assertFalse(fuse)
+
+    def test_build_decides_by_processors_not_by_a_try_except(self):
+        """Ловить исключение было бы поздно: процессоры уже затёрты."""
+        import inspect
+
+        from ball_reel import animate
+
+        src = inspect.getsource(animate.build)
+        self.assertIn("IPAdapter", src,
+                      "решение принимается не по составу процессоров")
+        self.assertIn("ПРОПУЩЕНО", src)

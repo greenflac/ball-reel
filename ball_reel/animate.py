@@ -422,7 +422,33 @@ def build(cfg: Plan, *, motion_lora: str | None = None,
     # diffusers сам уводит его с карты после кодирования промта. Ручная
     # выгрузка была бы вторым способом сделать одно и то же — а это ровно тот
     # источник расхождений, который в этом проекте уже дважды кусался.
-    if getattr(cfg, "fuse_qkv", False) and hasattr(pipe, "fuse_qkv_projections"):
+    # СЛИЯНИЕ QKV НЕСОВМЕСТИМО С IP-ADAPTER, и это стоило первого живого
+    # прогона на карте. ИЗМЕРЕНО (repro на CPU, diffusers 0.39):
+    #
+    #     процессоров IP-Adapter до слияния : 16 из 72
+    #     после `fuse_qkv_projections()`    : 0
+    #     первый же шаг генерации           : AttributeError: 'tuple' object
+    #                                         has no attribute 'shape'
+    #
+    # Слияние заменяет ВСЕ процессоры внимания на `FusedAttnProcessor2_0`,
+    # включая те 16, которые и есть канал личности. Падение здесь — удача:
+    # при активном IP-Adapter diffusers пакует `encoder_hidden_states` в
+    # кортеж (текст, эмбеддинг лица), а слитый процессор кортежа не понимает.
+    # Не упади оно — мы бы получили клип БЕЗ личности вовсе и списали бы это
+    # на «дрейф».
+    #
+    # Поэтому слияние не «пробуем и ловим исключение», а ОТКЛЮЧАЕТСЯ по факту
+    # наличия адаптера: экономия памяти не стоит того, ради чего собран весь
+    # пайплайн.
+    ip_processors = sum(1 for p in pipe.unet.attn_processors.values()
+                        if "IPAdapter" in type(p).__name__)
+    if getattr(cfg, "fuse_qkv", False) and ip_processors:
+        if verbose:
+            print(f"  слияние QKV ПРОПУЩЕНО: оно затирает {ip_processors} "
+                  f"процессоров IP-Adapter, то есть весь канал личности "
+                  f"(измерено: 16 -> 0). Памяти это стоит немного, личности — "
+                  f"всего")
+    elif getattr(cfg, "fuse_qkv", False) and hasattr(pipe, "fuse_qkv_projections"):
         try:
             pipe.fuse_qkv_projections()
         except Exception as exc:                 # не все блоки это умеют
