@@ -537,7 +537,11 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 - `fluid_stats(region) -> dict | None`, `hand_region(image_path, points, *, side="l")`, `realism_shift(before, after, reference=None) -> dict`.
 
 **`dataset.py`** — датасет для LoRA личности
-- `plan(target=20, *, price_per_image=0.035, overshoot=OVERSHOOT) -> dict`, `variations`, `prompt_for`, `caption_for(row, trigger)`, `augmentations`.
+- `plan(target=20, *, price_per_image=0.035, overshoot=OVERSHOOT) -> dict`, `variations`, `prompt_for`, `augmentations`.
+- **Подписи строятся ЗАМЕРОМ, а не запросом:** `measure_frame(path) -> dict` (кадрировка по скелету, свет по пикселям), `caption_from_measure(m, trigger)`, `caption_from_frame(path, trigger)`, `caption_samples(samples, trigger)`. `caption_for(row, trigger)` осталась, но записывает ЗАПРОС и обучающей подписью НЕ является: генератор часть запроса игнорирует, и подпись из намерения уводит от триггера то, чего в кадре нет.
+- `check_caption(text) -> (исход, что поймано)` — запретный список постоянных признаков (`FORBIDDEN`) кодом, а не комментарием. Три исхода: `CAPTION_OK`, `CAPTION_NAMES_CONSTANT`, `CAPTION_UNCHECKED`.
+- **Ракурс ИЗМЕРЕН и ВЫБРОШЕН.** Отношение (плечи/торс в кадре) к (плечи/торс в 3D) на 71 кадре, где человек всё время лицом в камеру, гуляет 0.9037..1.2210 — то есть шум оценщика ±0.16 на НЕПОДВИЖНОМ ракурсе, а обрезка того же кадра сдвигает число на 43% при нулевом изменении позы. Анфас от полуоборота отличает cos 45° = 0.707, значит граница легла бы внутрь шума. Ракурс не подписывается; число возвращается в свидетельстве, чтобы границу провели по замеру, когда появятся кадры с настоящим полуоборотом.
+- **Место (`place`) не называется вовсе** — измерить его нечем. Цена сказана вслух: неназванный переменный фактор липнет к триггеру, то есть фон не контролируется.
 - `select(samples, *, bar, min_kept=MIN_DATASET) -> dict`.
 - `independence_report(*, generator, selector, judge) -> dict` — формальная проверка того, что ArcFace не участвует в порождении датасета. Ради неё модуль и написан.
 - `manifest(samples, *, trigger, judge, selector, generator) -> dict`.
