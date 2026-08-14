@@ -745,6 +745,16 @@ def build_parser():
                          "не с чем сравнивать её влияние")
     ch.add_argument("--lora-weight", default="",
                     help="имя файла внутри repo, если их там несколько")
+    ch.add_argument("--train-lora", default="",
+                    help="каталог набора (`ball_reel.dataset --out`): обучить "
+                         "LoRA личности ЗДЕСЬ ЖЕ и прицепить её к этому "
+                         "прогону. Обучение — ступень пайплайна, а не "
+                         "подготовка руками: адаптер, обученный вчера на "
+                         "другом наборе, выглядит в отчёте так же, как "
+                         "обученный на этом")
+    ch.add_argument("--train-epochs", type=int, default=10,
+                    help="проходов по набору при --train-lora; потолок шагов "
+                         "всё равно ставит план `lora.config`")
     ch.add_argument("--lora-scale", type=float, default=0.7,
                     help="сила LoRA; ближе к 1.0 она начинает перебивать лицо")
     ap.add_argument("--garment-ref", default="",
@@ -849,6 +859,46 @@ def clip_gate(frames: list, face: str, points: list, clock=None, *,
             act = action_match(frames, driving_paths)
     rows = clip_verdict(drift, seam, quality, limbs, gclip, act)
     return [r for r in rows if garment or r["label"] != "одежда"]
+
+
+def train_subject_lora(args, out, clock=None) -> dict:
+    """Ступень обучения внутри прогона: набор -> адаптер -> путь для `animate`.
+
+    Отдельной функцией, а не строчками в `main`, по одной причине: её надо
+    уметь проверить без карты. Здесь всё, что можно решить до весов —
+    предполёт набора и куда лечь результату, — и ровно один вызов, который
+    требует железа.
+
+    ЛОСС НИЧЕГО НЕ ДОКАЗЫВАЕТ. Он падает и у адаптера, выучившего фон. Поэтому
+    возвращается не «обучилось успешно», а число шагов и кто их ограничил:
+    сорок шагов вместо тысячи двухсот — это не успех, и по строке отчёта это
+    должно быть видно сразу.
+    """
+    from contextlib import nullcontext
+
+    from .lora import config
+    from .timing import PER_RUN
+    from .train import preflight as train_preflight, train as train_lora
+
+    cfg = config(args.vram)
+    rep = train_preflight(args.train_lora, cfg)
+    if not rep["ok"]:
+        bad = "; ".join(c["detail"] for c in rep["checks"] if not c["ok"])
+        cure = ("\nЛЕЧЕНИЕ: " + "; ".join(rep["notes"])) if rep["notes"] else ""
+        return {"ok": False,
+                "note": f"предполёт обучения не пройден: {bad}{cure}"}
+
+    dst = Path(out) / "lora"
+    stage = (clock.stage("train_lora", per=PER_RUN) if clock
+             else nullcontext())
+    with stage:
+        got = train_lora(args.train_lora, dst, cfg, epochs=args.train_epochs)
+    if not got["ok"]:
+        return got
+    return {"ok": True, "out": str(dst), "steps": got["steps"],
+            "note": (f"{got['steps']} шагов ({got['bound']} ограничил), ранг "
+                     f"{cfg.rank}, лосс {got['loss_first']} -> "
+                     f"{got['loss_last']}")}
 
 
 def _face_box(path: str):
@@ -1244,6 +1294,29 @@ def main(argv: list) -> int:
               f"Прогон продолжается, но эти строки ничего не подтвердили.")
     if stopped:
         return _stop("предполёт не пройден — чинить и запускать заново")
+
+    # 1.5 ------------------------------------------------- обучение LoRA личности
+    # ЗДЕСЬ, а не отдельной командой накануне. Продуктовое требование — своя
+    # обученная LoRA, и «обучить заранее» ломает связь между адаптером и
+    # прогоном: в отчёте оба выглядят одинаково, а обучен адаптер мог быть на
+    # другом наборе, другим рангом, месяц назад.
+    #
+    # Стоит эта ступень десятки минут на карте, поэтому она НЕ по умолчанию:
+    # порядок разбора остаётся прежним — сначала прогон без адаптера, потом с
+    # ним, по одному неизвестному за раз.
+    if args.train_lora:
+        if args.lora:
+            _say("LoRA", False, "заданы и --lora, и --train-lora")
+            return _stop("два источника адаптера в одном прогоне: --lora берёт "
+                         "готовый, --train-lora обучает свой. Какой из них "
+                         "оказался в кадре, отчёт потом не различит — выбрать "
+                         "один.")
+        lora_out = train_subject_lora(args, out, clock)
+        if not lora_out["ok"]:
+            _say("обучение LoRA", False, lora_out["note"][:96])
+            return _stop(lora_out["note"])
+        _say("обучение LoRA", True, lora_out["note"][:96])
+        args.lora = lora_out["out"]
 
     import glob
 

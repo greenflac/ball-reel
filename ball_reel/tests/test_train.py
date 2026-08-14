@@ -1,0 +1,482 @@
+"""Обучение, в котором ничего не обучается, идёт неотличимо от настоящего.
+
+Цикл на карте здесь не проверяется: GPU в среде разработки нет, и всё, что
+касается весов, помечено НЕПРОВЕРЕНО в шапке `train`. Проверяется то, что
+можно проверить без карты, — и это ровно те места, где отказ МОЛЧАЛИВ:
+
+* набор без подписи не должен доехать до цикла (тренер с пустой подписью
+  учится успешно и тянет на триггер фон);
+* число шагов должно учитывать повторы, иначе расписание короче заявленного;
+* план и набор дают два разных числа шагов, и в отчёт обязано попасть, какое
+  из них ограничило;
+* повторы должны быть частотой по проходу, а не серией подряд;
+* нулевая доля обучаемых параметров обязана быть ОТКАЗОМ, а не примечанием.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from ball_reel import train
+
+
+def _dataset(tmp: Path, *, n: int = 3, caption: str = "ohwx_person, portrait",
+             repeats: int = 1, drop_caption: bool = False) -> Path:
+    root = tmp / "ds"
+    root.mkdir(parents=True, exist_ok=True)
+    samples = []
+    for i in range(n):
+        img = root / f"{i:04d}.png"
+        img.write_bytes(b"not-a-real-png")  # содержимое не читается этими тестами
+        samples.append({"path": str(img),
+                        "caption": "" if drop_caption and i == 0 else caption,
+                        "repeats": repeats, "origin": "real"})
+    (root / "manifest.json").write_text(
+        json.dumps({"samples": samples}), encoding="utf-8")
+    return root
+
+
+class Cfg:
+    """Минимальный двойник `lora.TrainConfig` — только читаемые здесь поля."""
+
+    def __init__(self, **kw):
+        self.rank = 8
+        self.alpha = 8
+        self.resolution = 512
+        self.batch_size = 1
+        self.optimizer = "AdamW8bit"
+        self.learning_rate = 1e-4
+        self.max_train_steps = 1200
+        self.gradient_checkpointing = True
+        self.seed = 0
+        self.__dict__.update(kw)
+
+
+class LoadPairs(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_reads_path_caption_repeats(self):
+        root = _dataset(self.tmp, n=3, repeats=5)
+        pairs = train.load_pairs(root)
+        self.assertEqual(len(pairs), 3)
+        self.assertTrue(all(r == 5 for _, _, r in pairs))
+        self.assertTrue(all(c for _, c, _ in pairs))
+
+    def test_missing_caption_is_refusal_not_empty_string(self):
+        """Самая тихая ловушка: пустая подпись тянет на триггер фон и свет."""
+        root = _dataset(self.tmp, n=3, drop_caption=True)
+        with self.assertRaises(ValueError) as ctx:
+            train.load_pairs(root)
+        self.assertIn("подпис", str(ctx.exception))
+
+    def test_missing_image_is_refusal(self):
+        root = _dataset(self.tmp, n=2)
+        (root / "0000.png").unlink()
+        with self.assertRaises(ValueError):
+            train.load_pairs(root)
+
+    def test_missing_manifest_names_the_command(self):
+        """Отказ обязан называть лечение: собрать набор нечем угадать."""
+        with self.assertRaises(FileNotFoundError) as ctx:
+            train.load_pairs(self.tmp / "нет-такого")
+        self.assertIn("ball_reel.dataset", str(ctx.exception))
+
+    def test_caption_falls_back_to_txt_beside_image(self):
+        root = _dataset(self.tmp, n=1, caption="")
+        (root / "0000.txt").write_text("ohwx_person, side view", encoding="utf-8")
+        pairs = train.load_pairs(root)
+        self.assertEqual(pairs[0][1], "ohwx_person, side view")
+
+
+class Steps(unittest.TestCase):
+
+    def test_repeats_are_counted_not_ignored(self):
+        """Считать по числу ФАЙЛОВ значит оборвать обучение впятеро раньше."""
+        pairs = [("a", "c", 5), ("b", "c", 1)]
+        self.assertEqual(train.steps_for(pairs, epochs=1), 6)
+        self.assertEqual(train.steps_for(pairs, epochs=10), 60)
+
+    def test_never_zero(self):
+        self.assertGreaterEqual(train.steps_for([("a", "c", 1)], epochs=0), 1)
+
+    def test_batch_divides(self):
+        pairs = [("a", "c", 4)]
+        self.assertEqual(train.steps_for(pairs, epochs=1, batch_size=2), 2)
+
+
+class Budget(unittest.TestCase):
+    """Два числа шагов приходят с разных сторон; отчёт обязан назвать одно."""
+
+    def test_dataset_bounds_when_small(self):
+        pairs = [("a", "c", 5)] * 2          # 10 кадров с повторами
+        got = train.budget(pairs, Cfg(max_train_steps=1200), epochs=2)
+        self.assertEqual(got["steps"], 20)
+        self.assertEqual(got["bound"], "набор")
+
+    def test_plan_caps_when_dataset_would_overrun(self):
+        pairs = [("a", "c", 5)] * 40         # 200 кадров с повторами
+        got = train.budget(pairs, Cfg(max_train_steps=100), epochs=10)
+        self.assertEqual(got["steps"], 100)
+        self.assertEqual(got["bound"], "план")
+        self.assertIn("2000", got["note"])   # сколько дал бы набор — названо
+
+    def test_absent_plan_does_not_cap(self):
+        pairs = [("a", "c", 1)] * 7
+        got = train.budget(pairs, Cfg(max_train_steps=0), epochs=3)
+        self.assertEqual(got["steps"], 21)
+        self.assertEqual(got["bound"], "набор")
+
+
+class Order(unittest.TestCase):
+
+    def test_repeats_become_frequency_not_a_run(self):
+        """Пять шагов Adam подряд по одной картинке — всплеск, а не вес."""
+        pairs = [("real.png", "c", 5)] + [(f"g{i}.png", "c", 1)
+                                          for i in range(15)]
+        flat = train.order(pairs, seed=0)
+        self.assertEqual(len(flat), 20)
+        runs = [p for p, _ in flat]
+        longest, cur = 1, 1
+        for a, b in zip(runs, runs[1:]):
+            cur = cur + 1 if a == b else 1
+            longest = max(longest, cur)
+        self.assertLess(longest, 5, "якорь идёт серией подряд, а не вразбивку")
+
+    def test_deterministic_for_a_seed(self):
+        pairs = [(f"{i}.png", "c", 2) for i in range(9)]
+        self.assertEqual(train.order(pairs, seed=7),
+                         train.order(pairs, seed=7))
+
+    def test_seed_changes_the_order(self):
+        pairs = [(f"{i}.png", "c", 2) for i in range(9)]
+        self.assertNotEqual(train.order(pairs, seed=1),
+                            train.order(pairs, seed=2))
+
+    def test_every_repeat_survives(self):
+        pairs = [("a.png", "c", 5), ("b.png", "c", 1)]
+        flat = train.order(pairs, seed=0)
+        self.assertEqual(sum(1 for p, _ in flat if p == "a.png"), 5)
+        self.assertEqual(sum(1 for p, _ in flat if p == "b.png"), 1)
+
+
+class _P:
+    def __init__(self, n, grad):
+        self.n, self.requires_grad = n, grad
+
+    def numel(self):
+        return self.n
+
+
+class _M:
+    def __init__(self, ps):
+        self._ps = ps
+
+    def parameters(self):
+        return iter(self._ps)
+
+
+class TrainableReport(unittest.TestCase):
+
+    def test_zero_trainable_is_refusal(self):
+        """Цикл отработает, лосс пошумит вниз, веса не изменятся."""
+        got = train.trainable_report(_M([_P(860_000_000, False)]))
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["trainable"], 0)
+
+    def test_wrong_modules_are_refusal(self):
+        """Адаптер на 100 параметрах при 860 млн — сел не на те модули."""
+        got = train.trainable_report(
+            _M([_P(860_000_000, False), _P(100, True)]))
+        self.assertFalse(got["ok"])
+        self.assertIn("to_q", got["note"])
+
+    def test_rank8_attention_lora_passes(self):
+        """Опорный факт порога: около 0.1% при LoRA на проекциях внимания."""
+        got = train.trainable_report(
+            _M([_P(860_000_000, False), _P(1_000_000, True)]))
+        self.assertTrue(got["ok"], got["note"])
+
+    def test_threshold_is_below_the_reference_share_and_above_zero(self):
+        """Пол ловит НОЛЬ и «почти ноль», а не отличает 0.1% от 0.2%."""
+        self.assertGreater(train.MIN_TRAINABLE_SHARE, 0.0)
+        self.assertLess(train.MIN_TRAINABLE_SHARE, 1_000_000 / 860_000_000)
+
+    def test_no_parameters_at_all_is_refusal(self):
+        self.assertFalse(train.trainable_report(_M([]))["ok"])
+
+
+class Preflight(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_bad_dataset_stops_before_anything_else(self):
+        """Дешёвое раньше дорогого: набор читается за миллисекунды."""
+        got = train.preflight(self.tmp / "нет", Cfg())
+        self.assertFalse(got["ok"])
+        self.assertEqual([c["name"] for c in got["checks"]], ["набор"])
+
+    def test_small_dataset_fails_and_names_the_cure(self):
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=max(1, MIN_DATASET - 1))
+        got = train.preflight(root, Cfg())
+        self.assertFalse(got["ok"])
+        size = next(c for c in got["checks"] if c["name"] == "размер")
+        self.assertFalse(size["ok"])
+        self.assertTrue(any("--generated" in n for n in got["notes"]))
+
+    def test_low_resolution_fails(self):
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        got = train.preflight(root, Cfg(resolution=64))
+        self.assertFalse(got["ok"])
+        res = next(c for c in got["checks"] if c["name"] == "разрешение")
+        self.assertFalse(res["ok"])
+
+    def test_full_dataset_passes_and_returns_pairs(self):
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        got = train.preflight(root, Cfg())
+        self.assertEqual(len(got["pairs"]), MIN_DATASET)
+        for name in ("peft", "diffusers", "torch"):
+            c = next(x for x in got["checks"] if x["name"] == name)
+            self.assertTrue(c["ok"], f"{name}: {c['detail']}")
+        self.assertTrue(got["ok"], got["checks"])
+
+    def test_resolution_floor_leaves_room_for_the_planned_512(self):
+        from ball_reel.lora import config
+
+        self.assertLessEqual(train.MIN_RESOLUTION, config(6.0).resolution)
+
+
+class Cli(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_dry_run_never_loads_weights(self):
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        self.assertEqual(train.main(["--dataset", str(root), "--dry-run"]), 0)
+
+    def test_bad_dataset_exits_nonzero(self):
+        self.assertEqual(
+            train.main(["--dataset", str(self.tmp / "нет"), "--dry-run"]), 1)
+
+
+class Stage(unittest.TestCase):
+    """Ступень обучения внутри прогона: всё, что можно проверить без карты."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _args(self, **kw):
+        from types import SimpleNamespace
+
+        base = {"train_lora": "", "train_epochs": 10, "vram": 6.0, "lora": ""}
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_bad_dataset_stops_the_run_before_the_card_is_touched(self):
+        """Отказ обязан прийти до весов: обучение стоит десятки минут."""
+        from ball_reel.run_local import train_subject_lora
+
+        got = train_subject_lora(
+            self._args(train_lora=str(self.tmp / "нет")), self.tmp)
+        self.assertFalse(got["ok"])
+        self.assertIn("предполёт обучения", got["note"])
+
+    def test_small_dataset_stops_and_carries_the_cure(self):
+        from ball_reel.dataset import MIN_DATASET
+        from ball_reel.run_local import train_subject_lora
+
+        root = _dataset(self.tmp, n=max(1, MIN_DATASET - 1))
+        got = train_subject_lora(self._args(train_lora=str(root)), self.tmp)
+        self.assertFalse(got["ok"])
+        self.assertIn("ЛЕЧЕНИЕ", got["note"])
+
+    def test_two_sources_of_an_adapter_are_refused_by_the_cli(self):
+        """--lora и --train-lora вместе: отчёт потом не различит, кто был в кадре."""
+        from ball_reel.run_local import build_parser
+
+        args = build_parser().parse_args(
+            ["--face", "f.jpg", "--prompt", "p", "--lora", "repo/id",
+             "--train-lora", str(self.tmp)])
+        self.assertTrue(args.lora and args.train_lora)  # парсер их пропускает
+        # ...а прогон обязан остановиться на этом сочетании: см. main, шаг 1.5.
+        import inspect
+
+        from ball_reel import run_local
+
+        src = inspect.getsource(run_local.main)
+        self.assertIn("--lora, и --train-lora", src)
+
+
+def _tiny_unet():
+    """Крошечный UNet той же АРХИТЕКТУРЫ, что SD1.5, но на миллион параметров.
+
+    Настоящие веса здесь не нужны и вредны: проверяется не качество обучения, а
+    механика — на что сел адаптер, движутся ли его тензоры, читается ли то, что
+    записано. Всё это одинаково на большой и на маленькой модели, и на
+    маленькой считается за секунды без карты и без сети.
+    """
+    from diffusers import UNet2DConditionModel
+
+    return UNet2DConditionModel(
+        sample_size=8, in_channels=4, out_channels=4, layers_per_block=1,
+        block_out_channels=(32, 64), cross_attention_dim=16, norm_num_groups=32,
+        down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
+        up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
+        attention_head_dim=8)
+
+
+def _with_adapter(unet, rank: int = 8):
+    from peft import LoraConfig
+
+    unet.requires_grad_(False)
+    unet.add_adapter(LoraConfig(r=rank, lora_alpha=rank,
+                                init_lora_weights="gaussian",
+                                target_modules=list(train.TARGET_MODULES)))
+    return unet
+
+
+class Machinery(unittest.TestCase):
+    """Цикл на карте не исполнялся; его МЕХАНИКА исполняется здесь, на CPU.
+
+    Именно тут живут все три молчаливые ловушки из шапки `train`, и ни одну из
+    них нельзя поймать чтением кода: адаптер, севший не туда, выглядит в
+    исходнике так же, как севший туда.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_frozen_model_reads_as_zero_trainable(self):
+        unet = _tiny_unet()
+        unet.requires_grad_(False)
+        self.assertFalse(train.trainable_report(unet)["ok"])
+
+    def test_adapter_on_the_named_modules_unfreezes_a_sane_share(self):
+        got = train.trainable_report(_with_adapter(_tiny_unet()))
+        self.assertTrue(got["ok"], got["note"])
+        self.assertGreater(got["trainable"], 0)
+
+    def test_gradient_checkpointing_is_available_after_the_adapter(self):
+        """Без него план памяти врёт на ~1.5 ГБ — то есть отказ на 6 ГБ."""
+        self.assertTrue(hasattr(_with_adapter(_tiny_unet()),
+                                "enable_gradient_checkpointing"))
+
+    def test_a_step_actually_moves_every_trainable_tensor(self):
+        """Лосс может падать и при замороженном адаптере. Двигаются — веса."""
+        import torch
+
+        unet = _with_adapter(_tiny_unet())
+        before = [p.detach().clone() for p in unet.parameters()
+                  if p.requires_grad]
+        opt = torch.optim.AdamW(
+            [p for p in unet.parameters() if p.requires_grad], lr=1e-3)
+        lat, emb = torch.randn(1, 4, 8, 8), torch.randn(1, 77, 16)
+        noise = torch.randn_like(lat)
+        pred = unet(lat + noise, torch.tensor([10]),
+                    encoder_hidden_states=emb).sample
+        torch.nn.functional.mse_loss(pred, noise).backward()
+        opt.step()
+        after = [p.detach().clone() for p in unet.parameters()
+                 if p.requires_grad]
+        moved = sum(1 for a, b in zip(before, after) if not torch.equal(a, b))
+        self.assertEqual(moved, len(before),
+                         f"из {len(before)} обучаемых тензоров сдвинулось "
+                         f"{moved}: шаг оптимизатора не доходит до адаптера")
+
+    def test_saved_adapter_is_named_as_the_loader_looks_for_it(self):
+        """Каталог с `adapter_model.safetensors` загрузка НЕ найдёт."""
+        from diffusers.loaders.lora_base import LORA_WEIGHT_NAME_SAFE
+
+        self.assertEqual(train.ADAPTER_FILE, LORA_WEIGHT_NAME_SAFE)
+        train.save_adapter(_with_adapter(_tiny_unet()), self.tmp / "out")
+        self.assertTrue((self.tmp / "out" / train.ADAPTER_FILE).exists())
+
+    def test_saved_keys_are_not_wrapped_by_peft(self):
+        """`get_peft_model` уводит имена под `base_model.model.` — и адаптер
+        загружается, ни на что не ложась, молча."""
+        from diffusers import StableDiffusionPipeline
+
+        train.save_adapter(_with_adapter(_tiny_unet()), self.tmp / "out")
+        sd = StableDiffusionPipeline.lora_state_dict(str(self.tmp / "out"))
+        sd = sd[0] if isinstance(sd, tuple) else sd
+        self.assertTrue(sd, "ничего не прочиталось")
+        for k in sd:
+            self.assertTrue(k.startswith("unet."), k)
+            self.assertNotIn("base_model.model.", k)
+
+    def test_round_trip_changes_the_output_it_is_loaded_into(self):
+        """Главный стык: выход обучения обязан быть входом генерации.
+
+        Проверяется не «файл прочитался», а «выход модели изменился». Адаптер с
+        несовпавшими именами читается без ошибки и не меняет НИЧЕГО — ровно тот
+        отказ, который выясняется на демо в первую минуту.
+        """
+        import torch
+        from diffusers import StableDiffusionPipeline
+
+        torch.manual_seed(0)
+        src = _with_adapter(_tiny_unet())
+        for p in src.parameters():
+            if p.requires_grad:
+                p.data.add_(0.05)          # обученный адаптер ≠ нулевой
+        train.save_adapter(src, self.tmp / "out")
+
+        dst = _tiny_unet()
+        dst.load_state_dict(src.state_dict(), strict=False)   # та же база
+        lat, emb, t = torch.randn(1, 4, 8, 8), torch.randn(1, 77, 16), \
+            torch.tensor([10])
+        with torch.no_grad():
+            before = dst(lat, t, encoder_hidden_states=emb).sample.clone()
+        sd = StableDiffusionPipeline.lora_state_dict(str(self.tmp / "out"))
+        sd = sd[0] if isinstance(sd, tuple) else sd
+        dst.load_lora_adapter(sd, prefix="unet")
+        with torch.no_grad():
+            after = dst(lat, t, encoder_hidden_states=emb).sample
+        self.assertGreater(float((after - before).abs().max()), 1e-6,
+                           "адаптер загрузился и не изменил ничего")
+
+
+class Wiring(unittest.TestCase):
+    """Обучение — часть пайплайна, а не соседний репозиторий."""
+
+    def test_targets_are_the_attention_projections(self):
+        self.assertEqual(set(train.TARGET_MODULES),
+                         {"to_q", "to_k", "to_v", "to_out.0"})
+
+    def test_device_helper_exists_under_the_name_used(self):
+        """`train` зовёт `device.detect`; опечатка здесь падает только на карте."""
+        from ball_reel import device
+
+        self.assertTrue(callable(device.detect))
+
+    def test_adapter_lands_where_animate_can_load_it(self):
+        """Выход обучения обязан быть входом генерации, иначе цепи нет."""
+        import inspect
+
+        from ball_reel import animate
+
+        self.assertIn("subject_lora", inspect.signature(animate.build).parameters)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -140,6 +140,18 @@ class EveryModuleIsReachable(unittest.TestCase):
                 self.assertTrue(_imported_by(name),
                                 f"{name} снова никем не вызывается")
 
+    def test_training_is_a_stage_and_not_a_neighbouring_repository(self):
+        """Пятый случай той же породы, и самый дорогой из них.
+
+        `lora` умел посчитать план и напечатать командную строку для ЧУЖОГО
+        тренера — то есть выглядел как обучение, не будучи им. Требование
+        продукта: LoRA обучается СВОИМ циклом внутри прогона. Тест краснеет,
+        если `train` снова окажется соседним репозиторием.
+        """
+        self.assertIn("run_local", _imported_by("train"),
+                      "обучение LoRA выпало из прогона: ступень --train-lora "
+                      "в run_local — это и есть «часть пайплайна»")
+
     def test_the_detector_itself_can_find_a_dead_module(self):
         # Тест, который не умеет краснеть, — украшение. Проверяется на заведомо
         # несуществующем имени: у него не может быть вызывающих.
