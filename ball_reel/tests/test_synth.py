@@ -108,6 +108,32 @@ class Prompts(unittest.TestCase):
         self.assertEqual(len(got), n + 3)
         self.assertEqual(got[n], got[0])
 
+    def test_any_prefix_touches_more_than_one_axis(self):
+        """Замерено: три кадра подряд различались ТОЛЬКО кадрировкой."""
+        from ball_reel.dataset import variations
+
+        rows = synth._interleaved(variations())
+        base = rows[0]
+        changed = {k for r in rows[1:4] for k in r if r[k] != base[k]}
+        self.assertGreaterEqual(len(changed), 3,
+                                f"короткий заказ трогает только {changed}")
+
+    def test_interleaving_loses_no_row(self):
+        from ball_reel.dataset import variations
+
+        rows = variations()
+        self.assertEqual(len(synth._interleaved(rows)), len(rows))
+
+    def test_prompt_says_what_to_keep_and_what_to_change(self):
+        """Одежда в подпись не идёт — значит одинаковая прилипнет к триггеру."""
+        p = synth.prompts_for(1)[0]
+        self.assertIn("same face", p)
+        self.assertIn("change the clothing", p)
+
+    def test_default_model_was_chosen_by_measurement(self):
+        """`kontext` — умолчание клиента; замер показал, что оно худшее."""
+        self.assertNotEqual(synth.MODEL, "kontext")
+
     def test_identity_is_not_described_in_words(self):
         """Личность несёт референс. Слова о ней увели бы её к описанию."""
         for p in synth.prompts_for(5, "a person"):
