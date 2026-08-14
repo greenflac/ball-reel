@@ -35,12 +35,27 @@ print(spec.motion, spec.validate())             # 2. что за движени�
 import glob
 prop = body_metrics("face.jpg")["proportions"]  # 3. пропорции клиента (3D)
 m = render_sequence(sorted(glob.glob("frames/*.png")), "conditions",
-                    proportions=prop)
-print("условий:", len(m["conditions"]), "coverage:", m["coverage"], m["warnings"])
+                    proportions=prop, framing="waist_up")
+print("условий:", len(m["conditions"]), "coverage:", m["coverage"],
+      "лицо:", m["face_px"], "судимо:", m["identity_judgeable"])
+print(*m["warnings"], sep="\n")
 EOF
 
 tar czf payload.tar.gz conditions/ face.jpg     # это поедет на VPS
 ```
+
+**`framing` — новый и самый дешёвый рычаг, решается здесь, а не на карте.**
+Умолчание `full_body` на потолке 512x768 даёт лицо **~72 px** при пороге ArcFace
+100 px: гейт вернёт не «похож» и не «не похож», а «нечем судить». `waist_up` на
+том же холсте даёт **~145 px** — судимо. Числа не выдуманы, они печатаются
+`gpu_keyframes.identity_verifiable(768)` и получены из долей, замеренных живьём
+(0.094 против 0.19 высоты кадра). На реальном ките доля вышла ещё ниже типовой —
+0.074, потому что широкая стойка растягивает габарит фигуры; поэтому
+планировать надо по манифесту, а не по таблице.
+Манифест несёт `face_share_by_framing` — ОБЕ кадрировки сразу,
+чтобы выбор делался до генерации и по числу; сигнатура
+`render_sequence(frames, out_dir, *, proportions=None, width=512, height=768,
+source=None, framing="full_body")`.
 
 Проверить глазами **два** условия-скелета (первый и средний). Кривой скелет
 кондиционирует хуже, чем никакой, а увидеть это на арендованной машине — значит
@@ -50,6 +65,11 @@ tar czf payload.tar.gz conditions/ face.jpg     # это поедет на VPS
 
 * `intake` сказал `cannot identity` — генерация не спасёт, нужно другое фото;
 * `coverage` условий заметно ниже 1.0 — в этих кадрах генератор не ограничен;
+* `joint_coverage` низкое или `partial_frames` велико — кадр со скелетом ещё не
+  значит скелет ЦЕЛИКОМ: невидимый локоть выбрасывает вместе с собой предплечье,
+  и рука в этом кадре ничем не ограничена. Поймано глазами там, где `coverage`
+  показывал 1.0, а у фигуры не было руки;
+* `identity_judgeable` — `False`: клип будет сгенерирован и не проверен;
 * в `spec.validate()` есть «motion track has holes».
 
 ---
@@ -76,21 +96,42 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 ```bash
 tar xzf payload.tar.gz
 
-# дым: ОДИН кейфрейм, секунды, выходит с кодом 1 если не сошлось
+# ЦЕЛЕВОЙ ПУТЬ (умолчание): AnimateDiff + ControlNet + FaceID, ни одного
+# сетевого вызова в генерации. Кадры считаются СОВМЕСТНО одним проходом.
 python3 -m ball_reel.run_local --face face.jpg --conditions conditions \
   --prompt "a woman exercising on a fitness ball in a bright home studio, \
-            black sports top and black leggings, natural light, photographic" \
-  --smoke
+            black sports top and black leggings, natural light, photographic"
 
-# полный прогон: кейфреймы -> одежда -> сшивка -> гейт -> report.json
-python3 -m ball_reel.run_local --face face.jpg --conditions conditions \
-  --prompt "…тот же промт…" --video-model wan-fast
+# ЗАПАСНОЙ ПУТЬ: кейфреймы поодиночке + сшивка видеомоделью через шлюз.
+# Проверен живьём, поэтому оставлен. Единственный платный шаг во всём файле.
+python3 -m ball_reel.run_local --engine chain \
+  --face face.jpg --conditions conditions \
+  --prompt "…тот же промт…" --video-model wan-fast --smoke   # дым: ОДИН кейфрейм
 ```
+
+**Два движка, один гейт**, и это надо знать до запуска. `--engine` по умолчанию
+`animatediff`; раньше в этом документе стояли команды без флага с описанием
+шлюзового поведения («кейфреймы → сшивка»), то есть текст описывал не ту
+команду, которую печатал.
+
+Различие видно и в `--smoke`: на `chain` он рисует ОДИН кейфрейм и печатает
+дрифт лица и позу (секунды против минут полного прогона); на `animatediff`
+отдельного дешёвого кадра нет в принципе — кадры считаются совместно, — и
+`--smoke` останавливается после сборки весов и печати того, какие LoRA реально
+прицеплены.
+
+Судятся оба одними и теми же мерами (`smoke_verdict`, `garment_drift`,
+`garment_fit`, `clip_expression`, `clip_verdict`). Это не экономия кода: числа
+двух путей сравнимы ровно постольку, поскольку сняты одним прибором.
 
 `run_local` печатает измерение на каждом шаге и останавливается на первом
 провале, так что разбираться приходится с одной причиной, а не с кучей
-наполовину сделанных артефактов. Одежду задаёт промт; если она поплывёт между узлами,
-он это скажет и предложит `--garment-ref`.
+наполовину сделанных артефактов. Одежду задаёт промт; если она поплывёт между
+узлами, он это скажет — но ~~предложит `--garment-ref`~~ **нет: `--garment-ref`
+теперь отказывает сразу, первым же шагом, до предполёта.** Раньше он делал вид,
+что работает: дописывал в промт «одежда как на референсе», а сам файл никуда не
+передавался. Единственный адаптер занят лицом; второй референс требует второго
+IP-Adapter'а и на железе не проверялся.
 
 ---
 
@@ -128,13 +169,26 @@ python3 -c "
 from huggingface_hub import snapshot_download as d
 d('runwayml/stable-diffusion-v1-5', allow_patterns=['*.json','*fp16.safetensors','*.txt'])
 d('lllyasviel/control_v11p_sd15_openpose', allow_patterns=['*.json','*.safetensors'])
-d('h94/IP-Adapter', allow_patterns=['models/ip-adapter-faceid_sd15.bin'])
+d('h94/IP-Adapter-FaceID', allow_patterns=['ip-adapter-faceid_sd15.bin',
+                                           'ip-adapter-faceid_sd15_lora.safetensors'])
 " &
 
 mkdir -p ~/.mediapipe && curl -sSL -o ~/.mediapipe/pose_landmarker_lite.task \
   https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
 tar xzf payload.tar.gz
 ```
+
+~~`d('h94/IP-Adapter', allow_patterns=['models/ip-adapter-faceid_sd15.bin'])`~~ —
+**здесь стояло именно это, и такого файла в том репозитории нет.** FaceID лежит
+ОТДЕЛЬНО от обычных IP-Adapter'ов: в `h94/IP-Adapter` файлов со словом `faceid`
+нет вообще, а в `h94/IP-Adapter-FaceID` они лежат в КОРНЕ, без подпапки
+`models`. Скачивание молча вернуло бы пустой набор, а первый вызов на
+арендованной карте упал бы `EntryNotFoundError` — после ~7 ГБ уже скачанных
+весов SD1.5 и ControlNet. В коде исправлено (`gpu_keyframes.IP_ADAPTER_REPO`,
+`animate.IP_ADAPTER_REPO`, `live_gen`), здесь — с этой правкой.
+
+Вторым файлом тянется LoRA: FaceID — это адаптер **плюс** LoRA
+(`gpu_keyframes.IP_ADAPTER_LORA`), без неё лицо обусловлено наполовину.
 
 Проверить, что torch действительно видит карту, **до** всего остального:
 
@@ -153,9 +207,17 @@ python3 -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device
 python3 -m ball_reel.preflight_gpu --conditions conditions --face face.jpg
 ```
 
-Печатает построчно и валится на первой же проблеме: карта, VRAM, torch, веса,
-условия, лицо, свободный диск. **Пока он не даст OK, генерацию не запускать** —
-каждая последующая ошибка стоит дороже.
+Печатает построчно и валится на первой же проблеме. Порядок ровно такой, как в
+`preflight_gpu.main`, и он от дешёвого к дорогому: **диск → torch →
+onnxruntime → vram → веса → модель позы → условия → лицо → шлюз**. Девять
+проверок; с `--skip-gateway` восемь — отпадает последняя, единственная сетевая.
+**Пока он не даст OK, генерацию не запускать** — каждая последующая ошибка
+стоит дороже.
+
+(Раньше здесь было «карта, VRAM, torch, веса, условия, лицо, свободный диск» —
+порядок неверный и `onnxruntime` с моделью позы пропущены. Диск проверяется
+ПЕРВЫМ намеренно: это самая дешёвая проверка и самая частая причина, по которой
+качка весов обрывается на середине.)
 
 ---
 
@@ -195,12 +257,19 @@ EOF
 
 Целевые значения на этом шаге:
 
-| метрика | норма | если хуже |
-|---|---|---|
-| identity median | ≤ 0.35 | поднять `ip_adapter_scale` до 0.85 |
-| pose mean | ≤ 0.25 | поднять `controlnet_scale` до 1.2 |
-| pose worst joint | ≤ 0.40 | то же |
-| время кадра | 15–40 c | если минуты — offload свопит, снизить до 448×640 |
+| метрика | норма | откуда бар | если хуже |
+|---|---|---|---|
+| identity median | ≤ 0.35 | `identity_arcface.SAME_PERSON_MAX` | поднять `ip_adapter_scale` до 0.85 |
+| pose mean | ≤ 0.15 | `pose.SAME_POSE_MAX` | поднять `controlnet_scale` до 1.2 |
+| pose worst joint | ≤ 0.40 | `pose.WORST_JOINT_MAX` | то же |
+| время кадра | 15–40 c | РАСЧЁТ, не замер | если минуты — offload свопит, снизить до 448×640 |
+
+Здесь стояло «pose mean ≤ 0.25». Это бар шлюзового кейфрейма
+(`chain.KEYFRAME_POSE_MAX = 0.25`), а не старт-кадра: старт судится строго,
+потому что ещё ничто не двигалось, и всё сверх 0.15 — это уже переосмысление
+позы генератором, а не движение субъекта. Ровно эту же подмену чинили в
+`run_local.smoke_verdict`, где два числа стояли литералами в теле `main` и один
+из них молча пропускал расхождение, которое шлюзовой путь забраковал бы.
 
 **Не запускать полный прогон, пока дым не в норме.** Один кадр стоит секунды,
 пять неудачных — минуты, а отладка «почему всё не то» после полного прогона —
@@ -303,4 +372,13 @@ tar czf result.tar.gz chain_out/ kf/ *.json
 `POLLINATIONS_CONTRACT.md`.
 
 Всё остальное — `intake`, `metrics`, `driving`, `pose`, `motion`, `skeleton`,
-гейт — проверено на живых данных и 152 офлайн-тестах.
+гейт — проверено на живых данных и офлайн-тестами: **631 тест, 56 мутаций**
+(`python3 -m ball_reel.codeaudit`, прогон 2026-08-14). Здесь стояло «152
+офлайн-теста» — число из более ранней сессии. Считать его надо прогоном, а не
+чтением: набор растёт, документ — нет.
+
+С тех пор появился второй, ЦЕЛЕВОЙ локальный движок — `animate.py` (AnimateDiff
++ ControlNet + FaceID, один проход, без сети) и `run_local.py` как единая
+команда над обоими. У него та же оговорка, что у `gpu_keyframes`: карты в среде
+разработки не было, числа памяти и времени — расчёт. Проверяется он первым
+запуском, и расхождения дописывать сюда.
