@@ -851,3 +851,52 @@ class ThePreflightHasThreeOutcomesToo(unittest.TestCase):
         # diffusers не падает, а грузит модель без адаптера лица.
         hard = [m for m, _, _, need in preflight_gpu.PACKAGES if need]
         self.assertIn("peft", hard)
+
+
+class TheFaceIDLoRAFailureIsItsOwnOutcome(unittest.TestCase):
+    """Четвёртое состояние, найденное репетицией сборки на CPU.
+
+    `load_ip_adapter` делает два шага: проекцию эмбеддинга (это и есть канал
+    личности) и вспомогательную LoRA. На связке AnimateDiff второй ПАДАЕТ —
+    ключи LoRA адресованы attention базового SD1.5 (640), а после подключения
+    модуля движения загрузчик кладёт их на motion_modules (320). ЗАМЕРЕНО
+    живьём, сообщение: «size mismatch for down_blocks.0.motion_modules.0…
+    lora_A.faceid_0.weight: [128, 640] против [128, 320]».
+
+    Исключение убивало весь прогон, хотя первый шаг уже отработал. Теперь оно
+    ловится, а вердикт обязан отличать «LoRA не прицепилась, личность работает
+    слабее» от «пайплайн не ответил, что прицеплено»: первое чинится сменой
+    связки, второе — установкой peft. Одинаковый ПРОПУСК на обоих увёл бы
+    чинить не то.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+
+    def test_a_named_faceid_failure_is_a_FAILURE_not_a_skip(self):
+        ok, note = self.r.lora_verdict([], faceid_note="LoRA лица НЕ прицепилась")
+        self.assertIs(ok, False)
+        self.assertIn("НЕ прицепилась", note)
+
+    def test_an_empty_list_without_a_reason_stays_a_skip(self):
+        # Обратная сторона: без причины пустой список по-прежнему «не знаем».
+        ok, _ = self.r.lora_verdict([])
+        self.assertIsNone(ok)
+
+    def test_the_two_states_do_not_share_a_message(self):
+        _, silent = self.r.lora_verdict([])
+        _, named = self.r.lora_verdict([], faceid_note="LoRA лица НЕ прицепилась")
+        self.assertNotEqual(silent, named)
+
+    def test_the_builder_catches_only_the_size_mismatch(self):
+        # Ловить RuntimeError целиком значило бы прятать поломку установки под
+        # видом известного ограничения.
+        import inspect
+
+        from ball_reel import animate
+
+        src = inspect.getsource(animate.build)
+        self.assertIn("size mismatch", src)
+        self.assertIn("raise", src)

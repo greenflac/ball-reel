@@ -324,11 +324,45 @@ def build(cfg: Plan, *, motion_lora: str | None = None, base: str = BASE_MODEL,
         base, motion_adapter=adapter, controlnet=controlnet,
         torch_dtype=dtype, safety_checker=None)
 
-    # Личность. Вместе с адаптером diffusers ШТАТНО подгружает его LoRA —
-    # проверено по исходнику загрузчика, adapter_name будет `faceid_0`.
-    pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder=None,
-                         weight_name=IP_ADAPTER_WEIGHT,
-                         image_encoder_folder=None)
+    # Личность. Загрузчик делает ДВА шага, и они не равнозначны:
+    #   1) `unet._load_ip_adapter_weights` — проекция эмбеддинга ArcFace в
+    #      токены cross-attention. ЭТО И ЕСТЬ канал личности;
+    #   2) `unet._load_ip_adapter_loras` + `load_lora_weights` — вспомогательная
+    #      LoRA, повышающая верность. Без неё канал работает слабее, но работает.
+    #
+    # ИЗМЕРЕНО РЕПЕТИЦИЕЙ НА CPU (карты нет, но сборка от неё не зависит):
+    # второй шаг ПАДАЕТ на нашей связке. Ключи LoRA адресованы attention
+    # базового SD1.5 (640), а после подключения модуля движения UNet стал
+    # `UNetMotionModel`, и загрузчик кладёт их на `motion_modules` с
+    # размерностью 320:
+    #     size mismatch for down_blocks.0.motion_modules.0.transformer_blocks
+    #     .0.attn1.to_q.lora_A.faceid_0.weight: [128, 640] против [128, 320]
+    #
+    # Исключение при этом убивало ВЕСЬ прогон, хотя шаг 1 уже отработал. То
+    # есть мы теряли рабочий канал личности из-за необязательного довеска.
+    #
+    # Поэтому: отказ второго шага ловится и НАЗЫВАЕТСЯ, а не глотается.
+    # Проверка того, что именно прицепилось, остаётся за `active_loras`,
+    # который читает состояние модели, а не наши намерения. Пустой список там
+    # теперь означает «проекция есть, LoRA нет» — и это ДРУГОЕ состояние, чем
+    # «личность не подключена вовсе».
+    faceid_lora_note = ""
+    try:
+        pipe.load_ip_adapter(IP_ADAPTER_REPO, subfolder=None,
+                             weight_name=IP_ADAPTER_WEIGHT,
+                             image_encoder_folder=None)
+    except RuntimeError as e:
+        if "size mismatch" not in str(e):
+            raise
+        faceid_lora_note = (
+            "LoRA лица НЕ прицепилась (size mismatch на motion_modules): "
+            "проекция эмбеддинга установлена и личность обусловливается, но "
+            "БЕЗ вспомогательной LoRA — верность ниже. Это ИЗМЕРЕННОЕ "
+            "ограничение связки AnimateDiff + IP-Adapter FaceID, а не сбой "
+            "установки.")
+        if verbose:
+            print(f"  ВНИМАНИЕ: {faceid_lora_note}")
+    pipe._faceid_lora_note = faceid_lora_note
 
     if motion_lora:
         pipe.load_lora_weights(MOTION_LORA_REPO.format(name=motion_lora),

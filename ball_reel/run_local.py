@@ -432,7 +432,7 @@ def identity_forecast(manifest: dict, height: int, *, waist_up: bool,
 
 
 def lora_verdict(active: list, *, motion_lora: str | None = None,
-                 face_prefix: str = "faceid") -> tuple:
+                 face_prefix: str = "faceid", faceid_note: str = "") -> tuple:
     """Совпадает ли ЗАЯВЛЕННОЕ с тем, что реально прицеплено к модели.
 
     «Мы подключили LoRA» — это утверждение, и на демо оно будет произнесено
@@ -455,6 +455,14 @@ def lora_verdict(active: list, *, motion_lora: str | None = None,
       прицепленной с прошлого раза, даёт разницу ноль и читается как «LoRA не
       влияет».
     """
+    # ЧЕТВЁРТОЕ СОСТОЯНИЕ, найденное репетицией сборки на CPU. Пустой список
+    # значил «пайплайн не ответил». Но есть случай, когда он ответил честно и
+    # список пуст по делу: LoRA лица не прицепилась из-за несовместимости
+    # размерностей с модулем движения, а ПРОЕКЦИЯ эмбеддинга установлена — то
+    # есть личность обусловливается, только слабее. Смешивать это с «не знаем»
+    # нельзя: первое чинится сменой связки, второе — установкой peft.
+    if faceid_note:
+        return False, faceid_note
     if not active:
         return None, ("пайплайн не ответил, какие LoRA прицеплены (нет peft "
                       "или старый diffusers). Это ПРОПУСК: заявление «LoRA "
@@ -877,7 +885,8 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
         pipe = animate.build(cfg, motion_lora=motion_lora or None,
                              base=base, verbose=False)
     active = animate.active_loras(pipe)
-    ok, note = lora_verdict(active, motion_lora=motion_lora or None)
+    ok, note = lora_verdict(active, motion_lora=motion_lora or None,
+                            faceid_note=getattr(pipe, "_faceid_lora_note", ""))
     _say("LoRA", ok, note)
     if ok is False:
         return {"label": label, "loras": active, "rows": [],
@@ -1390,7 +1399,9 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
     # `faceid` (в AnimateDiff — `faceid_0`), поэтому сверка идёт по префиксу.
     from .animate import active_loras
 
-    _say("LoRA", *lora_verdict(active_loras(pipe)))
+    _say("LoRA", *lora_verdict(
+        active_loras(pipe),
+        faceid_note=getattr(pipe, "_faceid_lora_note", "")))
     with clock.stage("keyframe", per=PER_KEYFRAME):
         smoke = render_keyframes(nodes[:1], args.face, prompt, out / "smoke",
                                  cfg=cfg, negative=args.negative, pipe=pipe,
