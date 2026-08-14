@@ -59,6 +59,8 @@ MediaPipe Image Segmenter, модель `selfie_multiclass_256x256`. Причи�
 
 from __future__ import annotations
 
+from . import cure
+
 from pathlib import Path
 
 #: Классы модели, В ТОМ ЖЕ ПОРЯДКЕ, что в её собственном `labels.txt`.
@@ -93,6 +95,9 @@ MIN_SKIN_SHARE = 0.2
 #: а для честного отчёта о том, насколько груба граница маски.
 NATIVE_SIDE = 256
 
+#: Разделитель пути ДЛЯ ОБОЛОЧКИ, а не для Python.
+SEP = "\\" if cure.WINDOWS else "/"
+
 
 def model_path(path: str | Path | None = None) -> Path:
     return Path(path or DEFAULT_MODEL).expanduser()
@@ -109,8 +114,8 @@ def why_unavailable(path: str | Path | None = None) -> str:
     if p.exists():
         return ""
     return (f"нет модели сегментации {p}. Скачать:\n"
-            f"  mkdir -p {p.parent}\n"
-            f"  curl -sSL -o {p} {MODEL_URL}\n"
+            f"  {cure.mkdir(cure.home('.mediapipe'))}\n"
+            f"  {cure.download(MODEL_URL, cure.home('.mediapipe') + SEP + p.name)}\n"
             f"Без неё вклейка примет ограничена только капсулой вокруг кости, "
             f"то есть может лечь поверх одежды.")
 

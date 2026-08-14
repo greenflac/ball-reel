@@ -38,6 +38,8 @@ Pollinations дописываются в POLLINATIONS_CONTRACT.md.
 
 from __future__ import annotations
 
+from . import cure
+
 import os
 from pathlib import Path
 
@@ -57,6 +59,13 @@ def _providers():
 DET_ENV, POSE_ENV = "BALL_REEL_DWPOSE_DET", "BALL_REEL_DWPOSE_POSE"
 DEFAULT_DET = "~/.dwpose/yolox_l.onnx"
 DEFAULT_POSE = "~/.dwpose/dw-ll_ucoco_384.onnx"
+
+#: Откуда качаются, если их нет. Отдельной константой: адрес попадает в ТЕКСТ
+#: ОТКАЗА, а вписанный туда вручную разъезжается с настоящим при первой правке.
+WEIGHTS_ONLINE = "https://huggingface.co/yzd-v/DWPose/resolve/main/"
+
+#: Разделитель пути ДЛЯ ОБОЛОЧКИ, а не для Python.
+SEP = "\\" if cure.WINDOWS else "/"
 
 #: COCO-WholeBody отдаёт 133 точки; первые 17 — тело в порядке COCO.
 #: Здесь их индексы под именами, которыми пользуется остальной проект.
@@ -100,10 +109,11 @@ def _model_paths() -> tuple:
     if missing:
         raise RuntimeError(
             f"нет весов DWPose: {', '.join(missing)}. Скачать один раз:\n"
-            f"  mkdir -p ~/.dwpose && cd ~/.dwpose\n"
-            f"  curl -sSLO https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx\n"
-            f"  curl -sSLO https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx\n"
-            f"или указать пути через {DET_ENV} / {POSE_ENV}. Молча падать на "
+            f"  {cure.mkdir(cure.home('.dwpose'))}\n"
+            + "".join(
+                f"  {cure.download(WEIGHTS_ONLINE + n, cure.home('.dwpose') + SEP + n)}\n"
+                for n in ("yolox_l.onnx", "dw-ll_ucoco_384.onnx"))
+            + f"или указать пути через {DET_ENV} / {POSE_ENV}. Молча падать на "
             f"MediaPipe нельзя: это вернёт кондиционер и верификатор в одно лицо.")
     return det, pose
 

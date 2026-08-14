@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+from . import cure
+
 import sys
 from pathlib import Path
 
@@ -717,8 +719,14 @@ def check_weights() -> tuple:
         state = "недокачано" if m["started"] else "не скачивалось"
         lines.append(f"{m['role']} [{state}]: нет {', '.join(m['gone'][:2])} "
                      f"({m['mb']} МБ) из {m['repo']}")
-        cmds.append(f'd("{m["repo"]}", allow_patterns=[{m["patterns"][0]}])')
-    body = "\n".join("    " + c for c in cmds)
+        # ОДНА команда на репозиторий, а не один heredoc на все: оборвавшуюся
+        # качалку повторяют поштучно, и строка, которую можно скопировать
+        # отдельно, экономит повторную выкачку соседних гигабайтов.
+        call = (f'd("{m["repo"]}", allow_patterns=[{m["patterns"][0]}])'
+                .replace('"', "'"))
+        cmds.append(cure.py_snippet(
+            "from huggingface_hub import snapshot_download as d\n" + call))
+    body = "\n".join("  " + c for c in cmds)
     roles = ", ".join(m["role"] for m in inv["missing"])
     # Головная фраза — короткая и с глаголом: `run_local` печатает эту строку
     # обрезанной до 96 символов, и в обрезок обязано попасть «что делать».
@@ -726,12 +734,10 @@ def check_weights() -> tuple:
                  f"нет весов ~{inv['missing_gb']:.1f} ГБ — качать "
                  f"snapshot_download (команда ниже): {roles}.\n  "
                  + "; ".join(lines)
-                 + f"\n  python3 - <<'EOF'\n"
-                   f"  from huggingface_hub import snapshot_download as d\n"
-                   f"{body}\n"
-                   f"  EOF\n"
-                   f"  (allow_patterns не украшение: без них у базы прилетят "
-                   f"ещё ~17 ГБ ckpt-ов, которые пайплайн не открывает)")
+                 + "\n" + body
+                 + f"\n  (allow_patterns не украшение: без них у базы прилетят "
+                   f"ещё ~17 ГБ ckpt-ов, которые пайплайн не открывает. Если "
+                   f"оборвётся — повторить ту же строку, докачает с места)")
 
 
 # ------------------------------------------------------- модели-судьи (~1 мс)
@@ -775,14 +781,18 @@ def check_face_model() -> tuple:
     except Exception:  # noqa: BLE001
         base = ("https://github.com/deepinsight/insightface/releases/download"
                 "/v0.7")
+    # ОДНОСТРОЧНИК ПЕРВЫМ, а распаковка архива — вторым вариантом. `unzip` на
+    # Windows нет вообще, а insightface умеет скачать и разложить сам; звать
+    # его — это ещё и проверка, что путь распознавания рабочий, а не только что
+    # файлы легли.
     return _fail("face model",
-                 f"нет {', '.join(gone)} в {pack} (276 МБ). Скачать заранее:\n"
-                 f"    mkdir -p {pack.parent} && cd {pack.parent}\n"
-                 f"    curl -sSLO {base}/buffalo_l.zip && unzip -o "
-                 f"buffalo_l.zip -d buffalo_l\n"
-                 f"  или один раз вызвать python3 -c \"from "
-                 f"ball_reel.identity_arcface import face_detail; "
-                 f"print(face_detail('kit/face.jpg'))\" при живом интернете.")
+                 f"нет {', '.join(gone)} в {pack} (276 МБ). Скачать:\n  "
+                 + cure.py_snippet(
+                     "from ball_reel.identity_arcface import face_detail\n"
+                     "print(face_detail('demo/kit/face.jpg'))")
+                 + f"\n  (качает и раскладывает сам; нужен живой интернет)\n"
+                   f"  вручную, если так надёжнее: {base}/buffalo_l.zip -> "
+                   f"распаковать в {pack}")
 
 
 def check_segmentation() -> tuple:

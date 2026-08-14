@@ -28,6 +28,8 @@ that is the part a sceptic recomputes.
 
 from __future__ import annotations
 
+from . import cure
+
 from pathlib import Path
 
 #: Landmark indices used for the pose comparison. Face landmarks are excluded on
@@ -98,6 +100,16 @@ LIMB_WOBBLE_MAX = 0.25
 MODEL_ENV = "BALL_REEL_POSE_MODEL"
 DEFAULT_MODEL = "~/.mediapipe/pose_landmarker_lite.task"
 
+#: Откуда качается, если её нет. Отдельной константой, потому что
+#: адрес попадает в ТЕКСТ ОТКАЗА, а склеенный там по кусочкам он
+#: разъезжается с настоящим при первой же правке.
+MODEL_ONLINE = ("https://storage.googleapis.com/mediapipe-models/"
+                "pose_landmarker/pose_landmarker_lite/float16/1/"
+                "pose_landmarker_lite.task")
+
+#: Разделитель пути ДЛЯ ОБОЛОЧКИ, а не для Python.
+SEP = "\\" if cure.WINDOWS else "/"
+
 _POSE = None
 
 
@@ -108,9 +120,8 @@ def _model_path() -> Path:
     if not p.exists():
         raise RuntimeError(
             f"pose model not found at {p}. Download it once:\n"
-            f"  mkdir -p ~/.mediapipe && curl -sSL -o {DEFAULT_MODEL} "
-            f"https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            f"pose_landmarker_lite/float16/1/pose_landmarker_lite.task\n"
+            f"  {cure.mkdir(cure.home('.mediapipe'))}\n"
+            f"  {cure.download(MODEL_ONLINE, cure.home('.mediapipe') + SEP + p.name)}\n"
             f"or point {MODEL_ENV} at it. Not bundled: it is 5.5 MB of weights, "
             f"and a missing model must fail loudly rather than skip the check.")
     return p

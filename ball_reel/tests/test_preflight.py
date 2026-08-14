@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from ball_reel import cure
+
 import json
 import sys
 import tempfile
@@ -530,7 +532,14 @@ class TheJudgesWeightsAreNamedWithTheirCommands(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("buffalo_l.zip", detail)
         self.assertIn("det_10g.onnx", detail)
-        self.assertIn("curl", detail)
+        self.assertIn("/nonexistent-insightface", detail)
+        # ЧЕМ качать — не проверяем: раньше здесь стоял `curl`, и это оказалось
+        # проверкой утилиты вместо проверки исполнимости. На Windows пара
+        # curl+unzip нерабочая (unzip там нет), и лечение переехало на
+        # однострочник, который insightface исполняет сам. Сторожим то, ради
+        # чего тест писался: НАЗВАН архив, НАЗВАНО куда, и есть команда.
+        self.assertIn(cure.PY + " -c", detail,
+                      "в лечении нет исполнимой команды")
 
     def test_dwpose_absence_is_not_a_refusal_when_conditions_are_ready(self):
         from ball_reel import dwpose
