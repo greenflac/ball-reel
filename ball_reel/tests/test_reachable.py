@@ -1,0 +1,146 @@
+"""Каждый модуль либо кем-то вызывается, либо объявлен самостоятельным.
+
+ЗАЧЕМ ЭТОТ ФАЙЛ. За один день нашлось ЧЕТЫРЕ модуля, написанных, покрытых
+тестами, описанных в справочнике — и не подключённых ни к чему:
+
+    semantic  ось объявлена в CHECK_ORDER, semantic_match не вызывался нигде,
+              и условие выходило тождественно истинным;
+    refine    ступень доводки лица не импортировалась ни одним модулем;
+    upscale   импортировался только самим refine, и только ради константы;
+    lora      флаг --lora клался в поле плана ДРУГОГО движка; на целевом пути
+              канала LoRA личности не было вообще.
+
+Каждый находился ПО ПОДСКАЗКЕ, а не проверкой. Мутационный аудит здесь бессилен
+ПО УСТРОЙСТВУ: константы мёртвого модуля убиваются его собственными тестами
+независимо от того, зовёт ли его конвейер, и аудит показывает 100% на
+выключенном коде — об этом предупреждает докстринг самого `codeaudit`.
+
+Модуль, написанный и не подключённый, ОПАСНЕЕ ненаписанного: он есть в отчёте,
+в справочнике и в разговоре, а в конвейере его нет. Здесь это краснеет само.
+"""
+
+from __future__ import annotations
+
+import ast
+import unittest
+from pathlib import Path
+
+#: Модули, которым НЕ нужен вызывающий, и почему. Список закрытый: добавление
+#: сюда — это заявление «этот модуль работает сам», и оно должно стоить
+#: осознанной строки, а не быть способом заглушить тест.
+STANDALONE = {
+    "codeaudit": "аудит самих тестов, запускается человеком",
+    "doctor": "диагностика окружения, запускается человеком",
+    "preflight_gpu": "предполёт, запускается человеком и из run_local",
+    "run_local": "точка входа прогона",
+    "produce": "точка входа шлюзового пути",
+    "bench": "стенд, запускается человеком",
+    "calibrate_marks": "калибровочный стенд, запускается человеком",
+    "demo_kit": "сборка нарезки, запускается человеком",
+    "mvp": "ранняя точка входа, оставлена для сравнения",
+    "brief": "структура задания, используется через точки входа",
+    "critic": "разбор результатов, запускается человеком",
+    "gen": "офлайн-шлюз, точка входа",
+    "live_gen": "живой шлюз, точка входа",
+    "pipeline": "оркестратор, точка входа",
+    "chain": "движок цепочки, точка входа",
+    "intake": "приём референса, точка входа",
+    "router": "маршрутизация, точка входа",
+    "subject": "пакет субъекта, точка входа",
+    "timing": "замер латентности, запускается человеком",
+    "device": "опрос железа, используется лениво внутри функций",
+    "fluid": "метрика жидкости, стенд под калибровку",
+    "garment_fit": "вторая ось одежды, стенд",
+    "expression": "метрика мимики, канала впрыска пока нет",
+    "dataset": "сборка набора для LoRA, запускается человеком",
+    "lora": "план и предполёт обучения, запускается человеком",
+    "metrics": "общие метрики, используются через точки входа",
+    "identity": "офлайн-прокси идентичности",
+    "gpu_keyframes": "движок кейфреймов, точка входа",
+    "pollinations": "клиент шлюза, используется через точки входа",
+    "garment": "ось одежды, используется через точки входа",
+    "motion": "оси движения, используются через точки входа",
+    "pose": "оси позы, используются через точки входа",
+    "identity_arcface": "ось личности, используется через точки входа",
+}
+
+PKG = Path(__file__).resolve().parent.parent
+
+
+def _modules() -> list:
+    return sorted(p.stem for p in PKG.glob("*.py")
+                  if p.stem not in ("__init__", "__main__"))
+
+
+def _imported_by(name: str) -> list:
+    """Кто импортирует модуль. По дереву разбора, а не по подстроке.
+
+    Подстрока нашлась бы в комментарии, в докстринге и в собственном имени
+    файла — то есть зеленела бы на мёртвом коде. Проверено: именно так первая
+    редакция теста про `semantic_match` пропустила нарочно внесённую поломку.
+    """
+    out = []
+    for p in PKG.glob("*.py"):
+        if p.stem in (name, "__init__", "__main__"):
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            hit = False
+            if isinstance(node, ast.ImportFrom):
+                # Две формы, и вторую первая редакция этого теста ПРОПУСКАЛА:
+                #   from .refine import union_box   -> module == "refine"
+                #   from . import refine as r       -> module is None, имя в names
+                # На второй форме тест объявил живой модуль мёртвым, то есть
+                # сам оказался тем, что ищет. Проверено на `refine`.
+                hit = (node.module == name
+                       or any(a.name == name for a in node.names))
+            elif isinstance(node, ast.Import):
+                hit = any(a.name.endswith(f".{name}") or a.name == name
+                          for a in node.names)
+            if hit:
+                out.append(p.stem)
+                break
+    return sorted(set(out))
+
+
+class EveryModuleIsReachable(unittest.TestCase):
+    def test_no_module_is_written_and_never_called(self):
+        dead = []
+        for m in _modules():
+            if m in STANDALONE:
+                continue
+            if not _imported_by(m):
+                dead.append(m)
+        self.assertEqual(
+            dead, [],
+            f"модули написаны и не подключены ни к чему: {dead}. Либо позвать "
+            f"их из конвейера, либо внести в STANDALONE с объяснением, ПОЧЕМУ "
+            f"модуль работает сам. Молча оставлять нельзя: такой модуль есть в "
+            f"отчёте и в справочнике, а в конвейере его нет")
+
+    def test_the_standalone_list_has_no_ghosts(self):
+        # Модуль удалили, а разрешение осталось — и следующий файл с тем же
+        # именем родится сразу освобождённым от проверки.
+        ghosts = sorted(set(STANDALONE) - set(_modules()))
+        self.assertEqual(ghosts, [], f"в STANDALONE есть несуществующие: {ghosts}")
+
+    def test_a_standalone_entry_must_explain_itself(self):
+        for name, why in STANDALONE.items():
+            with self.subTest(module=name):
+                self.assertGreater(len(why), 15,
+                                   f"{name}: объяснение обязано быть внятным")
+
+    def test_the_four_that_were_dead_are_now_called(self):
+        """Регрессия на конкретные четыре случая, найденные за день."""
+        for name in ("semantic", "refine", "upscale"):
+            with self.subTest(module=name):
+                self.assertTrue(_imported_by(name),
+                                f"{name} снова никем не вызывается")
+
+    def test_the_detector_itself_can_find_a_dead_module(self):
+        # Тест, который не умеет краснеть, — украшение. Проверяется на заведомо
+        # несуществующем имени: у него не может быть вызывающих.
+        self.assertEqual(_imported_by("нет_такого_модуля_12345"), [])

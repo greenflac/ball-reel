@@ -828,3 +828,161 @@ def manifest(samples: list, *, trigger: str, judge: str,
                      "requested": s.requested, "note": s.note}
                     for s in kept],
     }
+
+
+# --------------------------------------------------------------------------
+# СБОРКА НАБОРА НА ДИСКЕ. До этой части модуль умел всё, кроме одного: его
+# нельзя было ЗАПУСТИТЬ. Точки входа не было вовсе, и «обучение LoRA с нуля»
+# оставалось описанием, а не командой.
+
+#: Аугментации выполняются здесь, а не описываются. Каждая — преобразование,
+#: НЕ МЕНЯЮЩЕЕ СТОРОНУ: зеркало запрещено (см. `augmentations`), потому что
+#: татуировка с левого предплечья переехала бы на правое.
+def apply_augmentation(im, name: str):
+    """Одно преобразование реального кадра. -> изображение."""
+    from PIL import Image, ImageEnhance
+
+    w, h = im.size
+    if name == "crop_tight":
+        d = 0.05
+        return im.crop((int(w*d), int(h*d), int(w*(1-d)), int(h*(1-d))))
+    if name == "crop_wide":
+        pad = int(min(w, h) * 0.05)
+        out = Image.new("RGB", (w + 2*pad, h + 2*pad), (127, 127, 127))
+        out.paste(im, (pad, pad))
+        return out
+    if name in ("rotate_ccw", "rotate_cw"):
+        return im.rotate(4 if name == "rotate_ccw" else -4,
+                         resample=Image.BICUBIC, expand=False)
+    if name in ("bright_up", "bright_down"):
+        return ImageEnhance.Brightness(im).enhance(
+            1.08 if name == "bright_up" else 0.92)
+    if name in ("warm", "cool"):
+        r, g, b = im.split()[:3]
+        k = 1.08 if name == "warm" else 0.92
+        r = r.point(lambda v: min(255, int(v * k)))
+        b = b.point(lambda v: min(255, int(v / k)))
+        return Image.merge("RGB", (r, g, b))
+    raise ValueError(f"неизвестная аугментация {name!r}")
+
+
+def build_dataset(face: str, out_dir, *, trigger: str = "ohwx_person",
+                  subject_names=(), generated=()) -> dict:
+    """Фотография -> набор на диске, готовый тренеру. -> манифест.
+
+    ЧТО ДЕЛАЕТСЯ ЗДЕСЬ И ЧЕГО НЕ ДЕЛАЕТСЯ. Реальный кадр и его аугментации
+    собираются локально и бесплатно. Порождённые кадры НЕ РИСУЮТСЯ здесь:
+    они передаются готовыми (`generated`), потому что рисует их внешний
+    генератор, и он ОБЯЗАН быть независим от судьи — иначе набор отбирается
+    по тому, что нравится ArcFace, и независимость теряется ровно там, где её
+    собирались получить (`independence_report`).
+
+    Подписи строятся ЗАМЕРОМ по каждому кадру (`caption_from_frame`), а не по
+    тексту запроса: генератор часть запроса игнорирует, и подпись из намерения
+    уводит от триггера то, чего в кадре нет.
+
+    Кадр, у которого не измерилась ни одна ось, подписи НЕ ПОЛУЧАЕТ и в набор
+    не идёт: пустой .txt рядом с картинкой — это молчаливое «учись чему
+    хочешь».
+    """
+    import json
+    import shutil
+    from pathlib import Path
+
+    from PIL import Image
+
+    out = Path(out_dir)
+    (out / "img").mkdir(parents=True, exist_ok=True)
+    samples, failed = [], []
+
+    def add(path: str, origin: str, note: str = ""):
+        cap = caption_from_frame(path, trigger=trigger,
+                                 subject_names=subject_names)
+        if not cap.get("caption"):
+            failed.append({"path": path, "why": cap.get("note", "")})
+            return
+        # ОТБОР ПО ЛИЧНОСТИ ЗДЕСЬ НЕ НУЖЕН, и это не поблажка. Реальный кадр и
+        # его аугментации — это ТОТ ЖЕ человек по построению: преобразования
+        # (кроп, поворот, яркость, температура) личность не меняют, а зеркало
+        # запрещено отдельно. Отбирать их независимым распознавателем значило бы
+        # выбрасывать настоящие кадры по капризу прибора.
+        #
+        # Порождённые — другое дело: их отбирает `select` по НЕЗАВИСИМОМУ
+        # распознавателю, и до этой функции они доходят уже отобранными.
+        s = Sample(path=path, origin=origin, caption=cap["caption"], note=note,
+                   kept=True,
+                   repeats=REAL_ANCHOR_REPEATS if origin == "real" else 1)
+        Path(path).with_suffix(".txt").write_text(cap["caption"],
+                                                  encoding="utf-8")
+        samples.append(s)
+
+    real = out / "img" / "real_0000.png"
+    im = Image.open(face).convert("RGB")
+    im.save(real)
+    add(str(real), "real", "реальный якорь")
+
+    for name, why in augmentations():
+        p = out / "img" / f"aug_{name}.png"
+        apply_augmentation(im, name).save(p)
+        add(str(p), "augmented", why)
+
+    for i, g in enumerate(generated):
+        p = out / "img" / f"gen_{i:04d}.png"
+        shutil.copyfile(g, p)
+        add(str(p), "generated", f"порождён внешним генератором из {g}")
+
+    man = manifest(samples, trigger=trigger, judge="arcface/buffalo_l",
+                   selector="не применялся (отбора не было)",
+                   generator="локальные аугментации" if not generated
+                             else "внешний генератор")
+    man["failed_captions"] = failed
+    man["root"] = str(out)
+    (out / "manifest.json").write_text(
+        json.dumps(man, indent=2, ensure_ascii=False), encoding="utf-8")
+    return man
+
+
+def main(argv: list) -> int:
+    import argparse
+    import glob
+
+    ap = argparse.ArgumentParser(
+        prog="ball_reel.dataset",
+        description="собрать набор для обучения LoRA из ОДНОЙ фотографии")
+    ap.add_argument("--face", required=True, help="фотография личности")
+    ap.add_argument("--out", default="lora_data", help="куда класть набор")
+    ap.add_argument("--trigger", default="ohwx_person")
+    ap.add_argument("--generated", default="",
+                    help="каталог с порождёнными кадрами (необязательно): "
+                         "их рисует ВНЕШНИЙ генератор, независимый от судьи")
+    args = ap.parse_args(argv)
+
+    gen = sorted(glob.glob(f"{args.generated}/*.png")
+                 + glob.glob(f"{args.generated}/*.jpg")) if args.generated else []
+    man = build_dataset(args.face, args.out, trigger=args.trigger,
+                        generated=gen)
+    print(f"набор: {man['size']} кадров, шагов-эквивалентов "
+          f"{man['steps_equivalent']}")
+    for o, n in man["by_origin"].items():
+        print(f"  {o:10s} {n}")
+    if man["failed_captions"]:
+        print(f"\nБЕЗ ПОДПИСИ и потому НЕ в наборе: "
+              f"{len(man['failed_captions'])}")
+        for f in man["failed_captions"][:3]:
+            print(f"  {f['path']}: {f['why'][:90]}")
+    ind = man["independence"]
+    print(f"\nнезависимость: {ind['note']}")
+    if man["size"] < MIN_DATASET:
+        print(f"\nМАЛО: {man['size']} при пороге {MIN_DATASET} — LoRA "
+              f"переобучится на один ракурс. Досыпать порождёнными кадрами "
+              f"(--generated).")
+        return 1
+    print(f"\nдальше: python3 -m ball_reel.lora --dataset-steps "
+          f"{man['steps_equivalent']}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    raise SystemExit(main(sys.argv[1:]))

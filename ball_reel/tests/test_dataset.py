@@ -748,3 +748,117 @@ class TheNumbersInTheDocstringsAreREPRODUCIBLE(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheDatasetCanActuallyBeBuilt(unittest.TestCase):
+    """До этой части модуль умел всё, кроме одного: его нельзя было ЗАПУСТИТЬ.
+
+    Точки входа не было вовсе — `dataset.py` не имел `main`, и «обучение LoRA
+    с нуля» оставалось описанием, а не командой. Владелец продукта назвал это
+    прямо: без LoRA остальное не имеет смысла.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from ball_reel import dataset
+
+        self.d = dataset
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _photo(self, name="face.png", size=(200, 360)):
+        from PIL import Image
+
+        p = self.dir / name
+        Image.new("RGB", size, (120, 100, 90)).save(p)
+        return str(p)
+
+    def test_the_module_has_an_entry_point_at_all(self):
+        self.assertTrue(hasattr(self.d, "main"))
+        self.assertTrue(hasattr(self.d, "build_dataset"))
+
+    def test_every_augmentation_named_is_actually_executable(self):
+        """Список преобразований и их исполнение — не должны расходиться.
+
+        Имя в списке без исполнения — это молчаливо пропущенный кадр: набор
+        выходит меньше обещанного, а почему — не видно.
+        """
+        from PIL import Image
+
+        im = Image.new("RGB", (64, 96), (10, 20, 30))
+        for name, _ in self.d.augmentations():
+            with self.subTest(aug=name):
+                got = self.d.apply_augmentation(im, name)
+                self.assertTrue(got.size[0] > 0 and got.size[1] > 0)
+
+    def test_an_unknown_augmentation_is_refused_loudly(self):
+        from PIL import Image
+
+        with self.assertRaises(ValueError):
+            self.d.apply_augmentation(Image.new("RGB", (8, 8)), "нет-такой")
+
+    def test_mirror_is_still_not_among_them(self):
+        # Зеркало переносит примету на другую сторону. Это самая дорогая
+        # ошибка в задаче, и она общепринятая.
+        self.assertNotIn("mirror", [n for n, _ in self.d.augmentations()])
+
+    def test_a_frame_without_a_caption_never_enters_the_set(self):
+        """Пустой .txt рядом с картинкой — молчаливое «учись чему хочешь»."""
+        real = self.d.caption_from_frame
+        self.d.caption_from_frame = lambda p, **kw: {
+            "caption": "", "note": "ничего не измерилось"}
+        self.addCleanup(setattr, self.d, "caption_from_frame", real)
+        man = self.d.build_dataset(self._photo(), self.dir / "out")
+        self.assertEqual(man["size"], 0)
+        self.assertTrue(man["failed_captions"])
+
+    def test_the_real_anchor_outweighs_its_augmentations(self):
+        real = self.d.caption_from_frame
+        self.d.caption_from_frame = lambda p, **kw: {"caption": "ohwx, x"}
+        self.addCleanup(setattr, self.d, "caption_from_frame", real)
+        man = self.d.build_dataset(self._photo(), self.dir / "out2")
+        by = {s["origin"]: s["repeats"] for s in man["samples"]}
+        self.assertGreater(by["real"], by["augmented"],
+                           "реальный кадр обязан весить больше производных")
+        self.assertEqual(by["real"], self.d.REAL_ANCHOR_REPEATS)
+
+    def test_a_caption_file_lands_beside_every_image(self):
+        # Тренер читает .txt рядом с картинкой; без него кадр учится без
+        # подписи, то есть тянет всё подряд на триггер.
+        from pathlib import Path
+
+        real = self.d.caption_from_frame
+        self.d.caption_from_frame = lambda p, **kw: {"caption": "ohwx, x"}
+        self.addCleanup(setattr, self.d, "caption_from_frame", real)
+        man = self.d.build_dataset(self._photo(), self.dir / "out3")
+        for s in man["samples"]:
+            with self.subTest(path=s["path"]):
+                self.assertTrue(Path(s["path"]).with_suffix(".txt").exists())
+
+    def test_a_local_only_set_is_reported_as_TOO_SMALL(self):
+        """Аугментаций одного фото не хватает, и это обязано быть сказано.
+
+        ИЗМЕРЕНО на настоящей рефке: реальный кадр плюс восемь преобразований
+        дают 9 при пороге 12. Молча выдать это за набор значило бы обучить
+        LoRA на одном ракурсе и узнать об этом по результату.
+        """
+        real = self.d.caption_from_frame
+        self.d.caption_from_frame = lambda p, **kw: {"caption": "ohwx, x"}
+        self.addCleanup(setattr, self.d, "caption_from_frame", real)
+        man = self.d.build_dataset(self._photo(), self.dir / "out4")
+        self.assertLess(man["size"], self.d.MIN_DATASET)
+        self.assertEqual(self.d.main(["--face", self._photo(),
+                                      "--out", str(self.dir / "out5")]), 1)
+
+    def test_the_independence_report_travels_with_the_set(self):
+        # Главная гарантия модуля обязана лежать рядом с весами, а не в
+        # презентации.
+        real = self.d.caption_from_frame
+        self.d.caption_from_frame = lambda p, **kw: {"caption": "ohwx, x"}
+        self.addCleanup(setattr, self.d, "caption_from_frame", real)
+        man = self.d.build_dataset(self._photo(), self.dir / "out6")
+        self.assertIn("independence", man)
+        self.assertIn("judge", man["independence"])
