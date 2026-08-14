@@ -325,3 +325,103 @@ class GarmentIgnoresTheBackgroundAtTheEdges(unittest.TestCase):
                                             (220, 30, 220)])]
         r = self.g.garment_drift(frames, [self._pose()] * 5)
         self.assertTrue(r["stable"], r["note"])
+
+
+class AnAxisDeclaredMustAlsoBeCALLED(unittest.TestCase):
+    """Ось была объявлена и мертва, и ни один тест этого не заметил.
+
+    Что было сделано: `"semantic"` попало в `CHECK_ORDER`, у `_verdict`
+    появился параметр, условие написано верно. Чего не было: НИКТО НЕ ЗВАЛ
+    `semantic_match`. Параметр всегда оставался `None`, и строка
+    `semantic is None or ...` выходила тождественно истинной — ось значилась в
+    гейте и пропускала всё, включая кадр в бальном платье, ради которого её
+    писали.
+
+    Почему не поймали. Тесты оси сторожили её АРИФМЕТИКУ, тесты вердикта —
+    его логику; связку между ними не сторожил никто. Мутационный аудит при
+    этом показывал 100%: мутации констант оси убивались её собственными
+    тестами независимо от того, вызывает ли её конвейер. Ровно тот случай, о
+    котором предупреждает докстринг `codeaudit` — порог, который никуда не
+    подключён.
+
+    Отсюда правило, которое эти тесты и закрепляют: у оси в `CHECK_ORDER`
+    обязан быть не только параметр, но и ВЫЗОВ, и вызов проверяется отдельно.
+    """
+
+    def setUp(self):
+        from ball_reel import produce
+
+        self.p = produce
+
+    def test_every_axis_in_the_order_is_reachable_from_the_verdict(self):
+        import inspect
+
+        src = inspect.getsource(self.p._verdict)
+        # Клиповые оси судятся здесь; стартовые — до входа в `_verdict`.
+        start = {"start_not_verifiable", "start_identity", "start_pose",
+                 "not_verifiable"}
+        for name in self.p.CHECK_ORDER:
+            if name in start:
+                continue
+            with self.subTest(axis=name):
+                self.assertIn(f'"{name}"', src,
+                              f"ось {name} объявлена в CHECK_ORDER, но в "
+                              f"_verdict её нет")
+
+    def test_the_semantic_axis_is_actually_invoked_by_the_pipeline(self):
+        """Главная проверка: ось ЗОВУТ, а не только принимают её ответ.
+
+        Ищется ВЫЗОВ в дереве разбора, а не подстрока в тексте. Первая
+        редакция этого теста искала `"semantic_match" in src` — и НЕ ПОЙМАЛА
+        нарочно внесённую поломку: строка `from .semantic import
+        semantic_match` осталась на месте, подстрока нашлась, тест позеленел.
+        Проверено удалением вызова: подстрочная версия — OK, эта — красная.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(self.p.produce)))
+        called = {
+            node.func.id if isinstance(node.func, ast.Name) else
+            getattr(node.func, "attr", "")
+            for node in ast.walk(tree) if isinstance(node, ast.Call)
+        }
+        self.assertIn("semantic_match", called,
+                      "semantic_match нигде не ВЫЗЫВАЕТСЯ — ось мертва, и "
+                      "условие в _verdict тождественно истинно")
+
+    def test_the_semantic_answer_is_kept_whole_not_reduced_to_a_flag(self):
+        # Третий исход («нет весов CLIP») обязан быть виден в отчёте: доля
+        # непроверенного — это мера того, насколько вообще судили одежду.
+        from dataclasses import fields
+
+        names = [f.name for f in fields(self.p.Attempt)]
+        self.assertIn("semantic", names)
+
+    def test_a_mismatched_clip_fails_by_name(self):
+        got = self.p._verdict(**self._good(), semantic={
+            "verdict": "mismatched", "note": "вечернее платье",
+            "check": "semantic_clothing"})
+        self.assertFalse(got[0])
+        self.assertEqual(got[3], "semantic")
+        self.assertIn("платье", got[2])
+
+    def test_an_unmeasurable_semantic_does_not_block(self):
+        # Веса CLIP ~600 МБ; гейт, падающий на их отсутствии, выключил бы
+        # выпуск везде, где их нет.
+        got = self.p._verdict(**self._good(),
+                              semantic={"verdict": "not_measurable"})
+        self.assertTrue(got[0], got[2])
+
+    def test_the_axis_is_last_because_it_is_the_most_expensive(self):
+        # Замерено: CLIP 4 с на загрузку плюс 0.04-0.11 с на кадр, остальные
+        # оси — доли секунды в numpy.
+        self.assertEqual(self.p.CHECK_ORDER[-1], "semantic")
+
+    @staticmethod
+    def _good():
+        return dict(drift={"median": 0.20, "p90": 0.30, "coverage": 1.0},
+                    motion=1.0, quality={"smooth": True},
+                    seam={"seamless": True}, limbs={"anatomical": True},
+                    wander=None, bar=0.35, min_motion=0.15, loop=True)

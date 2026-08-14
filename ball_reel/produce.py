@@ -129,6 +129,14 @@ class Attempt:
     #: формулировки, и статистика по нему разъезжается молча.
     check: str | None = None
 
+    #: Весь ответ семантической оси целиком, а не «прошла/не прошла». Причина
+    #: в третьем исходе: на машине без весов CLIP (~600 МБ) ось честно отвечает
+    #: `not_measurable`, и гейт её за это не роняет. Но такой исход обязан быть
+    #: ВИДЕН в отчёте: доля попыток, где ось ничего не сказала, — это мера
+    #: того, насколько вообще проверена одежда. Ноль на выходе, означающий
+    #: «никто не смог», проект уже однажды принял за успех.
+    semantic: dict = field(default_factory=dict)
+
 
 @dataclass
 class Result:
@@ -173,6 +181,10 @@ def produce(
     """
     from . import pollinations
     from .identity import arcface_drift, motion_presence
+    # Импорт ЗДЕСЬ, а не наверху модуля: `semantic` тянет transformers и torch
+    # только при вызове, а `produce` импортируется в тестах, где ни того, ни
+    # другого не нужно.
+    from .semantic import semantic_match
     from .identity_arcface import (HARD_DRIFT_MAX, MIN_COVERAGE,
                                    SAME_PERSON_MAX, START_MIN_FACE_PX)
 
@@ -334,10 +346,28 @@ def produce(
                   if subject.pose_ref else None)
         p90 = drift["p90"]
         coverage = drift["coverage"]
+        # СЕМАНТИКА СЧИТАЕТСЯ ЛЕНИВО, и это не микрооптимизация. Ось стоит
+        # секунды (загрузка CLIP ~4 с плюс 0.04-0.11 с на кадр), остальные —
+        # доли секунды в numpy. Посчитать её до дешёвых значит платить за
+        # каждый заведомо бракованный клип.
+        #
+        # Первый заход подключил её НЕ ДО КОНЦА: параметр в `_verdict` был, а
+        # вызова не было нигде, и условие `semantic is None or ...` выходило
+        # тождественно истинным. Ось значилась в CHECK_ORDER и пропускала всё,
+        # включая кадр в бальном платье. Ни один тест этого не поймал —
+        # они сторожили арифметику оси, а не её ВЫЗОВ, — и мутационный аудит
+        # показывал 100% на выключенной оси. Ровно то, о чём предупреждает
+        # докстринг самого `codeaudit`: порог, который никуда не подключён.
         v = verdict_detail(
             drift=drift, motion=motion, quality=quality, seam=seam,
             limbs=limbs, wander=wander, bar=bar, min_motion=min_motion,
             loop=loop)
+        sem = semantic_match(frames) if v["passed"] else {}
+        if v["passed"] and sem:
+            v = verdict_detail(
+                drift=drift, motion=motion, quality=quality, seam=seam,
+                limbs=limbs, wander=wander, bar=bar, min_motion=min_motion,
+                loop=loop, semantic=sem)
         passed, score, reason = v["passed"], v["score"], v["reason"]
         att = Attempt(n, strat.id, start, frames, round(score, 4),
                       round(motion, 4), passed, reason, clip_path=mp4,
@@ -346,7 +376,7 @@ def produce(
                       worst_jump=quality["worst_jump"],
                       pose_distance=(wander or {}).get("median"),
                       limb_wobble=(limbs.get("worst") or (None, None))[1],
-                      check=v["check"])
+                      check=v["check"], semantic=sem)
         tries.append(att)
         if best is None or att.worst_identity_drift < best.worst_identity_drift:
             best = att
