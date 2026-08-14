@@ -320,13 +320,33 @@ def _mutate_source(text: str, name: str, value) -> str:
     return pattern.sub(f"{name} = {value!r}", text, count=1)
 
 
+def _skipped(stderr: str) -> int:
+    """Сколько тестов пропущено, по хвосту вывода unittest."""
+    tail = (stderr or "").strip().splitlines()
+    last = tail[-1] if tail else ""
+    if "skipped=" in last:
+        try:
+            return int(last.split("skipped=")[1].split(")")[0])
+        except (ValueError, IndexError):
+            return 0
+    return 0
+
+
 def run_tests() -> tuple:
+    """-> (всё зелено, строка «Ran N tests», сколько пропущено).
+
+    Число пропусков возвращается НЕ для отчёта: им пользуется
+    `copy_is_as_strong_as_the_tree`, и без него самопроверка гоняла бы весь
+    набор ВТОРОЙ раз только чтобы узнать то, что здесь уже посчитано. На 1074
+    тестах это лишние три минуты в прогоне, который и так упирался в свой
+    таймаут.
+    """
     r = subprocess.run([sys.executable, "-m", "unittest", "discover",
                         "-s", "ball_reel/tests", "-p", "test_*.py"],
                        capture_output=True, text=True)
     tail = (r.stderr or "").strip().splitlines()
     count = next((ln for ln in tail if ln.startswith("Ran ")), "?")
-    return r.returncode == 0, count
+    return r.returncode == 0, count, _skipped(r.stderr)
 
 
 def run_coverage() -> tuple:
@@ -378,7 +398,7 @@ def _stage_copy(tmp: Path) -> Path:
     return dst
 
 
-def copy_is_as_strong_as_the_tree() -> tuple:
+def copy_is_as_strong_as_the_tree(here: int | None = None) -> tuple:
     """Молчит ли в копии то, что в дереве говорит. -> (одинаково, примечание).
 
     САМОПРОВЕРКА АУДИТА, и она обязательна. Мутации гоняются не в рабочем
@@ -397,13 +417,12 @@ def copy_is_as_strong_as_the_tree() -> tuple:
             [sys.executable, "-m", "unittest", "discover",
              "-s", "ball_reel/tests", "-p", "test_*.py"],
             cwd=cwd, capture_output=True, text=True)
-        tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
-        got = 0
-        if "skipped=" in tail:
-            got = int(tail.split("skipped=")[1].split(")")[0])
-        return got
+        return _skipped(r.stderr)
 
-    here = count(None)
+    # Число по дереву передаётся снаружи, если его уже посчитал `run_tests`:
+    # гонять весь набор второй раз ради одного числа — три минуты на пустом
+    # месте в прогоне, который и так упирался в таймаут.
+    here = count(None) if here is None else here
     with tempfile.TemporaryDirectory() as tmp:
         _stage_copy(Path(tmp))
         there = count(tmp)
@@ -462,7 +481,7 @@ def main(argv: list) -> int:
     args = ap.parse_args(argv)
 
     print("=" * 72)
-    ok_tests, count = run_tests()
+    ok_tests, count, skipped_here = run_tests()
     print(f"{'PASS' if ok_tests else 'FAIL'}  тесты          {count}")
     if not ok_tests:
         print("\nОСТАНОВЛЕНО: аудит на красных тестах бессмысленен.")
@@ -483,7 +502,7 @@ def main(argv: list) -> int:
     # САМОПРОВЕРКА ДО МУТАЦИЙ. Мутации гоняются в копии пакета, и всё, чего в
     # копии не хватает, превращает тест в пропуск — а пропущенный тест мутанта
     # не убьёт. Спрашивать об этом надо ДО часа работы, а не после.
-    same, why = copy_is_as_strong_as_the_tree()
+    same, why = copy_is_as_strong_as_the_tree(skipped_here)
     print(f"{'PASS' if same else 'FAIL'}  копия для мутаций  {why}")
     if not same:
         print("\nОСТАНОВЛЕНО: аудит слабее собственного дерева, и его числа "
