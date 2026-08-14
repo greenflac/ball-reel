@@ -1,17 +1,17 @@
 {
   "trigger": "ohwx_person",
-  "size": 23,
+  "size": 31,
   "captions": {
-    "measured": 23,
+    "measured": 31,
     "missing": [],
     "flagged": [],
     "unchecked": []
   },
-  "steps_equivalent": 27,
+  "steps_equivalent": 35,
   "by_origin": {
     "real": 1,
     "augmented": 8,
-    "generated": 14
+    "generated": 22
   },
   "independence": {
     "generator": "внешний генератор",
@@ -111,7 +111,7 @@
       "score": null,
       "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0000.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0000.png"
     },
     {
       "path": "img/gen_0001.png",
@@ -120,7 +120,7 @@
       "score": null,
       "caption": "ohwx_person, full body in frame, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0001.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0001.png"
     },
     {
       "path": "img/gen_0002.png",
@@ -129,70 +129,70 @@
       "score": null,
       "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0002.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0002.png"
     },
     {
       "path": "img/gen_0003.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0003.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0003.png"
     },
     {
       "path": "img/gen_0004.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "caption": "ohwx_person, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0010.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0004.png"
     },
     {
       "path": "img/gen_0005.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0011.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0005.png"
     },
     {
       "path": "img/gen_0006.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0012.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0006.png"
     },
     {
       "path": "img/gen_0007.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0013.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0007.png"
     },
     {
       "path": "img/gen_0008.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0014.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0008.png"
     },
     {
       "path": "img/gen_0009.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0015.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0009.png"
     },
     {
       "path": "img/gen_0010.png",
@@ -201,36 +201,108 @@
       "score": null,
       "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0016.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0011.png"
     },
     {
       "path": "img/gen_0011.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0017.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0012.png"
     },
     {
       "path": "img/gen_0012.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0018.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0013.png"
     },
     {
       "path": "img/gen_0013.png",
       "origin": "generated",
       "repeats": 1,
       "score": null,
+      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0014.png"
+    },
+    {
+      "path": "img/gen_0014.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
       "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
       "requested": "",
-      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds/generated/gen_0019.png"
+      "note": "порождён внешним генератором из ds2/generated/gen_0015.png"
+    },
+    {
+      "path": "img/gen_0015.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0016.png"
+    },
+    {
+      "path": "img/gen_0016.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0017.png"
+    },
+    {
+      "path": "img/gen_0017.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0018.png"
+    },
+    {
+      "path": "img/gen_0018.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0019.png"
+    },
+    {
+      "path": "img/gen_0019.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0020.png"
+    },
+    {
+      "path": "img/gen_0020.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0021.png"
+    },
+    {
+      "path": "img/gen_0021.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из ds2/generated/gen_0022.png"
     }
   ],
   "failed_captions": [],
-  "root": "/tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/ds"
+  "root": "ds2"
 }

@@ -745,6 +745,11 @@ def build_parser():
                     help="апскейл x2 ПОСЛЕ гейта, под печатью. Даёт пиксели, "
                          "но не различающие детали: судимость лица приходит от "
                          "--refine, а не отсюда")
+    ad.add_argument("--style", action="store_true",
+                    help="подогнать фактуру выхода под ДРАЙВИНГ (контраст, "
+                         "цвет, мягкость). Судимые кадры не трогает — кладёт "
+                         "копию рядом и мерит лицо ЕЩЁ РАЗ, чтобы цена "
+                         "подгонки была видна числом, а не предполагалась")
     ad.add_argument("--full-body", action="store_true",
                     help="полный рост вместо кадра по пояс: доля лица падает с "
                          "19%% до 9.4%% высоты, и гейт перестаёт судить лицо")
@@ -941,7 +946,14 @@ def train_subject_lora(args, out, clock=None) -> dict:
     stage = (clock.stage("train_lora", per=PER_RUN) if clock
              else nullcontext())
     with stage:
-        got = train_lora(args.train_lora, dst, cfg, epochs=args.train_epochs)
+        # БАЗА ТА ЖЕ, ЧТО У ГЕНЕРАЦИИ. Внутри одного прогона разойтись им особенно
+        # легко и особенно дорого: обучение молча взяло бы ванильную SD1.5, а
+        # кадры рисовались бы на `--base`, и адаптер оказался бы для них чужим —
+        # ровно тот механизм, которым FaceID-LoRA (обученная под ванильную SD1.5)
+        # разваливала кадр на epiCRealism. Цена ошибки — час обучения впустую.
+        got = train_lora(args.train_lora, dst, cfg,
+                         base=getattr(args, "base", "") or "",
+                         epochs=args.train_epochs)
     if not got["ok"]:
         return got
     return {"ok": True, "out": str(dst), "steps": got["steps"],
@@ -1181,6 +1193,64 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
         print("      луп не сошёлся: у окна нет возврата в первый кадр. "
               "Резать по лучшему стыку — motion.best_loop_cut / trim_to_loop, "
               "это ffmpeg и секунды, а не вторая генерация.")
+    # ------------------------------- ступень 3.5: подражание драйвингу, ПОСЛЕ
+    #
+    # МЕСТО ВЫБРАНО ПО ТОМУ ЖЕ ПРАВИЛУ, ЧТО И У АПСКЕЙЛА, и по той же причине:
+    # подгонка переписывает верхнюю полосу частот — ту самую, которую меряют
+    # ArcFace и DWPose. Посудив подогнанный кадр, мы измерили бы подгонку, а не
+    # генератор. Судимые файлы поэтому не трогаются вовсе: копия ложится рядом.
+    #
+    # ЗАЧЕМ ЭТО ВООБЩЕ. Личность приходит из фотографии, и вместе с личностью
+    # приходит ВИД этой фотографии — у нас это рекламный кадр с ретушью. Драйвинг
+    # же снят обычной камерой, и разница между ними ИЗМЕРЕНА, а не предположена:
+    # контраст 0.196 против 0.315, детальность 1.15 против 8.06, зерно 7.8
+    # против 24.6 — облака не перекрываются ни по одной оси.
+    #
+    # ЛИЦО МЕРИТСЯ ПОВТОРНО, и это не формальность: сглаживание давит ту же
+    # полосу, из которой ArcFace берёт признаки. Если подгонка стоит сходства,
+    # это обязано стоять в отчёте ЧИСЛОМ, а не выясняться на демо.
+    style_row = {"label": "фактура под драйвинг", "ok": None, "value": None,
+                 "note": "выключена (--style чтобы включить)"}
+    if args.style:
+        from . import style as st
+
+        prof = st.profile(driving_paths)
+        if not prof.get("ok"):
+            style_row["note"] = prof.get("note", "нет кадров драйвинга")
+        else:
+            dst = out / "styled"
+            styled, worst = [], None
+            for f in paths:
+                got = st.match(f, prof, dst / Path(f).name)
+                if got.get("ok"):
+                    styled.append(got["path"])
+                    d = got["distance_after"]
+                    if d.get("worst_ratio") and (worst is None
+                                                 or d["worst_ratio"] > worst[0]):
+                        worst = (d["worst_ratio"], d["worst"])
+            # ТЕМ ЖЕ БАРОМ, что и `idents`. Замерить «до» баром 100, а «после»
+            # баром 70 значит получить пару чисел, которые нельзя вычитать, —
+            # ровно тот дефект, из-за которого в одном отчёте уже стояли PASS и
+            # «судить нечем» об одних и тех же пикселях.
+            after = [i for i, _ in (measure(f, c, still=False)
+                                    for f, c in zip(styled, conditions))
+                     if i is not None]
+            was = statistics.median(idents) if idents else None
+            now = statistics.median(after) if after else None
+            style_row = {
+                "label": "фактура под драйвинг",
+                "ok": bool(styled) or None,
+                "value": now,
+                "note": (f"{len(styled)}/{len(paths)} кадров в {dst}"
+                         + (f"; худшая ось {worst[1]} мимо в {worst[0]:.1f} раза"
+                            if worst else "")
+                         + ("; лицо " + (f"{was:.3f} -> {now:.3f}"
+                                         if was is not None and now is not None
+                                         else "ПОСЛЕ подгонки НЕ ИЗМЕРЕНО — "
+                                              "сглаживание могло съесть признаки")))}
+        rows.append(style_row)
+        _row(style_row)
+
     # -------------------------------------------- ступень 4: апскейл, ПОСЛЕДНИМ
     #
     # Строго после гейта и только под ПЕЧАТЬЮ. Печать хранит sha256 каждого

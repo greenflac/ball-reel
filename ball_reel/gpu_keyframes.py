@@ -372,15 +372,6 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
         # multiple adapters».
         names = [n for n in _loaded_adapters(pipe) if n.startswith("faceid")]
         weights = [cfg.faceid_lora_scale] * len(names)
-        if cfg.realism_lora:
-            kw = ({"weight_name": cfg.realism_lora_weight}
-                  if cfg.realism_lora_weight else {})
-            pipe.load_lora_weights(cfg.realism_lora, adapter_name="realism",
-                                   **kw)
-            names.append("realism")
-            weights.append(cfg.realism_lora_scale)
-        pipe.set_adapters(names, adapter_weights=weights)
-        pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
     except Exception as e:  # noqa: BLE001
         # Identity is load-bearing: losing the adapter silently would produce a
         # stranger in the right pose, which the gate would then reject with a
@@ -388,6 +379,38 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
         raise RuntimeError(
             f"IP-Adapter failed to load ({e}). Without it the face is not "
             f"conditioned at all and every keyframe will be a stranger.") from e
+
+    # СВОЯ LoRA — ОТДЕЛЬНЫМ try, И ЭТО НЕ КОСМЕТИКА. Пока она грузилась внутри
+    # предыдущего блока, любой отказ на НЕЙ печатался словами «IP-Adapter
+    # failed to load»: неверный путь к обученному адаптеру, неверный формат
+    # файла, несовпадение базы — всё это указывало на IP-Adapter, который
+    # загрузился минуту назад и ни при чём. Диагноз, указывающий не туда, стоит
+    # дороже отсутствующего: по нему начинают чинить исправное.
+    if cfg.realism_lora:
+        try:
+            kw = ({"weight_name": cfg.realism_lora_weight}
+                  if cfg.realism_lora_weight else {})
+            pipe.load_lora_weights(cfg.realism_lora, adapter_name="realism",
+                                   **kw)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"LoRA личности не прицепилась из {cfg.realism_lora!r}: {e}. "
+                f"Проверить по порядку: (1) в каталоге лежит "
+                f"pytorch_lora_weights.safetensors — именно это имя ищет "
+                f"diffusers; (2) обучение шло на ТОЙ ЖЕ базе, что и рисование "
+                f"(--base у ball_reel.train); (3) это каталог обучения, а не "
+                f"репозиторий с HuggingFace. IP-Adapter здесь ни при чём — он "
+                f"уже загружен") from e
+        names.append("realism")
+        weights.append(cfg.realism_lora_scale)
+
+    try:
+        pipe.set_adapters(names, adapter_weights=weights)
+        pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"веса адаптеров не применились ({names}): {e}. Прицеплены они или "
+            f"нет — спрашивать у `animate.active_loras`, а не у аргументов") from e
 
     # Экономии — те, что назвал план, а не все подряд. План печатается перед
     # прогоном и потому читается как описание того, что произойдёт; пока сюда

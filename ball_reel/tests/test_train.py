@@ -306,8 +306,14 @@ class ShippedDataset(unittest.TestCase):
     LoRA» означало «сначала добудь ключ» — то есть на демо-дне шаг мог не
     состояться по причине, не имеющей отношения ни к коду, ни к карте.
 
-    Собран живьём 2026-08-14: 20 порождённых -> взято 14 при баре FaceNet
-    0.30, плюс 1 реальный кадр и 8 аугментаций = 23, 27 с повторами.
+    Собран живьём 2026-08-14 на `nanobanana-2` с промтом, просящим ЖАНР
+    любительской съёмки: 24 порождённых -> взято 22 (92%) при баре FaceNet
+    0.30, дистанции 0.14..0.24, плюс 1 реальный кадр и 8 аугментаций = 31,
+    35 с повторами.
+
+    Прежняя редакция набора (`nanobanana`, промт про «качественное фото») дала
+    70% отбора при 23 кадрах. Заменена не по вкусу: выше и доля отбора, и
+    сходство лица.
     """
 
     ROOT = Path(__file__).resolve().parents[2] / "demo" / "lora_dataset"
@@ -315,7 +321,7 @@ class ShippedDataset(unittest.TestCase):
     def test_it_is_on_disk_and_loads(self):
         self.assertTrue(self.ROOT.is_dir(), f"нет {self.ROOT}")
         pairs = train.load_pairs(self.ROOT)
-        self.assertEqual(len(pairs), 23)
+        self.assertEqual(len(pairs), 31)
         for path, caption, _ in pairs:
             self.assertTrue(Path(path).exists(), path)
             self.assertIn("ohwx_person", caption)
@@ -324,7 +330,7 @@ class ShippedDataset(unittest.TestCase):
         # Число из LORA_RUNBOOK обязано пересчитываться командой, а не
         # запоминаться: разошедшееся с кодом число хуже отсутствующего.
         pairs = train.load_pairs(self.ROOT)
-        self.assertEqual(train.steps_for(pairs, epochs=10), 270)
+        self.assertEqual(train.steps_for(pairs, epochs=10), 350)
 
     def test_the_manifest_paths_are_relative_and_survive_a_move(self):
         man = json.loads((self.ROOT / "manifest.json").read_text(
@@ -355,11 +361,11 @@ class ShippedDataset(unittest.TestCase):
         files = set(r.stdout.split())
         self.assertIn("demo/lora_dataset/manifest.json", files)
         self.assertEqual(
-            sum(1 for f in files if f.endswith(".png")), 23,
-            "в индексе не все 23 кадра набора")
+            sum(1 for f in files if f.endswith(".png")), 31,
+            "в индексе не все 31 кадр набора")
         self.assertEqual(
-            sum(1 for f in files if f.endswith(".txt")), 23,
-            "в индексе не все 23 подписи — кадр без подписи тянет на триггер "
+            sum(1 for f in files if f.endswith(".txt")), 31,
+            "в индексе не все 31 подпись — кадр без подписи тянет на триггер "
             "фон, свет и одежду")
 
 
@@ -462,6 +468,60 @@ class Stage(unittest.TestCase):
             self._args(train_lora=str(self.tmp / "нет")), self.tmp)
         self.assertFalse(got["ok"])
         self.assertIn("предполёт обучения", got["note"])
+
+    def test_the_run_trains_on_the_same_base_it_renders_on(self):
+        """Внутри ОДНОГО прогона базы разойтись не имеют права.
+
+        `run_local` звал обучение без `base`, то есть учил на ванильной SD1.5 и
+        рисовал на `--base`. Адаптер выходил чужим для той базы, на которой его
+        применяют, — тот самый механизм, которым FaceID-LoRA разваливала кадр
+        на epiCRealism. Заметно это только через час обучения и по кадру.
+        """
+        from ball_reel import run_local, train
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        seen = {}
+
+        def fake(dataset_dir, out_dir, cfg, *, base="", epochs=10, **kw):
+            seen["base"] = base
+            return {"ok": True, "steps": 1, "bound": "план",
+                    "loss_first": 1.0, "loss_last": 0.9}
+
+        real, train.train = train.train, fake
+        try:
+            got = run_local.train_subject_lora(
+                self._args(train_lora=str(root), base="чужая/база"), self.tmp)
+        finally:
+            train.train = real
+        self.assertTrue(got["ok"], got.get("note"))
+        self.assertEqual(seen.get("base"), "чужая/база",
+                         "прогон учит не на той базе, на которой рисует")
+
+    def test_a_run_without_an_explicit_base_still_trains(self):
+        # Отсутствие `--base` — это «умолчание», а не «сломать ступень»: у
+        # старых вызовов поля может не быть вовсе.
+        from ball_reel import run_local, train
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        seen = {}
+
+        def fake(dataset_dir, out_dir, cfg, *, base="", epochs=10, **kw):
+            seen["base"] = base
+            return {"ok": True, "steps": 1, "bound": "план",
+                    "loss_first": 1.0, "loss_last": 0.9}
+
+        args = self._args(train_lora=str(root))
+        if hasattr(args, "base"):
+            del args.base
+        real, train.train = train.train, fake
+        try:
+            got = run_local.train_subject_lora(args, self.tmp)
+        finally:
+            train.train = real
+        self.assertTrue(got["ok"], got.get("note"))
+        self.assertEqual(seen.get("base"), "")
 
     def test_small_dataset_stops_and_carries_the_cure(self):
         from ball_reel.dataset import MIN_DATASET

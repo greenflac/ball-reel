@@ -198,12 +198,37 @@ class TheREQUESTDescriptionIsNotACaption(unittest.TestCase):
             self.assertNotIn(word, low,
                              f"{word!r} описывает человека, а не съёмку")
 
-    def test_the_realism_clause_names_the_medium_and_the_skin(self):
-        # Две вещи, ради которых он существует. Если их вымоет правкой, тест
+    def test_the_realism_clause_says_nothing_about_the_face_or_the_skin(self):
+        """ЗАМЕРЕННЫЙ запрет, и он стоил трёх кадров, чтобы его узнать.
+
+        Редакция со словами `bare skin texture with pores`, `blemishes`,
+        `no makeup` дала ровно нужный жанр — и увела лицо: FaceNet p50
+        0.217 -> 0.304 при баре 0.30, под баром 1 кадр из 3 вместо 3 из 3
+        (nanobanana-2, менялся ровно этот хвост). Редакция, оставившая только
+        камеру и сцену, дала 0.196 и 3 из 3 — лучше ОБЕИХ.
+
+        Объяснение переносимое: личность приходит референсом, а слово про лицо
+        конкурирует с ней за одни и те же токены. Про камеру писать даром, про
+        лицо — за счёт сходства.
+
+        Предыдущая редакция ЭТОГО ЖЕ теста требовала слова `skin` в
+        формулировке. Она кодировала догадку «фотореализм — это про кожу», и
+        замер её опроверг. Тест переписан, а не смягчён: он и сейчас краснеет,
+        просто на противоположном.
+        """
+        low = self.d.REALISM.lower()
+        for word in ("skin", "pores", "blemish", "makeup", "face", "freckle",
+                     "wrinkle", "complexion"):
+            self.assertNotIn(word, low,
+                             f"{word!r} — команда про лицо: измерено, что она "
+                             f"стоит сходства (0.217 -> 0.304 при баре 0.30)")
+
+    def test_the_realism_clause_names_the_medium_and_the_camera(self):
+        # То, ради чего он существует. Если это вымоет правкой, тест
         # покраснеет, а не промолчит: «упор на реализм» — это не настроение.
         low = self.d.REALISM.lower()
         self.assertIn("photo", low)
-        self.assertIn("skin", low)
+        self.assertIn("camera", low)
 
 
 class TheAxesActuallyVARY(unittest.TestCase):
