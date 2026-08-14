@@ -431,7 +431,27 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
         if name in savings:
             savings[name]()
     if "model_cpu_offload" in cfg.optimisations:
-        pipe.enable_model_cpu_offload()
+        # ЭКОНОМИЯ ПАМЯТИ КАРТЫ БЕЗ КАРТЫ БЕССМЫСЛЕННА, а diffusers на этом
+        # ПАДАЕТ: `enable_model_cpu_offload` requires accelerator, but not found.
+        # Цена падения не в самом отказе, а в том, ЧТО он отсекает: проба на
+        # машине без карты доходила до самого конца — пайплайн собран,
+        # IP-Adapter загружен, обученная LoRA прицеплена, веса применены — и
+        # умирала на строке, которая к правильности не относится вовсе. То есть
+        # отлаживать сборку без карты было нельзя, хотя всё, кроме скорости, от
+        # карты не зависит.
+        #
+        # МОЛЧА пропускать нельзя: на машине С картой пропуск экономии — это
+        # OOM на 6 ГБ, и узнать о нём надо здесь, а не по стеку из середины
+        # генерации. Поэтому пропуск объявляется вслух.
+        import torch
+
+        if torch.cuda.is_available():
+            pipe.enable_model_cpu_offload()
+        else:
+            print("экономия model_cpu_offload пропущена: ускорителя нет. Это "
+                  "проба на CPU — правильность сборки проверяется, скорость "
+                  "нет")
+            pipe.to("cpu")
     else:
         pipe.to(device)
     return pipe
