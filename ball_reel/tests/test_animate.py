@@ -165,3 +165,74 @@ class PreflightSaysWhatToDoNotJustWhatIsWrong(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MemoryIsPLANNEDBeforeAndMEASUREDAfter(unittest.TestCase):
+    """Расчёт и замер — разные вещи, и путать их нельзя.
+
+    До прогона модуль умеет только арифметику по размерам файлов весов. Это
+    полезно (плохой режим виден за миллисекунду), но подать её как замер
+    значило бы то же самое, за что в этом проекте уже правились метрики: число,
+    полученное не тем способом, каким заявлено.
+    """
+
+    def setUp(self):
+        from ball_reel import animate
+
+        self.a = animate
+
+    def test_the_weights_are_summed_from_the_real_file_sizes(self):
+        # Числа взяты из HF API делением fp32 пополам. Тест сторожит не сами
+        # значения, а то, что учтены ВСЕ потребители: забыть ControlNet в этой
+        # сумме — значит обещать полтора лишних гигабайта запаса.
+        cfg = self.a.plan(6.0)
+        for part in ("unet", "motion_adapter", "controlnet", "vae",
+                     "text_encoder", "ip_adapter"):
+            self.assertIn(part, self.a.WEIGHTS_GB)
+        self.assertAlmostEqual(cfg.weights_gb, sum(self.a.WEIGHTS_GB.values()),
+                               places=2)
+
+    def test_headroom_is_what_is_left_for_ACTIVATIONS(self):
+        # Разделение потребителей: веса постоянны, активации растут как
+        # разрешение x кадры. Смешать их в одно число — потерять возможность
+        # рассуждать о том, что вообще экономить.
+        cfg = self.a.plan(6.0)
+        self.assertAlmostEqual(cfg.headroom_gb(6.0), 6.0 - cfg.weights_gb,
+                               places=2)
+        self.assertGreater(cfg.headroom_gb(12.0), cfg.headroom_gb(6.0))
+
+    def test_the_plan_says_out_loud_that_it_is_a_CALCULATION(self):
+        text = "\n".join(self.a.plan(6.0).notes)
+        self.assertIn("РАСЧЁТ", text)
+        self.assertIn("не замер", text)
+
+    def test_a_tight_card_turns_on_vae_tiling_a_roomy_one_does_not(self):
+        self.assertTrue(self.a.plan(6.0).vae_tiling)
+        self.assertFalse(self.a.plan(12.0).vae_tiling)
+
+    def test_the_allocator_is_set_before_cuda_and_reports_what_it_did(self):
+        import os
+
+        was = os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        self.addCleanup(lambda: os.environ.__setitem__(
+            "PYTORCH_CUDA_ALLOC_CONF", was) if was else None)
+        got = self.a.prepare_allocator()
+        self.assertIn("expandable_segments", got)
+        self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"],
+                         self.a.ALLOC_CONF)
+        # Заданное человеком не перетирается: он мог знать больше нас.
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+        self.assertIn("оставлено", self.a.prepare_allocator())
+        self.assertEqual(os.environ["PYTORCH_CUDA_ALLOC_CONF"],
+                         "max_split_size_mb:128")
+
+    def test_without_a_card_the_peak_is_NOT_MEASURED_rather_than_zero(self):
+        # Ноль здесь читался бы как «памяти не понадобилось». Отсутствие
+        # измерения — третий исход, и он обязан быть отличим.
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch не установлен")
+        if torch.cuda.is_available():
+            self.skipTest("карта есть — случай «мерить нечем» не воспроизвести")
+        self.assertIsNone(self.a.peak_memory())

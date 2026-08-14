@@ -84,6 +84,22 @@ WAIST_UP_FACE_SHARE = 0.19
 MIN_JUDGED_FACE_PX = 70
 
 
+#: Размеры весов в fp16, гигабайты. ВЗЯТЫ ИЗ HF API по размеру файлов fp32 и
+#: делением пополам, а не по памяти автора. Нужны, чтобы отделить постоянного
+#: потребителя памяти (веса) от растущего (активации): приёмы экономии бьют по
+#: разным потребителям, и путать их бессмысленно.
+WEIGHTS_GB = {
+    "unet": 1.72, "motion_adapter": 0.84, "controlnet": 0.72,
+    "text_encoder": 0.25, "vae": 0.17, "ip_adapter": 0.15,
+}
+
+#: Переменная окружения аллокатора CUDA. Он нарезает память блоками, и при
+#: чередовании крупных и мелких запросов она ДРОБИТСЯ: свободного суммарно
+#: хватает, а непрерывного куска нет — и получается отказ по памяти при живых
+#: сотнях мегабайт. Этот режим разрешает расширять сегменты. Стоит ноль.
+ALLOC_CONF = "expandable_segments:True"
+
+
 @dataclass
 class Plan:
     """Режим генерации, посчитанный ДО загрузки весов."""
@@ -97,7 +113,19 @@ class Plan:
     vae_slicing: bool
     face_px: float
     identity_verifiable: bool
+    #: Тайлинг VAE — следующий уровень после нарезки, когда и она не спасла.
+    vae_tiling: bool = False
+    #: Слияние проекций внимания: меньше промежуточных тензоров, заодно быстрее.
+    fuse_qkv: bool = True
     notes: list = field(default_factory=list)
+
+    @property
+    def weights_gb(self) -> float:
+        return round(sum(WEIGHTS_GB.values()), 2)
+
+    def headroom_gb(self, vram_gb: float) -> float:
+        """Сколько остаётся на АКТИВАЦИИ после весов. Оценка, не замер."""
+        return round(vram_gb - self.weights_gb, 2)
 
     def render(self) -> str:
         lines = [f"{self.width}x{self.height}, {self.frames} кадров, "
@@ -124,6 +152,7 @@ def plan(vram_gb: float, *, waist_up: bool = True,
     пометка обязательна, пока не проверены.
     """
     notes = []
+    tiling = False
     if vram_gb >= 10:
         w, h, offload = 640, 960, "none"
     elif vram_gb >= 7:
@@ -131,12 +160,27 @@ def plan(vram_gb: float, *, waist_up: bool = True,
         notes.append("модельная выгрузка: медленнее, но 16 кадров помещаются")
     elif vram_gb >= 5:
         w, h, offload = 512, 768, "model"
+        tiling = True
         notes.append("6 ГБ — впритык: три довеска на одной UNet. Если упадёт по "
                      "памяти, первым снимать ControlNet, а не разрешение: без "
                      "него теряется движение, но кадр остаётся судимым")
     else:
         w, h, offload = 384, 576, "sequential"
+        tiling = True
         notes.append("последовательная выгрузка: работает, но в разы медленнее")
+
+    # РАЗДЕЛЕНИЕ ПОТРЕБИТЕЛЕЙ, ради которого этот расчёт и печатается.
+    # Веса постоянны и от разрешения не зависят; активации растут как
+    # разрешение x кадры. Приёмы экономии бьют по разным потребителям, и
+    # знать заранее, сколько осталось НА АКТИВАЦИИ, полезнее, чем узнать это
+    # отказом по памяти после минуты загрузки.
+    weights = round(sum(WEIGHTS_GB.values()), 2)
+    left = round(vram_gb - weights, 2)
+    notes.append(f"веса в fp16 занимают ~{weights} ГБ, на активации остаётся "
+                 f"~{left} ГБ (РАСЧЁТ по размерам файлов, не замер)")
+    if left < 1.0:
+        notes.append("запаса на активации почти нет: сначала выгрузка и "
+                     "тайлинг VAE, и только потом трогать кадры")
 
     share = WAIST_UP_FACE_SHARE if waist_up else FULL_BODY_FACE_SHARE
     face_px = h * share
@@ -150,7 +194,8 @@ def plan(vram_gb: float, *, waist_up: bool = True,
         notes.append("полный рост: доля лица 9.4% высоты — измерено, не оценка")
     return Plan(width=w, height=h, frames=frames, dtype="float16",
                 offload=offload, attention_slicing=True, vae_slicing=True,
-                face_px=face_px, identity_verifiable=verifiable, notes=notes)
+                vae_tiling=tiling, face_px=face_px,
+                identity_verifiable=verifiable, notes=notes)
 
 
 def preflight(vram_gb: float | None = None) -> dict:
@@ -272,10 +317,33 @@ def build(cfg: Plan, *, motion_lora: str | None = None, base: str = BASE_MODEL,
         pipe.load_lora_weights(MOTION_LORA_REPO.format(name=motion_lora),
                                adapter_name=f"motion_{motion_lora}")
 
+    # ПОРЯДОК ЭКОНОМИИ — от бесплатного к дорогому, и он не произвольный.
+    #
+    # 1. Слияние проекций QKV: три матрицы внимания склеиваются в одну. Меньше
+    #    промежуточных тензоров и заодно быстрее — платить нечем.
+    # 2. Нарезка VAE: декодер разворачивает ВСЕ кадры разом, и на видео это
+    #    самый частый пик. Нарезка декодирует по одному кадру; скорость почти
+    #    не страдает, потому что декод — малая доля времени.
+    # 3. Тайлинг VAE: следующий уровень, когда и нарезки мало.
+    # 4. Нарезка внимания: считает головы порциями, стоит несколько процентов.
+    # 5. Выгрузка на CPU: экономит ВЕСА, платим переливаниями по PCIe.
+    #
+    # Текстовый энкодер отдельно освобождать НЕ НАДО: при модельной выгрузке
+    # diffusers сам уводит его с карты после кодирования промта. Ручная
+    # выгрузка была бы вторым способом сделать одно и то же — а это ровно тот
+    # источник расхождений, который в этом проекте уже дважды кусался.
+    if getattr(cfg, "fuse_qkv", False) and hasattr(pipe, "fuse_qkv_projections"):
+        try:
+            pipe.fuse_qkv_projections()
+        except Exception as exc:                 # не все блоки это умеют
+            if verbose:
+                print(f"слияние QKV не применилось: {exc}")
     if cfg.attention_slicing:
         pipe.enable_attention_slicing()
     if cfg.vae_slicing:
         pipe.enable_vae_slicing()
+    if getattr(cfg, "vae_tiling", False):
+        pipe.enable_vae_tiling()
     if cfg.offload == "model":
         pipe.enable_model_cpu_offload()
     elif cfg.offload == "sequential":
@@ -289,6 +357,69 @@ def build(cfg: Plan, *, motion_lora: str | None = None, base: str = BASE_MODEL,
               + (f" + motion-lora:{motion_lora}" if motion_lora else ""))
         print("активные LoRA:", active_loras(pipe))
     return pipe
+
+
+def prepare_allocator() -> str:
+    """Настроить аллокатор CUDA против фрагментации. Вернуть, что вышло.
+
+    Ставится ДО первого обращения к CUDA — после инициализации контекста
+    переменная уже ничего не меняет. Поэтому её место в начале прогона, а не
+    рядом с генерацией.
+    """
+    import os
+
+    was = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+    if was:
+        return f"оставлено как задано: {was}"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ALLOC_CONF
+    return f"выставлено {ALLOC_CONF}"
+
+
+def peak_memory() -> dict | None:
+    """Фактический пик памяти на карте. None — мерить нечем.
+
+    РАДИ ЧЕГО ЭТО СУЩЕСТВУЕТ. Всё, что модуль говорит о памяти до прогона, —
+    арифметика по размерам файлов. Арифметика полезна, но подавать её как замер
+    нельзя, и до сих пор у нас не было ни одного НАСТОЯЩЕГО числа: карты в
+    среде разработки нет.
+
+    Одна строка после первого же живого прогона закрывает этот пробел
+    навсегда — и заодно показывает, врал ли расчёт. `max_memory_allocated`
+    считает то, что запросил PyTorch; `max_memory_reserved` — то, что он взял у
+    драйвера, и именно второе упирается в потолок карты. Разница между ними и
+    есть фрагментация, против которой выставляется аллокатор.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        alloc = torch.cuda.max_memory_allocated() / 1e9
+        reserved = torch.cuda.max_memory_reserved() / 1e9
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        return {
+            "peak_allocated_gb": round(alloc, 2),
+            "peak_reserved_gb": round(reserved, 2),
+            "total_gb": round(total, 2),
+            "headroom_gb": round(total - reserved, 2),
+            "fragmentation_gb": round(reserved - alloc, 2),
+            "note": (f"пик {alloc:.2f} ГБ запрошено / {reserved:.2f} ГБ занято "
+                     f"из {total:.2f}; свободно {total - reserved:.2f}. "
+                     f"ЭТО ЗАМЕР, в отличие от расчёта в плане"),
+        }
+    except Exception:
+        return None
+
+
+def reset_memory_stats() -> None:
+    """Обнулить счётчики пика — иначе замер второго прогона включит первый."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        pass
 
 
 def active_loras(pipe) -> list:
