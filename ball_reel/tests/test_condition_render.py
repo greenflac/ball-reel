@@ -192,6 +192,32 @@ class RetargetingChangesLengthsNotDirections(unittest.TestCase):
         self.assertGreater(self.s.MAX_RETARGET_FACTOR, 1.0)
         self.assertLess(self.s.MIN_RETARGET_FACTOR, 1.0)
 
+    def test_a_bone_collapsing_to_a_point_is_refused_too(self):
+        """Нижняя граница обязана кусаться так же, как верхняя.
+
+        НАЙДЕНО МУТАЦИОННЫМ АУДИТОМ: `MIN_RETARGET_FACTOR = 0.0` пережил все
+        тесты. Верхнюю границу сторожил случай с множителем 3, а про нижнюю
+        утверждалось лишь `MIN < 1.0` — что при нуле ИСТИНА. То есть кость
+        могла схлопнуться в точку, и ни один тест бы не возразил: конечность
+        просто исчезла бы из кадра, а условия выглядели бы нормально.
+
+        Ровно тот случай, ради которого аудит и написан: порог, который никто
+        не сторожит, завтра сдвинут незаметно.
+        """
+        # Цель в двадцать раз короче донора — это не телосложение.
+        factors, origin = self.s.retarget_plan({"l_hip->l_knee": 0.025},
+                                               self.DONOR)
+        self.assertNotIn("l_hip->l_knee", factors)
+        self.assertIn("отброшен", origin["l_hip->l_knee"])
+        # И зеркало не должно протащить отвергнутое на другую сторону.
+        self.assertNotIn("r_hip->r_knee", factors)
+
+    def test_a_plausibly_shorter_bone_still_passes(self):
+        # Обратная сторона: граница, бракующая всё короткое, — не защита, а
+        # регресс. На нашей рефке измеренный множитель бедра 0.701.
+        factors, _ = self.s.retarget_plan({"l_hip->l_knee": 0.35}, self.DONOR)
+        self.assertAlmostEqual(factors["l_hip->l_knee"], 0.7, places=6)
+
     def test_mirror_key_swaps_both_ends_and_leaves_centre_bones(self):
         self.assertEqual(self.s.mirror_key("l_hip->l_knee"), "r_hip->r_knee")
         self.assertEqual(self.s.mirror_key("r_elbow->r_wrist"),

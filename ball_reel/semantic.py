@@ -713,7 +713,33 @@ def main(argv: list) -> int:
     ap.add_argument("--frames", nargs="*", default=None, help="кадры клипа")
     ap.add_argument("--uncalibrated", action="store_true",
                     help="прогнать и неоткалиброванные утверждения (объект, сцена)")
+    ap.add_argument("--attribution", metavar="КАТАЛОГ",
+                    help="чья одежда на кадрах: заказа, фото личности или "
+                         "driving-видео. Отвечает на вопрос, который «та ли "
+                         "одежда» не задаёт вовсе")
     args = ap.parse_args(argv)
+
+    if args.attribution:
+        import glob as _glob
+        import os as _os
+
+        d = args.attribution
+        frames = (sorted(_glob.glob(_os.path.join(d, "*.png")))
+                  + sorted(_glob.glob(_os.path.join(d, "*.jpg"))))
+        if not frames:
+            print(f"в {d} нет ни png, ни jpg — приписывать одежду нечему")
+            return 1
+        got = attribution(frames, ordered=DEMO_ORDERED,
+                          identity=DEMO_IDENTITY, driving=DEMO_DRIVING)
+        print(f"кадров: {len(frames)}")
+        for k, v in sorted(got["scores"].items(), key=lambda kv: -kv[1]):
+            print(f"  {k:16s} {v:+.4f}")
+        print(f"\nисточник: {got['source'] or 'НЕ РАЗЛИЧИЛИ'}")
+        print(f"  {got['note']}")
+        # Код возврата различает три исхода, а не два: 0 — одежда пришла из
+        # заказа, 1 — протекла из референса, 2 — не смогли определить.
+        return 0 if got["source"] == SOURCE_ORDER else (
+            2 if got["source"] is None else 1)
 
     if args.controls:
         claims = ((CLOTHING, OBJECT_UNCALIBRATED, SCENE_UNCALIBRATED)
@@ -754,6 +780,124 @@ def main(argv: list) -> int:
     print(render(semantic_match(args.frames)))
     return 0
 
+
+
+
+# --------------------------------------------------------------------------
+# ОТКУДА ПРИШЛА ОДЕЖДА. Не «та ли она», а «из какого источника».
+
+#: Три источника, между которыми различает `attribution`. Формулировки — в той
+#: же рамке предложения, что и всё остальное: сравнение обязано быть
+#: минимальной парой, иначе меряется кадрирование, а не слот.
+#:
+#: ЗАЧЕМ ОТДЕЛЬНО ОТ `semantic_match`. Тот отвечает «одежда та / не та» одним
+#: числом с порогом. Этого мало, когда надо ПОКАЗАТЬ, что конвейер работает:
+#: «не та» не говорит, протекла ли она из фото личности или из driving-видео, а
+#: это разные поломки с разной починкой. Первая означает, что канал личности
+#: тащит с собой лишнее; вторая — что ControlNet тащит не только позу.
+#:
+#: ПОЧЕМУ ЗДЕСЬ ПОЧТИ НЕ НУЖЕН ПОРОГ. Вопрос поставлен как выбор из трёх, а не
+#: как «выше ли числа X»: побеждает ближайший источник. Порог нужен ровно для
+#: одного — объявить ничью, когда два источника разошлись на пустяк.
+#:
+#: Для ничьей ЗАИМСТВОВАН `MARGIN_MIN`, и это надо назвать вслух: он измерен
+#: для ДРУГОЙ величины (маржа «заказ против альтернатив» внутри одного слота),
+#: а здесь сравниваются лучшие скоры трёх РАЗНЫХ наборов. Величины
+#: однопорядковые, обе — разности косинусов в одной рамке предложения, поэтому
+#: заимствование разумно; но замером для ЭТОГО применения оно не является, и
+#: выдавать его за таковой нельзя.
+#:
+#: На практике запас велик и вопрос пока академический. ИЗМЕРЕНО на кадрах, где
+#: ответ известен заранее:
+#:     driving-кадры (12 шт) -> «driving-видео», отрыв 0.0911 (7.6 шума)
+#:     kit/face.jpg          -> «фото личности», отрыв 0.1651 (13.8 шума)
+#: Третьего положительного контроля — кадра, где одежда пришла ИЗ ЗАКАЗА, — в
+#: репозитории нет и быть не может до первого прогона. Значит про третий исход
+#: сказать нечего, и это НЕПРОВЕРЕНО, а не «работает».
+#: Формулировки трёх источников ДЛЯ НАШЕГО ДЕМО. Живут рядом с функцией, а не
+#: в рунбуке: описание, разошедшееся с командой, врёт молча. Подобраны так,
+#: чтобы заказ был ТРЕТЬИМ значением по каждой оси — цвету, крою и месту, —
+#: иначе исход «спортивная одежда» не отличить от утечки из driving-видео.
+DEMO_ORDERED = ("in a bright red tank top and black shorts",
+                "in a red sleeveless top and dark shorts")
+DEMO_IDENTITY = ("in a frilly pink tulle dress", "in a tutu",
+                 "in a party dress")
+DEMO_DRIVING = ("in a navy sports bra and leggings",
+                "in dark athletic sportswear")
+
+SOURCE_ORDER = "заказ"
+SOURCE_IDENTITY = "фото личности"
+SOURCE_DRIVING = "driving-видео"
+
+
+def attribution(frames, *, ordered: tuple, identity: tuple, driving: tuple,
+                model_id: str = MODEL_ID, margin_min: float = MARGIN_MIN) -> dict:
+    """Чья одежда на кадрах: заказа, фото личности или driving-видео.
+
+    `ordered`, `identity`, `driving` — наборы формулировок БЕЗ рамки: рамку
+    функция накладывает сама, чтобы три набора были заведомо сравнимы.
+
+    Смысл этой функции — сделать прогон ПОКАЗАТЕЛЬНЫМ. Пока заказ описывает то
+    же, что видно на driving-кадре, опыт неинтерпретируем: спортивная одежда на
+    выходе может быть и исполнением заказа, и утечкой из видео, и различить их
+    нечем. Стоит заказать ТРЕТЬЕ — и три исхода становятся различимы:
+
+        победил заказ            -> конвейер работает как обещано;
+        победило фото личности   -> канал личности тащит не только лицо;
+        победило driving-видео   -> ControlNet тащит не только позу.
+
+    Три исхода и здесь: победитель / ничья в пределах шума / не смогли.
+    """
+    import numpy as np
+
+    empty = {"source": None, "margin": None, "scores": {}}
+    frames = [str(f) for f in frames]
+    if not frames:
+        return {**empty, "note": "кадров нет: приписывать одежду нечему"}
+    sets = {SOURCE_ORDER: tuple(ordered), SOURCE_IDENTITY: tuple(identity),
+            SOURCE_DRIVING: tuple(driving)}
+    blank = [k for k, v in sets.items() if not v]
+    if blank:
+        return {**empty, "note": (
+            f"нечем описать источник(и): {', '.join(blank)}. Выбор из двух "
+            f"вариантов не отличает утечку от исполнения заказа")}
+    if not available(model_id):
+        return {**empty, "note": "НЕ ИЗМЕРЕНО: " + why_unavailable(model_id)}
+
+    vecs, ok, bad = _encode_images(frames, model_id)
+    if vecs is None:
+        return {**empty, "note": (
+            f"НЕ ИЗМЕРЕНО: ни один из {len(frames)} кадров не открылся "
+            f"({bad[:2]})")}
+
+    texts = {k: [_FRAME.format(x) for x in v] for k, v in sets.items()}
+    enc = {k: _encode_texts(v, model_id) for k, v in texts.items()}
+    rows = [r.tolist() for v in enc.values() for r in v]
+    if texts_collapsed(rows):
+        return {**empty, "note": (
+            "НЕ ИЗМЕРЕНО: текстовая башня схлопнулась — разные формулировки "
+            "дали один вектор. Прибор слеп, числа ничего не значат.\n"
+            + why_unavailable(model_id))}
+
+    # По каждому источнику берётся ЛУЧШАЯ из его формулировок на кадр, затем
+    # медиана по кадрам. Лучшая — потому что набор описывает ОДИН слот разными
+    # словами, и слабая формулировка не должна топить источник; медиана — потому
+    # что один неудачный кадр не должен решать за клип.
+    per = {k: _median([max(row) for row in (vecs @ v.T).tolist()])
+           for k, v in enc.items()}
+    ranked = sorted(per.items(), key=lambda kv: -kv[1])
+    (top, best), (_, second) = ranked[0], ranked[1]
+    margin = round(best - second, 4)
+    scores = {k: round(v, 4) for k, v in per.items()}
+    if margin < margin_min:
+        return {"source": None, "margin": margin, "scores": scores,
+                "note": (f"источники разошлись на {margin:.4f} при шуме "
+                         f"{margin_min}: РАЗЛИЧИТЬ НЕ СМОГЛИ. Это не «заказ "
+                         f"исполнен», а «мы не знаем, чья это одежда»")}
+    return {"source": top, "margin": margin, "scores": scores,
+            "note": (f"одежда ближе всего к источнику «{top}», отрыв "
+                     f"{margin:.4f} при шуме {margin_min}. Порядок: "
+                     + ", ".join(f"{k} {v:+.4f}" for k, v in ranked))}
 
 if __name__ == "__main__":
     import sys

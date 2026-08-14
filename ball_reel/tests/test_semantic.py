@@ -427,3 +427,72 @@ class WithTheRealWeights(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhoseClothesAreTheseAnyway(unittest.TestCase):
+    """Определитель источника: заказ, фото личности или driving-видео.
+
+    ЗАЧЕМ ОН ЕСТЬ. Пока заказ описывал то же, что видно на driving-кадре
+    («спортивный топ в светлой комнате»), опыт был НЕИНТЕРПРЕТИРУЕМ: спортивная
+    одежда на выходе могла быть и исполнением заказа, и утечкой из видео, и
+    различить их нечем. Дефект не в коде, а в постановке опыта — и он важнее
+    кодовых, потому что делает бессмысленным результат, а не строку.
+
+    Стоит заказать ТРЕТЬЕ (красная майка вместо тёмно-синего топа и вместо
+    розового платья) — и три исхода становятся различимы.
+    """
+
+    def setUp(self):
+        from ball_reel import semantic
+
+        self.s = semantic
+
+    def test_no_frames_is_not_measurable_rather_than_a_source(self):
+        got = self.s.attribution([], ordered=("a",), identity=("b",),
+                                 driving=("c",))
+        self.assertIsNone(got["source"])
+        self.assertTrue(got["note"])
+
+    def test_a_missing_source_description_is_refused_by_name(self):
+        """Два источника вместо трёх не отличают утечку от исполнения заказа."""
+        got = self.s.attribution(["x.png"], ordered=("a",), identity=(),
+                                 driving=("c",))
+        self.assertIsNone(got["source"])
+        self.assertIn("фото личности", got["note"])
+
+    def test_the_tie_threshold_is_borrowed_and_says_so(self):
+        # Он измерен для ДРУГОЙ величины. Заимствование разумно, но выдавать
+        # его за замер для этого применения нельзя — и модуль это признаёт.
+        doc = " ".join((self.s.__doc__ or "").split())
+        src = __import__("inspect").getsource(self.s)
+        self.assertIn("ЗАИМСТВОВАН", src)
+        self.assertIn("НЕПРОВЕРЕНО", src)
+
+    def test_the_three_sources_are_named_constants_not_literals(self):
+        # Имена источников попадают в отчёт и в разговор; разъехавшись между
+        # модулем и вызывающим, они молча превратят «утечку» в «заказ».
+        for name in (self.s.SOURCE_ORDER, self.s.SOURCE_IDENTITY,
+                     self.s.SOURCE_DRIVING):
+            self.assertTrue(name and isinstance(name, str))
+        self.assertEqual(
+            len({self.s.SOURCE_ORDER, self.s.SOURCE_IDENTITY,
+                 self.s.SOURCE_DRIVING}), 3, "источники обязаны различаться")
+
+    @unittest.skipUnless(__import__("os").environ.get("BALL_REEL_SEMANTIC_LIVE"),
+                         "живой прогон под BALL_REEL_SEMANTIC_LIVE=1")
+    def test_it_names_the_right_source_on_frames_with_a_known_answer(self):
+        """ИЗМЕРЕНО: driving-кадры -> driving, фото -> фото. Отрывы 0.09 и 0.17."""
+        import glob
+
+        ordered = ("in a bright red tank top and black shorts",)
+        identity = ("in a frilly pink tulle dress", "in a tutu",
+                    "in a party dress")
+        driving = ("in a navy sports bra and leggings",
+                   "in dark athletic sportswear")
+        got = self.s.attribution(sorted(glob.glob("kit/driving/*.jpg"))[::6],
+                                 ordered=ordered, identity=identity,
+                                 driving=driving)
+        self.assertEqual(got["source"], self.s.SOURCE_DRIVING, got["note"])
+        got = self.s.attribution(["kit/face.jpg"], ordered=ordered,
+                                 identity=identity, driving=driving)
+        self.assertEqual(got["source"], self.s.SOURCE_IDENTITY, got["note"])
