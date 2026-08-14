@@ -225,3 +225,45 @@ class TheFramingIsAChoiceTheCutMustCarry(unittest.TestCase):
         self.assertIn("waist_up", src)
         self.assertIn("ВТОРОЙ прогон", src)
         self.assertIn("движение тела важнее", src)
+
+
+class BothKitsAreWHOLEInGit(unittest.TestCase):
+    """Полкита в репозитории выглядит как кит и не работает как кит.
+
+    ИЗМЕРЕНО и допущено: `demo/kit_waist` попал в git ОДНИМИ driving-кадрами.
+    Условия и фото отсеклись `.gitignore` — там с давних пор стоят `conditions/`
+    и `face.jpg`, а первый кит когда-то добавили через `git add -f`, и про это
+    забыли. Каталог при этом выглядит полным: имя на месте, файлы внутри есть.
+
+    Проверять надо ИМЕННО индекс git, а не диск: на машине автора всё лежит, и
+    отсутствие замечается только у того, кто склонировал. То есть у проверяющего.
+    """
+
+    def setUp(self):
+        import subprocess
+
+        self.tracked = set(subprocess.run(
+            ["git", "ls-files"], capture_output=True, text=True,
+            cwd=Path(__file__).resolve().parents[2]).stdout.split())
+
+    def _kit(self, name: str):
+        return sorted(p for p in self.tracked if p.startswith(f"demo/{name}/"))
+
+    def test_both_kits_carry_conditions_driving_face_and_manifest(self):
+        for name in ("kit", "kit_waist"):
+            with self.subTest(kit=name):
+                files = self._kit(name)
+                if not files:
+                    self.skipTest(f"demo/{name} нет в этом дереве")
+                for part in ("conditions/", "driving/", "face.jpg",
+                             "manifest.json"):
+                    self.assertTrue(any(part in f for f in files),
+                                    f"demo/{name}: в git нет {part} — "
+                                    f"каталог выглядит китом и им не является")
+
+    def test_the_two_kits_have_the_same_shape(self):
+        a, b = self._kit("kit"), self._kit("kit_waist")
+        if not a or not b:
+            self.skipTest("оба кита нужны для сравнения")
+        self.assertEqual(len(a), len(b),
+                         "киты разной полноты: один из них обрезан .gitignore")
