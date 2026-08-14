@@ -109,47 +109,78 @@ Windows сборку БЕЗ CUDA**, и она молча перекрывает 
 `requirements-gpu.txt`: requirements-файл не умеет сказать «эту строку тащить из
 другого индекса».
 
-```bash
-# 1. Какая CUDA у драйвера — смотреть в шапке вывода:
+**Команды ниже — без комментариев внутри блоков.** Это не стиль: в Windows CMD
+`#` не комментарий, а команда, и строка `# ставим торч` отвечает `'#' is not
+recognized as an internal or external command`. Проверено на живой машине —
+оператор скопировал блок с пояснениями и получил четыре такие ошибки подряд.
+По той же причине здесь нет плейсхолдеров вроде `cuXXX`: подставленный
+буквально, он даёт `Could not find a version that satisfies the requirement`,
+и это выглядит как «нет торча», а не как «вы не заменили заглушку».
+
+Сначала посмотреть, какую CUDA поддерживает драйвер — она в ШАПКЕ вывода:
+
+```
 nvidia-smi
 ```
 
-```bash
-# 2. Torch под эту CUDA. КОМАНДУ ВЗЯТЬ В СЕЛЕКТОРЕ, а не отсюда:
-#    https://pytorch.org/get-started/locally/
-#    Вид у неё такой (cuXXX подставляет селектор):
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cuXXX
+Дальше **под то, что там написано**. Ниже — команда для драйверов с
+`CUDA Version: 13.0` и выше; проверено на RTX 3050 Laptop, драйвер 581.57.
+Что индекс `cu130` существует — не по памяти: в среде разработки стоят ровно
+`torch 2.13.0+cu130` и `torchvision 0.28.0+cu130`.
+
+```
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
 
-Точный тег `cuXXX` в этом файле НЕ ЗАПИСАН намеренно: `download.pytorch.org`
-закрыт прокси среды разработки (403), список колёс оттуда прочитать нельзя, а
-писать номер по памяти — это выдавать догадку за проверку. Правило без номера:
-**CUDA драйвера (шапка `nvidia-smi`) не ниже CUDA сборки torch.** Ниже — падает
-не «нет CUDA», а `no kernel image is available for execution on the device` на
-первом же ядре.
+Если в шапке `nvidia-smi` версия НИЖЕ 13.0 — брать команду в селекторе
+<https://pytorch.org/get-started/locally/> под свою. Правило, которое важнее
+любого номера: **CUDA драйвера не ниже CUDA сборки torch.** Ниже — падает не
+«нет CUDA», а `no kernel image is available for execution on the device` на
+первом же ядре, то есть после загрузки семи гигабайт весов.
 
-```bash
-# 3. Остальное — из файла, где версии закреплены осознанно:
+```
 pip install -r requirements-gpu.txt
+```
 
-# 4. Отбирающий распознаватель для набора LoRA — ОТДЕЛЬНО и с --no-deps,
-#    иначе pip вправе снести CUDA-колесо torch ради своего:
+```
 pip install --no-deps facenet-pytorch
-
-# 5. ffmpeg (без него кадры соберутся, а ролика не будет):
-#    Linux: apt install ffmpeg    Windows: winget install ffmpeg
 ```
 
-**Проверка установки — одной командой, до всего остального:**
+`--no-deps` здесь обязателен: у `facenet-pytorch` в зависимостях свой torch, и
+pip вправе снести CUDA-колесо ради колеса с PyPI — то есть повторить ровно ту
+поломку, из-за которой torch не живёт в `requirements-gpu.txt`.
 
-```bash
-python3 -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+ffmpeg (без него кадры соберутся, а ролика не будет):
+
+```
+winget install Gyan.FFmpeg
 ```
 
-Годный ответ выглядит так: `2.x.x+cu126 True 12.6`. Если видите `+cpu` или
-`False` — вернитесь к шагу 2, ничего дальше запускать не нужно: весь маршрут
-упрётся в это. `pip install torch` поверх сломанной установки не чинит её,
-нужно `pip uninstall torch torchvision` и заново из индекса.
+**Проверка установки — до всего остального:**
+
+```
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.version.cuda)"
+```
+
+Годный ответ: `2.13.0+cu130 True 13.0`. Если видите `+cpu` или `False` —
+дальше не идти, весь маршрут упрётся в это. Поверх сломанной установки
+`pip install torch` не чинит: нужно `pip uninstall torch torchvision` и заново
+из индекса.
+
+**Python 3.14.** Всё, кроме torch, идёт под него готовыми колёсами. Если под
+3.14 колеса torch в индексе ещё нет, ошибка будет та же — `No matching
+distribution found for torch`, — и означать она будет уже «нет колеса под эту
+версию Python», а не «нет такого индекса». Лечение — 3.12 рядом:
+
+```
+winget install Python.Python.3.12
+py -3.12 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+```
+
+и дальше весь маршрут через `py -3.12 -m ball_reel....`
+
+**Windows: `python`, а не `python3`.** В командах ниже написано `python3` —
+на Windows это либо не найдётся, либо откроет Microsoft Store.
 
 Веса (~7 ГБ) поедут сами при первом запуске в `HF_HOME`. Диска нужно **от 30 ГБ**
 свободных; предполёт шага 1 проверяет это до генерации, а не после.
