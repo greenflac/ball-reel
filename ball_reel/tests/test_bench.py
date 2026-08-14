@@ -470,3 +470,56 @@ class TheYieldFloorMatchesItsOwnArithmetic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnmeasuredIsCountedNotSubtracted(unittest.TestCase):
+    """«Ось не говорила» обязано быть видно отдельно от «ось сказала да».
+
+    Веса CLIP (~600 МБ) на машине могут отсутствовать, и гейт на этом не
+    падает: исход честно `not_measurable`. Но тогда фраза «одежда проверена»
+    становится неправдой, а по сводке этого не видно — непроверенное
+    неотличимо от прошедшего.
+
+    Проект уже платил за ровно эту ошибку: поле `first_failing_check` свело
+    два разных исхода к слову `error`, и по нему ДВАЖДЫ был сделан вывод «всё
+    упало на вызовах API», хотя отказов API не было ни одного.
+    """
+
+    def setUp(self):
+        from ball_reel import bench
+
+        self.b = bench
+
+    def _session(self, *attempts):
+        return [{"kind": "session", "passed": False, "attempts": list(attempts)}]
+
+    def test_unmeasured_attempts_are_counted(self):
+        got = self.b.summarise(self._session(
+            {"passed": True, "semantic": {"verdict": "matches"}},
+            {"passed": True, "semantic": {"verdict": "not_measurable"}}))
+        self.assertEqual(got["semantic_judged"], 2)
+        self.assertEqual(got["semantic_not_measurable"], 1)
+
+    def test_attempts_that_never_reached_the_axis_are_not_in_the_denominator(self):
+        # Попытка, отсеянная раньше по цене, ось не запускала вовсе — считать
+        # её «непроверенной одеждой» значило бы врать в другую сторону.
+        got = self.b.summarise(self._session(
+            {"passed": False, "check": "identity_median"},
+            {"passed": True, "semantic": {"verdict": "matches"}}))
+        self.assertEqual(got["semantic_judged"], 1)
+
+    def test_a_run_where_the_axis_never_spoke_says_so_in_words(self):
+        got = self.b.summarise(self._session({"passed": False,
+                                              "check": "motion_amount"}))
+        self.assertEqual(got["semantic_judged"], 0)
+        self.assertIn("не запускалась", got["semantic_note"])
+
+    def test_the_share_is_counted_not_derived_by_subtraction(self):
+        # Вычитание «судила минус прошла» смешало бы непроверенное с
+        # забракованным: оба не «matches», а чинятся по-разному.
+        got = self.b.summarise(self._session(
+            {"passed": False, "check": "semantic",
+             "semantic": {"verdict": "mismatched"}},
+            {"passed": True, "semantic": {"verdict": "not_measurable"}}))
+        self.assertEqual(got["semantic_judged"], 2)
+        self.assertEqual(got["semantic_not_measurable"], 1)

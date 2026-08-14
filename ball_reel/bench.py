@@ -255,7 +255,28 @@ def summarise(records: list) -> dict:
                     if passed_sessions else None)
     durations = sorted(r["seconds"] for r in sessions if r.get("seconds"))
 
+    # СКОЛЬКО ПОПЫТОК ОСЬ ОДЕЖДЫ НЕ СМОГЛА ПОСУДИТЬ. Веса CLIP (~600 МБ) на
+    # машине могут отсутствовать, и гейт на этом не падает — исход честно
+    # `not_measurable`. Но тогда «одежда проверена» становится неправдой, а по
+    # сводке этого не видно: непроверенное неотличимо от прошедшего.
+    #
+    # Это та же беда, что уже стоила проекту неверного вывода: поле
+    # `first_failing_check` свело два разных исхода к слову `error`, и по нему
+    # ДВАЖДЫ был сделан вывод «всё упало на вызовах API», хотя отказов API не
+    # было ни одного. Поэтому непроверенное считается отдельным числом, а не
+    # выводится вычитанием.
+    judged = [a for a in attempts if a.get("semantic")]
+    unmeasured = [a for a in judged
+                  if (a["semantic"] or {}).get("verdict") == "not_measurable"]
+
     return {
+        "semantic_judged": len(judged),
+        "semantic_not_measurable": len(unmeasured),
+        "semantic_note": (
+            f"ось одежды не смогла посудить {len(unmeasured)} из {len(judged)} "
+            f"попыток, до которых дошла" if judged else
+            "ось одежды не запускалась ни разу: до неё не дошла ни одна "
+            "попытка, либо весов CLIP нет на машине"),
         "sessions": len(sessions),
         "sessions_denominator": denominator,
         "sessions_passed": len(passed_sessions),
