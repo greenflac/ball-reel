@@ -289,3 +289,69 @@ class FusingQKVWouldDestroyTheIdentityChannel(unittest.TestCase):
         self.assertIn("IPAdapter", src,
                       "решение принимается не по составу процессоров")
         self.assertIn("ПРОПУЩЕНО", src)
+
+
+class TheSchedulerIsNotLeftToTheBaseModel(unittest.TestCase):
+    """Умолчание SD1.5 не годится модулю движения, и молчит об этом.
+
+    ИЗМЕРЕНО НА ПЕРВОМ ЖИВОМ ПРОГОНЕ (31 минута на карте): промт доехал
+    целиком — красная майка, зал, гантели, — а картинка вышла «живописной»,
+    мазками вместо фактуры кожи, и ArcFace не нашёл лица НИ НА ОДНОМ из
+    16 кадров. Мы списывали это на мелкое лицо (74 px при баре 100), но при
+    74 px детектор обычно что-то находит: «не найдено» означает мусор.
+
+    Причина: `animate.build` не задавал планировщик вовсе. Бралось умолчание
+    SD1.5 — `PNDMScheduler` с `beta_schedule="scaled_linear"`, — а модуль
+    движения AnimateDiff обучался с `linear`. Рассогласование не падает и
+    ничего не печатает.
+
+    Худший вид отказа: тот, который похож на работу. Гейт при этом честно
+    краснел, но объяснял невнятно — «поза не та», «лицо не найдено», — то есть
+    называл следствия, а не причину.
+    """
+
+    def setUp(self):
+        from ball_reel import animate
+
+        self.a = animate
+
+    def test_beta_schedule_is_linear_not_the_sd15_default(self):
+        """Главный из четырёх параметров: с ним и живёт модуль движения."""
+        self.assertEqual(self.a.MOTION_SCHEDULER["beta_schedule"], "linear")
+        self.assertNotEqual(self.a.MOTION_SCHEDULER["beta_schedule"],
+                            "scaled_linear")
+
+    def test_the_other_three_come_with_it(self):
+        s = self.a.MOTION_SCHEDULER
+        self.assertIs(s["clip_sample"], False)
+        self.assertEqual(s["timestep_spacing"], "linspace")
+        self.assertEqual(s["steps_offset"], 1)
+
+    def test_build_uses_the_constant_not_a_literal(self):
+        """Литерал внутри функции не мутируется аудитом и молча разъедется."""
+        import inspect
+
+        src = inspect.getsource(self.a.build)
+        self.assertIn("MOTION_SCHEDULER", src)
+        self.assertIn("DDIMScheduler", src)
+
+    def test_the_base_default_is_what_we_are_overriding(self):
+        """Замер, ради которого правка существует: у базы стоит scaled_linear.
+
+        Читается из конфига скачанных весов, а не утверждается по памяти. Нет
+        весов — нечего и сверять, тест пропускается.
+        """
+        import glob
+        import json
+        import os
+
+        hub = os.path.join(os.path.expanduser(
+            os.environ.get("HF_HOME", "~/.cache/huggingface")), "hub")
+        found = glob.glob(os.path.join(
+            hub, "models--stable-diffusion-v1-5--stable-diffusion-v1-5",
+            "snapshots", "*", "scheduler", "scheduler_config.json"))
+        if not found:
+            self.skipTest("веса SD1.5 не скачаны — сверять не с чем")
+        cfg = json.loads(open(found[0], encoding="utf-8").read())
+        self.assertEqual(cfg.get("beta_schedule"), "scaled_linear",
+                         "у базы уже не то умолчание — правку перепроверить")
