@@ -311,6 +311,50 @@ def preflight(vram_gb: float | None = None) -> dict:
     return report
 
 
+def enable_slicing_without_losing_identity(pipe, *, verbose: bool = True) -> str:
+    """Нарезка внимания — но НЕ ценой канала личности. -> что произошло.
+
+    ИЗМЕРЕНО, diffusers 0.39: `enable_attention_slicing()` заменяет процессоры
+    внимания на `SlicedAttnProcessor`, и на `UNet2DConditionModel` это стирает
+    ВСЕ 16 процессоров IP-Adapter — то есть канал личности целиком:
+
+        после load_ip_adapter         16
+        после attention_slicing        0   класс SlicedAttnProcessor
+
+    Падает это потом и невнятно: при активном IP-Adapter diffusers пакует
+    `encoder_hidden_states` в кортеж, а слитый процессор кортежа не понимает —
+    `AttributeError: 'tuple' object has no attribute 'shape'`. Тот же почерк,
+    что у `fuse_qkv_projections`, и та же цена.
+
+    НА `UNetMotionModel` ЭТОГО НЕ ПРОИСХОДИТ — там 16 остаются на месте
+    (проверено тем же замером). Поэтому не запрет, а ОТКАТ: включаем, смотрим
+    на состояние модели, и если канал пострадал — возвращаем как было. Так
+    экономия сохраняется везде, где она безвредна, и нигде не покупается
+    личностью.
+    """
+    procs = getattr(getattr(pipe, "unet", None), "attn_processors", None)
+    if procs is None:
+        pipe.enable_attention_slicing()
+        return "включена (состояние процессоров не опрашивается)"
+
+    def ip_count(d):
+        return sum(1 for v in d.values() if "IPAdapter" in type(v).__name__)
+
+    before = dict(procs)
+    had = ip_count(before)
+    pipe.enable_attention_slicing()
+    now = ip_count(pipe.unet.attn_processors)
+    if had and now < had:
+        pipe.unet.set_attn_processor(before)
+        note = (f"ОТКАЧЕНА: она стёрла бы {had} процессоров IP-Adapter "
+                f"({had} -> {now}), то есть канал личности целиком. Памяти "
+                f"это стоит немного, личности — всего")
+        if verbose:
+            print(f"  нарезка внимания {note}")
+        return note
+    return f"включена, канал личности цел ({now} процессоров)"
+
+
 def build(cfg: Plan, *, motion_lora: str | None = None,
           subject_lora: str | None = None, subject_lora_scale: float = 0.8,
           base: str = BASE_MODEL, verbose: bool = True):
@@ -501,7 +545,7 @@ def build(cfg: Plan, *, motion_lora: str | None = None,
             if verbose:
                 print(f"слияние QKV не применилось: {exc}")
     if cfg.attention_slicing:
-        pipe.enable_attention_slicing()
+        enable_slicing_without_losing_identity(pipe, verbose=verbose)
     if cfg.vae_slicing:
         pipe.enable_vae_slicing()
     if getattr(cfg, "vae_tiling", False):

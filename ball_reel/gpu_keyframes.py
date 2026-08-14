@@ -368,8 +368,14 @@ def load_pipeline(cfg: GPUPlan | None = None, *, device: str = ""):
     # прогоном и потому читается как описание того, что произойдёт; пока сюда
     # был зашит фиксированный набор, на карте >=8 ГБ план говорил одно,
     # а исполнялось другое.
+    # Нарезка внимания идёт ЧЕРЕЗ ОБЁРТКУ С ОТКАТОМ, а не напрямую: на
+    # `UNet2DConditionModel` она стирает все 16 процессоров IP-Adapter, то есть
+    # канал личности целиком (измерено; на `UNetMotionModel` — не стирает).
+    # Подробности и числа — в `animate.enable_slicing_without_losing_identity`.
+    from .animate import enable_slicing_without_losing_identity
+
     savings = {
-        "attention_slicing": pipe.enable_attention_slicing,
+        "attention_slicing": lambda: enable_slicing_without_losing_identity(pipe),
         "vae_slicing": pipe.enable_vae_slicing,
         "vae_tiling": pipe.enable_vae_tiling,
     }

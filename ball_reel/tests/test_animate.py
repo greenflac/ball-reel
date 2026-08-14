@@ -355,3 +355,99 @@ class TheSchedulerIsNotLeftToTheBaseModel(unittest.TestCase):
         cfg = json.loads(open(found[0], encoding="utf-8").read())
         self.assertEqual(cfg.get("beta_schedule"), "scaled_linear",
                          "у базы уже не то умолчание — правку перепроверить")
+
+
+class AttentionSlicingMustNotCostTheIdentityChannel(unittest.TestCase):
+    """Вторая экономия, стирающая то, ради чего собран пайплайн.
+
+    ИЗМЕРЕНО, diffusers 0.39, на `UNet2DConditionModel`:
+
+        после load_ip_adapter    16 процессоров IP-Adapter
+        после attention_slicing   0   класс SlicedAttnProcessor
+
+    А на `UNetMotionModel` те же 16 ОСТАЮТСЯ — проверено тем же замером.
+    Поэтому запрет был бы неверен: он отнял бы экономию там, где она
+    безвредна. Правильный ответ — включить и посмотреть на СОСТОЯНИЕ МОДЕЛИ,
+    откатив только при потере.
+
+    Это уже второй случай той же формы за вечер (первый — fuse_qkv), и общее у
+    них одно: оптимизация памяти молча снимает процессоры внимания, а замечаем
+    мы это по падению `'tuple' object has no attribute 'shape'` через минуту
+    генерации.
+    """
+
+    class _Proc:
+        def __init__(self, name):
+            self.__class__ = type(name, (object,), {})
+
+    def _pipe(self, *, wipes: bool, ip: int = 16, total: int = 72):
+        """Двойник пайплайна: считает процессоры и умеет их стирать."""
+        import types
+
+        class IPAdapterAttnProcessor2_0:
+            pass
+
+        class AttnProcessor2_0:
+            pass
+
+        class SlicedAttnProcessor:
+            pass
+
+        procs = {f"p{i}": (IPAdapterAttnProcessor2_0() if i < ip
+                           else AttnProcessor2_0()) for i in range(total)}
+        unet = types.SimpleNamespace(attn_processors=dict(procs))
+
+        def set_attn_processor(d):
+            unet.attn_processors = dict(d)
+
+        unet.set_attn_processor = set_attn_processor
+        pipe = types.SimpleNamespace(unet=unet, sliced=False)
+
+        def enable():
+            pipe.sliced = True
+            if wipes:
+                unet.attn_processors = {k: SlicedAttnProcessor()
+                                        for k in unet.attn_processors}
+
+        pipe.enable_attention_slicing = enable
+        return pipe
+
+    def _ip(self, pipe):
+        return sum(1 for v in pipe.unet.attn_processors.values()
+                   if "IPAdapter" in type(v).__name__)
+
+    def test_a_wiping_slicer_is_rolled_back(self):
+        from ball_reel.animate import enable_slicing_without_losing_identity
+
+        pipe = self._pipe(wipes=True)
+        note = enable_slicing_without_losing_identity(pipe, verbose=False)
+        self.assertEqual(self._ip(pipe), 16, "канал личности не восстановлен")
+        self.assertIn("ОТКАЧЕНА", note)
+
+    def test_a_harmless_slicer_is_kept(self):
+        """На UNetMotionModel экономия безвредна — отнимать её нельзя."""
+        from ball_reel.animate import enable_slicing_without_losing_identity
+
+        pipe = self._pipe(wipes=False)
+        note = enable_slicing_without_losing_identity(pipe, verbose=False)
+        self.assertTrue(pipe.sliced, "экономия отменена там, где безвредна")
+        self.assertEqual(self._ip(pipe), 16)
+        self.assertIn("цел", note)
+
+    def test_without_an_adapter_there_is_nothing_to_protect(self):
+        from ball_reel.animate import enable_slicing_without_losing_identity
+
+        pipe = self._pipe(wipes=True, ip=0)
+        enable_slicing_without_losing_identity(pipe, verbose=False)
+        self.assertTrue(pipe.sliced)
+
+    def test_a_pipeline_that_cannot_be_asked_still_gets_slicing(self):
+        """Нельзя терять экономию из-за того, что модель не опрашивается."""
+        import types
+
+        from ball_reel.animate import enable_slicing_without_losing_identity
+
+        pipe = types.SimpleNamespace(sliced=False)
+        pipe.enable_attention_slicing = lambda: setattr(pipe, "sliced", True)
+        enable_slicing_without_losing_identity(pipe, verbose=False)
+        self.assertTrue(pipe.sliced)
