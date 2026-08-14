@@ -39,7 +39,8 @@
   1. дешёвые проверки: движок, имя motion LoRA, ffmpeg, длина промта, хватает
      ли условий на окно модуля движения — всё ДО единого байта весов;
   2. предполёт (карта, веса, условия, лицо) — не начинать на сломанной машине;
-  3. план по VRAM, окно условий, эмбеддинг лица (падает без весов диффузии);
+  3. КАДРИРОВКА ИЗ МАНИФЕСТА УСЛОВИЙ (а не из флага), план по VRAM, прогноз
+     «увидит ли гейт лицо», окно условий, эмбеддинг лица;
   4. сборка пайплайна и ПЕЧАТЬ ТОГО, ЧТО РЕАЛЬНО ПРИЦЕПЛЕНО (`active_loras`);
   5. генерация, кадры на диск, mp4 через ffmpeg;
   6. гейт: узловые меры + клиповые, теми же порогами.
@@ -90,8 +91,26 @@ def _say(step: str, ok, detail: str = "") -> None:
           f"{step:<22} {detail}")
 
 
-def _row(r: dict) -> None:
-    _say(r["label"], r["ok"], (r.get("note") or "")[:110])
+def _row(r: dict, *, width: int = 110) -> None:
+    """Строка вердикта. `width=0` — не резать, а переносить.
+
+    Резать по 110 символов удобно для таблицы гейта, где число стоит в начале.
+    Но у строк про кадрировку и прогноз идентичности главное — В КОНЦЕ: «гейт
+    вернёт НЕ ПРОВЕРЕНО», «ЗАРАНЕЕ НЕИЗВЕСТНО», «верю манифесту». Проверено
+    сухим прогоном: обрезка съедала ровно эти слова, и строка превращалась в
+    невнятное начало фразы — то есть завтра на демо пропуск читался бы как
+    успех именно там, где мы старались этого избежать.
+    """
+    note = r.get("note") or ""
+    if width:
+        _say(r["label"], r["ok"], note[:width])
+        return
+    import textwrap
+
+    lines = textwrap.wrap(note, 96) or [""]
+    _say(r["label"], r["ok"], lines[0])
+    for extra in lines[1:]:
+        print(f"{'':<7} {'':<22} {extra}")
 
 
 def _value(v):
@@ -386,7 +405,7 @@ def choose_conditions(paths: list, need: int, *, stride: int = 1,
     с частотой `source_fps` (`driving.SPEC_FPS` = 12). Если брать каждый
     `stride`-й кадр, то, чтобы движение шло в РЕАЛЬНОМ времени, mp4 обязан
     воспроизводиться на `source_fps / stride`. Шаг 1 — истинный темп и 16/12 =
-    1.3 с движения; шаг 4 покрывает впятеро больший кусок, но играется на 3 fps
+    1.3 с движения; шаг 4 покрывает вчетверо больший кусок, но играется на 3 fps
     и выглядит рвано. Выбор за оператором, но обе цифры печатаются, чтобы он
     выбирал числами.
 
@@ -492,7 +511,8 @@ def ab_report(runs: list) -> str:
 
     Печать одной таблицей — не оформление. Два отчёта, разнесённые по времени и
     по каталогам, сравнивают глазами, а глаз сравнивает то, что помнит; ровно
-    так на этом проекте бар по позе полгода стоял мягче собственного порога.
+    так на этом проекте бар по позе стоял мягче собственного порога, и увидеть
+    это можно было только сличив два файла глазами.
     Здесь обе колонки печатает одна функция из одних и тех же полей.
 
     `None` печатается словом «не измерено», а не пустым местом и не нулём:
@@ -914,6 +934,17 @@ def main(argv: list) -> int:
     else:
         from .chain import END_FRAME_POLLEN, segment_seconds_ok
 
+        if args.motion_lora or args.ab_motion_lora:
+            # Молча проигнорировать флаг — худшее из возможного: оператор
+            # получил бы отчёт «с motion LoRA» по прогону, где её физически не
+            # было, и приписал бы разницу ей. Движение камеры живёт в модуле
+            # движения AnimateDiff; в шлюзовом пути такого модуля нет вовсе.
+            _say("motion LoRA", False, "запрошена на движке chain")
+            return _stop("motion LoRA — свойство локального движка (модуль "
+                         "движения AnimateDiff). На шлюзовом пути её прицепить "
+                         "не к чему: кадры рисует SD1.5 по одному, а движение "
+                         "между ними придумывает чужая видеомодель. Замер «с "
+                         "LoRA / без неё» делается на --engine animatediff.")
         if args.video_model not in END_FRAME_POLLEN:
             _say("модель видео", False,
                  f"{args.video_model} не умеет end_frame — цепочку нечем сшивать")
@@ -1062,12 +1093,13 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
     # отрендерены, и флаг их не перерисует. См. `framing_from_manifest`.
     waist_up, framing_row = framing_from_manifest(manifest,
                                                   full_body=args.full_body)
-    _row(framing_row)
+    # Без обрезки: у этих двух строк главное стоит в конце фразы.
+    _row(framing_row, width=0)
     cfg = animate.plan(args.vram, waist_up=waist_up)
     print("\n" + cfg.render())
     forecast = identity_forecast(manifest, cfg.height, waist_up=waist_up,
                                  plan_px=getattr(cfg, "face_px", None))
-    _row(forecast)
+    _row(forecast, width=0)
 
     chosen, fps, note = choose_conditions(
         conditions, cfg.frames, stride=args.stride, start=args.from_frame)
@@ -1182,7 +1214,7 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
     forecast = identity_forecast(
         manifest, cfg.height,
         waist_up=(manifest or {}).get("framing") == "waist_up")
-    _row(forecast)
+    _row(forecast, width=0)
 
     # 2 ------------------------------------------------------------------- дым
     print("\n--- дым: один кейфрейм ---")

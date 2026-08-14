@@ -163,6 +163,24 @@ class TheDefaultEngineIsTheLocalOne(unittest.TestCase):
                 self.base + ["--motion-lora", "pan-left",
                              "--ab-motion-lora", "pan-left"])
 
+    def test_a_motion_lora_asked_of_the_gateway_engine_is_refused_not_ignored(self):
+        # Молчаливое игнорирование — худший исход: отчёт назывался бы «с motion
+        # LoRA» по прогону, где её физически не было, и разницу приписали бы ей.
+        # Проверяется через main, потому что argparse про движки ничего не знает,
+        # а отказ обязан случиться до предполёта — то есть без карты.
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = self.r.main(["--engine", "chain", "--face", "f.jpg",
+                                    "--prompt", "p", "--out", tmp,
+                                    "--ab-motion-lora", "pan-left"])
+            self.assertEqual(code, 1)
+            self.assertIn("animatediff", buf.getvalue())
+
     def test_the_scales_default_to_the_modules_numbers_not_to_copies(self):
         # None означает «не передавать» — число живёт в animate.animate.
         # Скопированное сюда, оно разошлось бы с модулем ровно так же молча,
@@ -321,6 +339,26 @@ class TheFramingComesFromTheEvidenceNotTheFlag(unittest.TestCase):
         self.assertIsNone(got["ok"])
         self.assertIsNone(got["value"])
         self.assertIn("НЕИЗВЕСТНО", got["note"])
+
+    def test_the_decisive_words_are_not_eaten_by_truncation(self):
+        # У этих строк главное стоит В КОНЦЕ фразы, а печать гейта режет по 110
+        # символов. Сухой прогон показал, что обрезка съедала ровно «ЗАРАНЕЕ
+        # НЕИЗВЕСТНО» и «НЕ ПРОВЕРЕНО» — то есть на демо пропуск читался бы как
+        # успех именно там, где мы старались этого избежать.
+        import io
+        from contextlib import redirect_stdout
+
+        row = self.r.identity_forecast(
+            {"framing": "full_body", "face_share": 0.077,
+             "face_share_by_framing": {"full_body": 0.077, "waist_up": 0.190}},
+            768, waist_up=False)
+        self.assertGreater(len(row["note"]), 110)  # иначе тест ничего не ловит
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.r._row(row, width=0)
+        printed = " ".join(buf.getvalue().split())
+        self.assertIn("НЕ ПРОВЕРЕНО", printed)
+        self.assertIn("Выход:", printed)
 
     def test_the_plans_own_number_is_named_as_typical_not_measured(self):
         # План печатает своё «лицо ~146 px» из таблицы долей и без манифеста
