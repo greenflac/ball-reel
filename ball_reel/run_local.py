@@ -167,8 +167,8 @@ def clip_verdict(drift, seam, quality, limbs, garment) -> list:
     `drift["median"] is not None`, то есть судилось НАЛИЧИЕ ИЗМЕРЕНИЯ, а не его
     значение. Следствия ровно два, и оба плохие: клип с дрейфом 0.9 (чужой
     человек) печатался как PASS, а клип, на котором лицо мельче
-    `START_MIN_FACE_PX` и потому не судится вовсе, — как FAIL. Гейт при этом
-    выглядел работающим.
+    `identity_arcface.MIN_FACE_PX` и потому не судится вовсе, — как FAIL. Гейт
+    при этом выглядел работающим.
 
     Здесь исход трёхзначный, и «не смогли измерить» берётся из собственного
     сигнала каждого измерителя, а не из нового порога:
@@ -220,6 +220,110 @@ def clip_verdict(drift, seam, quality, limbs, garment) -> list:
     return rows
 
 
+def framing_from_manifest(manifest: dict, *, full_body: bool) -> tuple:
+    """Кадрировка берётся из МАНИФЕСТА, а не из флага. -> (waist_up, строка).
+
+    ШОВ, КОТОРЫЙ ЭТО ЗАКРЫВАЕТ. `--full-body` управлял только планом
+    (`animate.plan(waist_up=...)`), а условия приходят готовыми из
+    `--conditions` и уже отрендерены с какой-то кадрировкой — `render_sequence`
+    по умолчанию рисует полный рост. Типовой сценарий «отрендерить умолчанием и
+    запустить без флага» давал план, обещающий лицо ~146 px, при фактических
+    ~59 px на живом ките: план врал ровно про то, ради чего существует.
+
+    Это тот же дефект, что чинился в `skeleton.py` (флаг `from_mediapipe`
+    подписывал манифест независимо от того, кто отработал), и вывод тот же:
+    ИМЯ ОБЯЗАНО ВЫВОДИТЬСЯ ИЗ ТОГО, ЧТО ДЕЙСТВИТЕЛЬНО ИСПОЛНИЛОСЬ. Манифест —
+    свидетельство, флаг — намерение. При расхождении верим свидетельству:
+    условия уже нарисованы, и флаг их не перерисует.
+
+    Манифеста нет или он старый — это ТРЕТИЙ исход, «не смогли измерить», а не
+    «значит полный рост». Тогда флаг остаётся единственным, что у нас есть, и
+    об этом говорится прямо.
+    """
+    framing = (manifest or {}).get("framing")
+    intent = "full_body" if full_body else "waist_up"
+    if framing not in ("full_body", "waist_up"):
+        return not full_body, {
+            "label": "кадрировка", "ok": None, "value": None,
+            "note": (f"манифест не называет кадрировку (условия отрендерены "
+                     f"старым skeleton). Беру намерение флага: {intent} — это "
+                     f"НАМЕРЕНИЕ, а не свидетельство: реальная доля лица в этих "
+                     f"условиях неизвестна, и план ниже может обещать лицо, "
+                     f"которого там нет")}
+    waist_up = framing == "waist_up"
+    if framing != intent:
+        return waist_up, {
+            "label": "кадрировка", "ok": False, "value": None,
+            "note": (f"флаг говорит {intent}, а условия отрендерены как "
+                     f"{framing}. ВЕРЮ МАНИФЕСТУ: он свидетельство, флаг — "
+                     f"намерение, и перерисовать уже готовые условия флаг не "
+                     f"может. План строится по {framing}")}
+    return waist_up, {"label": "кадрировка", "ok": True, "value": None,
+                      "note": f"{framing}, подтверждено манифестом условий"}
+
+
+def identity_forecast(manifest: dict, height: int, *, waist_up: bool,
+                      plan_px: float | None = None) -> dict:
+    """Увидит ли гейт лицо на ЭТОМ разрешении — сказать ДО генерации.
+
+    Доля лица берётся ИЗМЕРЕННОЙ по скелетам самих условий
+    (`face_share_by_framing` в манифесте), а не из типовой таблицы: широкая
+    стойка растягивает габарит и роняет долю (на живом kit-кадре 0.074 вместо
+    типовых 0.094), и знать надо фактическое число.
+
+    Умножается она на высоту ПЛАНА, а не на высоту условий: манифест считал px
+    для своего холста 512x768, а рисовать мы можем 384x576 или 640x960, и в
+    этих трёх случаях гейт видит разное.
+
+    Вердикт трёхзначен НАМЕРЕННО. Мелкое лицо — это не «плохо», это «нечем
+    судить»: гейт вернёт «НЕ ПРОВЕРЕНО», и завтра на демо пропуск нельзя
+    принять за успех. Поэтому здесь `ok is None`, а не False.
+    """
+    from .identity_arcface import MIN_FACE_PX, START_MIN_FACE_PX
+
+    framing = "waist_up" if waist_up else "full_body"
+    shares = (manifest or {}).get("face_share_by_framing") or {}
+    share = shares.get(framing)
+    if share is None and (manifest or {}).get("framing") == framing:
+        share = (manifest or {}).get("face_share")
+    if not share:
+        # Про число из плана сказано ОТДЕЛЬНО и прямо: оно посчитано по типовой
+        # доле (9.4% / 19% высоты), а не по этим условиям, и именно это
+        # расхождение — 146 обещанных px против 59 фактических — стоило нам
+        # плана, врущего про то, ради чего он существует.
+        plan_note = (f" Число в плане (~{plan_px:.0f} px) взято из ТИПОВОЙ "
+                     f"доли, а не измерено по этим условиям — верить ему "
+                     f"нельзя." if plan_px else "")
+        return {"label": "идентичность заранее", "ok": None, "value": None,
+                "note": ("манифест не измерил долю лица (нет шеи или таза на "
+                         "условиях, либо условия старые) — сможет ли гейт "
+                         "судить лицо, ЗАРАНЕЕ НЕИЗВЕСТНО. Это отдельный исход, "
+                         "а не «сможет»." + plan_note)}
+    px = round(share * height, 1)
+    # Манифест мерил лицо на СВОЁМ холсте; если план рисует другой высоты,
+    # оба числа печатаются рядом — иначе читатель сравнит наше с чужим.
+    canvas = ((manifest or {}).get("size") or [None, None])[1]
+    at_canvas = ((f"; манифест мерил на холсте {canvas} px, там "
+                  f"~{round(share * canvas, 1)} px")
+                 if canvas and canvas != height else "")
+    if px >= MIN_FACE_PX:
+        return {"label": "идентичность заранее", "ok": True, "value": px,
+                "note": (f"лицо ~{px} px при {height} px высоты (доля {share} "
+                         f"измерена по условиям) — бар видео {MIN_FACE_PX}, "
+                         f"старт-кадра {START_MIN_FACE_PX}: гейту будет что "
+                         f"судить{at_canvas}")}
+    other = "waist_up" if not waist_up else "full_body"
+    rescue = shares.get(other)
+    way_out = (f"перерендерить условия с framing={other}: там доля {rescue} "
+               f"даёт ~{round(rescue * height, 1)} px"
+               if rescue else "перерендерить условия по пояс или поднять высоту")
+    return {"label": "идентичность заранее", "ok": None, "value": px,
+            "note": (f"лицо ~{px} px при {height} px высоты — это ниже бара "
+                     f"{MIN_FACE_PX}: гейт вернёт «НЕ ПРОВЕРЕНО», и это НЕ то же "
+                     f"самое, что «плохо». На демо пропуск нельзя принять за "
+                     f"успех. Выход: {way_out}{at_canvas}")}
+
+
 def lora_verdict(active: list, *, motion_lora: str | None = None,
                  face_prefix: str = "faceid") -> tuple:
     """Совпадает ли ЗАЯВЛЕННОЕ с тем, что реально прицеплено к модели.
@@ -268,7 +372,7 @@ def lora_verdict(active: list, *, motion_lora: str | None = None,
 
 
 def choose_conditions(paths: list, need: int, *, stride: int = 1,
-                      start: int = 0, source_fps: float = 12.0) -> tuple:
+                      start: int = 0, source_fps: float | None = None) -> tuple:
     """Какие условия попадут в окно модуля движения. (кадры, fps, пояснение).
 
     ДЕШЁВАЯ ПРОВЕРКА ВМЕСТО ДОРОГОГО ПАДЕНИЯ. `animate.animate` отказывается,
@@ -285,7 +389,12 @@ def choose_conditions(paths: list, need: int, *, stride: int = 1,
     1.3 с движения; шаг 4 покрывает впятеро больший кусок, но играется на 3 fps
     и выглядит рвано. Выбор за оператором, но обе цифры печатаются, чтобы он
     выбирал числами.
+
+    `source_fps=None` — взять частоту у `driving.SPEC_FPS`, а не хранить её
+    копию здесь: разошедшиеся копии одного числа на этом проекте уже стоили
+    целевого пути, судившего мягче собственных порогов.
     """
+    source_fps = _source_fps() if source_fps is None else source_fps
     if need <= 0:
         return [], 0.0, f"нужно положительное число кадров, а не {need}"
     if stride < 1 or start < 0:
@@ -878,10 +987,10 @@ def main(argv: list) -> int:
     # «условие -> driving-кадр» пишет render_sequence в manifest.json рядом
     # с условиями.
     manifest_path = Path(args.conditions) / "manifest.json"
-    raw_driving: dict = {}
+    manifest: dict = {}
     if manifest_path.exists():
-        raw_driving = json.loads(
-            manifest_path.read_text()).get("driving_frames") or {}
+        manifest = json.loads(manifest_path.read_text())
+    raw_driving: dict = manifest.get("driving_frames") or {}
     if not raw_driving:
         _say("манифест", False,
              f"нет {manifest_path} с картой условие->driving-кадр — позу "
@@ -938,25 +1047,41 @@ def main(argv: list) -> int:
 
     if animatediff:
         return _run_animatediff(args, out, clock, conditions, driving_of,
-                                prompt, measure, render_timings, latency_verdict)
+                                prompt, measure, render_timings,
+                                latency_verdict, manifest)
     return _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
-                      render_timings, latency_verdict)
+                      render_timings, latency_verdict, manifest)
 
 
 def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
-                     render_timings, latency_verdict) -> int:
+                     render_timings, latency_verdict, manifest) -> int:
     """Целевой путь: один совместный проход, ноль сетевых вызовов."""
     from . import animate
 
-    cfg = animate.plan(args.vram, waist_up=not args.full_body)
+    # План строится по КАДРИРОВКЕ УСЛОВИЙ, а не по флагу: условия уже
+    # отрендерены, и флаг их не перерисует. См. `framing_from_manifest`.
+    waist_up, framing_row = framing_from_manifest(manifest,
+                                                  full_body=args.full_body)
+    _row(framing_row)
+    cfg = animate.plan(args.vram, waist_up=waist_up)
     print("\n" + cfg.render())
+    forecast = identity_forecast(manifest, cfg.height, waist_up=waist_up,
+                                 plan_px=getattr(cfg, "face_px", None))
+    _row(forecast)
 
     chosen, fps, note = choose_conditions(
-        conditions, cfg.frames, stride=args.stride, start=args.from_frame,
-        source_fps=_source_fps())
+        conditions, cfg.frames, stride=args.stride, start=args.from_frame)
     _say("окно условий", bool(chosen), note)
     if not chosen:
         return _stop("окно модуля движения не набирается из этих условий")
+    if args.fps and abs(args.fps - fps) > 1e-6:
+        # Заданный вручную fps — это решение оператора, а не ошибка, но темп
+        # движения от него меняется, и это должно быть сказано числом: клип,
+        # снятый на 12 fps и сыгранный на 24, показывает упражнение вдвое
+        # быстрее, чем человек его делал.
+        _say("темп", None,
+             f"--fps {args.fps:g} против настоящего {fps:.1f}: движение пойдёт "
+             f"в {args.fps / fps:.2f}x скорости оригинала")
     driving_paths = [driving_of.get(Path(c).stem) for c in chosen]
     if not all(driving_paths):
         # Не остановка: без driving-кадров теряется мимика и поза, но клип
@@ -1005,6 +1130,9 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
 
     report = {"engine": "animatediff", "timing": profile, "latency": latency,
               "seed": args.seed, "vram_gb": args.vram, "plan": cfg.render(),
+              # Отдельными строками, а не внутри текста плана: завтра на демо
+              # никто не должен принять «НЕ ПРОВЕРЕНО» за «проверено и хорошо».
+              "framing": framing_row, "identity_forecast": forecast,
               "conditions": chosen, "fps": runs[0]["fps"] if runs else fps,
               "runs": [{k: v for k, v in r.items() if k != "frames"}
                        for r in runs]}
@@ -1017,7 +1145,7 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
 
 
 def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
-               render_timings, latency_verdict) -> int:
+               render_timings, latency_verdict, manifest) -> int:
     """Запасной путь: кейфреймы поодиночке + сшивка видеомоделью через шлюз.
 
     Проверен живьём и потому оставлен без изменений по существу: единственное,
@@ -1048,6 +1176,13 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
     print(f"      LoRA реализма: "
           + (f"{cfg.realism_lora} @ {cfg.realism_lora_scale}"
              if cfg.realism_lora else "нет (база для сравнения)"))
+    # Тот же прогноз, что и на локальном пути: доля лица измерена по САМИМ
+    # условиям, а не взята из таблицы, и умножается на высоту ЭТОГО плана.
+    # У шлюзового пути своей кадрировки нет — она целиком в условиях.
+    forecast = identity_forecast(
+        manifest, cfg.height,
+        waist_up=(manifest or {}).get("framing") == "waist_up")
+    _row(forecast)
 
     # 2 ------------------------------------------------------------------- дым
     print("\n--- дым: один кейфрейм ---")
@@ -1156,6 +1291,7 @@ def _run_chain(args, out, clock, conditions, driving_of, prompt, measure,
     print(f"\n  {latency['note']}")
 
     report = {"engine": "chain", "timing": profile, "latency": latency,
+              "identity_forecast": forecast,
               "lora": cfg.realism_lora or None,
               "lora_scale": cfg.realism_lora_scale if cfg.realism_lora else None,
               "seed": args.seed,

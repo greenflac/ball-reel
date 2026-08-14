@@ -236,6 +236,101 @@ class TheWindowIsChosenBeforeAnyWeightsAreLoaded(unittest.TestCase):
             self.assertTrue(note)
 
 
+class TheFramingComesFromTheEvidenceNotTheFlag(unittest.TestCase):
+    """`--full-body` управлял ПЛАНОМ, но не условиями, и план из-за этого врал.
+
+    Условия приходят готовыми через `--conditions`, а `render_sequence` по
+    умолчанию рисует полный рост. Типовой сценарий «отрендерить умолчанием и
+    запустить без флага» давал план, обещающий лицо ~146 px, при фактических
+    ~59 px на живом ките — то есть план ошибался ровно в том, ради чего он
+    существует.
+
+    Тот же дефект уже чинился в `skeleton.py` (флаг `from_mediapipe` подписывал
+    манифест независимо от того, кто отработал), и вывод тот же: имя обязано
+    выводиться из того, что ДЕЙСТВИТЕЛЬНО исполнилось.
+
+    Числа литеральные и замеренные: 16 живых кадров `kit/driving` на 512x768
+    дали 59-71 px на полном росте и 140-148 px по пояс; бары ArcFace — 100 для
+    видео и 70 для старт-кадра.
+    """
+
+    def setUp(self):
+        from ball_reel import run_local
+
+        self.r = run_local
+        # Доли, дающие замеренные пиксели на холсте 768: 0.077*768 = 59 px,
+        # 0.190*768 = 146 px.
+        self.new = {"framing": "waist_up", "face_share": 0.190,
+                    "face_px": 146.0, "identity_judgeable": True,
+                    "face_share_by_framing": {"full_body": 0.077,
+                                              "waist_up": 0.190}}
+
+    def test_the_manifest_wins_over_a_contradicting_flag(self):
+        waist_up, row = self.r.framing_from_manifest(self.new, full_body=True)
+        self.assertTrue(waist_up)
+        self.assertFalse(row["ok"])
+        self.assertIn("ВЕРЮ МАНИФЕСТУ", row["note"])
+        self.assertIn("waist_up", row["note"])
+
+    def test_an_agreeing_flag_is_simply_confirmed(self):
+        waist_up, row = self.r.framing_from_manifest(self.new, full_body=False)
+        self.assertTrue(waist_up)
+        self.assertTrue(row["ok"])
+
+    def test_no_manifest_is_NOT_MEASURED_rather_than_a_silent_default(self):
+        # Худший исход — молча принять намерение за факт: план тогда обещает
+        # лицо, которого в условиях нет.
+        for empty in ({}, None, {"coverage": 1.0}):
+            waist_up, row = self.r.framing_from_manifest(empty, full_body=True)
+            self.assertIsNone(row["ok"], empty)
+            self.assertIn("НАМЕРЕНИЕ", row["note"])
+            self.assertFalse(waist_up)  # флаг остаётся единственным, что есть
+
+    def test_a_full_body_manifest_predicts_a_face_the_gate_cannot_judge(self):
+        got = self.r.identity_forecast(
+            {"framing": "full_body", "face_share": 0.077,
+             "face_share_by_framing": {"full_body": 0.077, "waist_up": 0.190}},
+            768, waist_up=False)
+        self.assertAlmostEqual(got["value"], 59.1, delta=0.5)
+        # «Не сможем измерить» — не провал: гейт вернёт «НЕ ПРОВЕРЕНО», и на
+        # демо это нельзя принять ни за успех, ни за брак.
+        self.assertIsNone(got["ok"])
+        self.assertIn("НЕ ПРОВЕРЕНО", got["note"])
+
+    def test_the_refusal_names_the_way_out_with_the_other_framings_number(self):
+        got = self.r.identity_forecast(self.new, 768, waist_up=False)
+        self.assertIn("waist_up", got["note"])
+        self.assertIn("145", got["note"])  # 0.190 * 768 = 145.9
+
+    def test_a_waist_up_manifest_predicts_a_judgeable_face(self):
+        got = self.r.identity_forecast(self.new, 768, waist_up=True)
+        self.assertTrue(got["ok"])
+        self.assertGreater(got["value"], 100)
+
+    def test_the_prediction_follows_the_PLANS_height_not_the_manifests(self):
+        # Манифест считал px для холста 512x768, а рисовать можно 384x576 —
+        # и там то же самое лицо гейту уже не судимо.
+        small = self.r.identity_forecast(self.new, 576, waist_up=True)
+        self.assertAlmostEqual(small["value"], 109.4, delta=0.5)
+        tiny = self.r.identity_forecast(self.new, 384, waist_up=True)
+        self.assertIsNone(tiny["ok"])
+
+    def test_an_unmeasured_share_is_its_own_outcome(self):
+        got = self.r.identity_forecast({"framing": "full_body"}, 768,
+                                       waist_up=False)
+        self.assertIsNone(got["ok"])
+        self.assertIsNone(got["value"])
+        self.assertIn("НЕИЗВЕСТНО", got["note"])
+
+    def test_the_plans_own_number_is_named_as_typical_not_measured(self):
+        # План печатает своё «лицо ~146 px» из таблицы долей и без манифеста
+        # выглядит увереннее, чем есть. Раз мы не можем его исправить (файл
+        # чужой), мы обязаны сказать рядом, чего оно стоит.
+        got = self.r.identity_forecast({}, 768, waist_up=True, plan_px=145.9)
+        self.assertIn("ТИПОВОЙ", got["note"])
+        self.assertIn("146", got["note"])
+
+
 class TheDrivingFrameIsFoundOrDeclaredMissing(unittest.TestCase):
     """Путь из манифеста относителен НЕ текущего каталога, и это ронял прогон.
 
