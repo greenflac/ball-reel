@@ -88,6 +88,44 @@ class LoadPairs(unittest.TestCase):
             train.load_pairs(self.tmp / "нет-такого")
         self.assertIn("ball_reel.dataset", str(ctx.exception))
 
+    def test_a_dataset_built_elsewhere_still_loads(self):
+        """Манифест пишет абсолютные пути машины-сборщика.
+
+        Набор собирается через шлюз на одной машине, а учат его на карте — на
+        другой. Записанного `/tmp/.../ds/img/real.png` там нет, и обучение
+        отказывало на ПОЛНОМ наборе со словами «набор неполон»: диагноз
+        указывал не туда, а лечения у него не было вовсе.
+        """
+        root = _dataset(self.tmp, n=3)
+        man = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        for s in man["samples"]:
+            s["path"] = "/машина/которой/нет/ds/img/" + Path(s["path"]).name
+        (root / "manifest.json").write_text(
+            json.dumps(man, ensure_ascii=False), encoding="utf-8")
+        got = train.load_pairs(root)
+        self.assertEqual(len(got), 3)
+        for path, _, _ in got:
+            self.assertTrue(Path(path).exists(), path)
+
+    def test_a_windows_separator_in_the_manifest_is_understood(self):
+        # Сборщик мог быть на Windows, а карта — под Linux: `PurePath` разделитель
+        # чужой платформы не разбирает, и имя файла не отделилось бы вовсе.
+        root = _dataset(self.tmp, n=2)
+        man = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        for s in man["samples"]:
+            s["path"] = "C:\\build\\ds\\img\\" + Path(s["path"]).name
+        (root / "manifest.json").write_text(
+            json.dumps(man, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(len(train.load_pairs(root)), 2)
+
+    def test_a_genuinely_missing_frame_is_still_a_refusal(self):
+        # Починка обязана чинить перенос, а не глушить отказ: кадра нет нигде.
+        root = _dataset(self.tmp, n=3)
+        man = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        Path(man["samples"][0]["path"]).unlink()
+        with self.assertRaises(ValueError):
+            train.load_pairs(root)
+
     def test_caption_falls_back_to_txt_beside_image(self):
         root = _dataset(self.tmp, n=1, caption="")
         (root / "0000.txt").write_text("ohwx_person, side view", encoding="utf-8")
@@ -260,6 +298,71 @@ class Preflight(unittest.TestCase):
         self.assertLessEqual(train.MIN_RESOLUTION, config(6.0).resolution)
 
 
+class ShippedDataset(unittest.TestCase):
+    """Набор для LoRA лежит В РЕПОЗИТОРИИ, а не только на машине сборщика.
+
+    ЗАЧЕМ. Набор собирается через шлюз, шлюз требует ключа, и ключ есть не у
+    всех и не всегда. Пока набор жил только в каталоге сборщика, «обучить
+    LoRA» означало «сначала добудь ключ» — то есть на демо-дне шаг мог не
+    состояться по причине, не имеющей отношения ни к коду, ни к карте.
+
+    Собран живьём 2026-08-14: 20 порождённых -> взято 14 при баре FaceNet
+    0.30, плюс 1 реальный кадр и 8 аугментаций = 23, 27 с повторами.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2] / "demo" / "lora_dataset"
+
+    def test_it_is_on_disk_and_loads(self):
+        self.assertTrue(self.ROOT.is_dir(), f"нет {self.ROOT}")
+        pairs = train.load_pairs(self.ROOT)
+        self.assertEqual(len(pairs), 23)
+        for path, caption, _ in pairs:
+            self.assertTrue(Path(path).exists(), path)
+            self.assertIn("ohwx_person", caption)
+
+    def test_the_step_count_matches_the_number_in_the_runbook(self):
+        # Число из LORA_RUNBOOK обязано пересчитываться командой, а не
+        # запоминаться: разошедшееся с кодом число хуже отсутствующего.
+        pairs = train.load_pairs(self.ROOT)
+        self.assertEqual(train.steps_for(pairs, epochs=10), 270)
+
+    def test_the_manifest_paths_are_relative_and_survive_a_move(self):
+        man = json.loads((self.ROOT / "manifest.json").read_text(
+            encoding="utf-8"))
+        for s in man["samples"]:
+            with self.subTest(path=s["path"]):
+                self.assertFalse(Path(s["path"]).is_absolute(),
+                                 "абсолютный путь в отгружаемом наборе: у "
+                                 "склонировавшего такого каталога нет")
+
+    def test_it_is_in_the_git_index_and_not_only_on_the_authors_disk(self):
+        """Тот же дефект, что однажды съел половину `demo/kit_waist`.
+
+        На диске автора набор полон и обучение идёт; у склонировавшего его нет,
+        и проверяющий видит ссылку в рунбуке на пустоту.
+        """
+        import subprocess
+
+        root = Path(__file__).resolve().parents[2]
+        try:
+            r = subprocess.run(["git", "ls-files", "demo/lora_dataset"],
+                               capture_output=True, text=True, cwd=root,
+                               timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("git недоступен — проверка на диске выше")
+        if r.returncode != 0:
+            self.skipTest("не рабочее дерево git — проверка на диске выше")
+        files = set(r.stdout.split())
+        self.assertIn("demo/lora_dataset/manifest.json", files)
+        self.assertEqual(
+            sum(1 for f in files if f.endswith(".png")), 23,
+            "в индексе не все 23 кадра набора")
+        self.assertEqual(
+            sum(1 for f in files if f.endswith(".txt")), 23,
+            "в индексе не все 23 подписи — кадр без подписи тянет на триггер "
+            "фон, свет и одежду")
+
+
 class Cli(unittest.TestCase):
 
     def setUp(self):
@@ -275,6 +378,66 @@ class Cli(unittest.TestCase):
     def test_bad_dataset_exits_nonzero(self):
         self.assertEqual(
             train.main(["--dataset", str(self.tmp / "нет"), "--dry-run"]), 1)
+
+    def test_the_base_reaches_the_trainer_and_is_not_lost_in_the_parser(self):
+        """`train()` умел принимать base, а CLI его НЕ ПЕРЕДАВАЛ.
+
+        Цена молчания измерена в тот же вечер на чужой LoRA: FaceID-LoRA
+        обучена под ванильную SD1.5, и на epiCRealism кадр разваливался в
+        радужные потёки, а с выключенным каналом личности становился резким и
+        фактурным. Своя LoRA, обученная не на той базе, — тот же дефект, только
+        сделанный своими руками и после часа обучения.
+        """
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        seen = {}
+
+        def fake(dataset_dir, out_dir, cfg, *, base="", epochs=10, **kw):
+            seen["base"] = base
+            return {"ok": True, "note": "заглушка"}
+
+        real, train.train = train.train, fake
+        try:
+            train.main(["--dataset", str(root), "--base", "чужая/база"])
+        finally:
+            train.train = real
+        self.assertEqual(seen.get("base"), "чужая/база",
+                         "--base не доехал до обучения: LoRA сядет на "
+                         "умолчание, а рисовать будем на другой базе")
+
+    def test_the_plan_names_the_base_out_loud(self):
+        """Несовпадение баз обязано ловиться глазом ДО обучения, а не после.
+
+        Печать в --dry-run стоит секунду; обнаружение того же по испорченному
+        кадру — час обучения плюс прогон.
+        """
+        import contextlib
+        import io
+
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            train.main(["--dataset", str(root), "--dry-run",
+                        "--base", "чужая/база"])
+        self.assertIn("чужая/база", buf.getvalue())
+
+    def test_the_default_base_is_named_too_and_not_left_blank(self):
+        # Пустая строка в отчёте читается как «база не выбрана», хотя она
+        # выбрана — умолчанием. Молчащее умолчание и есть то, на чём горят.
+        import contextlib
+        import io
+
+        from ball_reel.animate import BASE_MODEL
+        from ball_reel.dataset import MIN_DATASET
+
+        root = _dataset(self.tmp, n=MIN_DATASET)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            train.main(["--dataset", str(root), "--dry-run"])
+        self.assertIn(BASE_MODEL, buf.getvalue())
 
 
 class Stage(unittest.TestCase):

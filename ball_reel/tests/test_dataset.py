@@ -177,6 +177,34 @@ class TheREQUESTDescriptionIsNotACaption(unittest.TestCase):
         for word in ("tattoo", "blonde", "blue eyes", "freckles"):
             self.assertNotIn(word, p.lower())
 
+    def test_every_request_asks_for_a_photograph(self):
+        """Фотографичность обязана стоять в КАЖДОМ запросе, а не в базовом.
+
+        Набор задаёт область, в которую LoRA потом тянет картинку: чему набор
+        научит, то она и притащит. Один нефотографичный кадр из двадцати — это
+        уже примесь в цели, и на генерации она ничем не лечится.
+        """
+        for row in self.d.variations():
+            with self.subTest(row=row):
+                self.assertIn(self.d.REALISM, self.d.prompt_for(row))
+
+    def test_the_realism_clause_says_nothing_about_the_person(self):
+        # Тот же запрет, что и на весь промт, отдельно на эту часть: сюда
+        # особенно соблазнительно дописать «beautiful», «young», «slim» —
+        # и получить похожего человека вместо того же самого.
+        low = self.d.REALISM.lower()
+        for word in ("beautiful", "young", "slim", "pretty", "woman", "man",
+                     "girl", "attractive", "model"):
+            self.assertNotIn(word, low,
+                             f"{word!r} описывает человека, а не съёмку")
+
+    def test_the_realism_clause_names_the_medium_and_the_skin(self):
+        # Две вещи, ради которых он существует. Если их вымоет правкой, тест
+        # покраснеет, а не промолчит: «упор на реализм» — это не настроение.
+        low = self.d.REALISM.lower()
+        self.assertIn("photo", low)
+        self.assertIn("skin", low)
+
 
 class TheAxesActuallyVARY(unittest.TestCase):
     def setUp(self):

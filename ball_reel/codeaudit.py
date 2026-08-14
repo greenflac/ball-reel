@@ -454,6 +454,8 @@ TREE_ONLY_SKIPS = {
     "both_kits_are_whole_in_the_git_index":
         "читает индекс git: в копии индекса нет по устройству, а сам дефект "
         "(файл на диске есть, в индексе нет) мутацией не порождается",
+    "it_is_in_the_git_index_and_not_only_on_the_authors_disk":
+        "то же самое для набора LoRA: состав репозитория, а не поведение кода",
 }
 
 

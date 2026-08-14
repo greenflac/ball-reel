@@ -61,6 +61,32 @@ MIN_RESOLUTION = 256
 VAE_SCALING = 0.18215
 
 
+def _resolve(root: Path, recorded: str) -> Path:
+    """Путь из манифеста -> путь на ЭТОЙ машине.
+
+    ЗАЧЕМ. Манифест пишет АБСОЛЮТНЫЕ пути — те, что были у машины-сборщика. Это
+    незаметно, пока набор учат там же, где собрали, и ломается ровно в тот
+    момент, ради которого набор и собирают: набор собран через шлюз на одной
+    машине, а карта, на которой учат, — другая. Там `/tmp/.../ds/img/real.png`
+    не существует, и обучение отказывает на ПОЛНОМ, ничем не повреждённом
+    наборе, сообщая «набор неполон» — то есть указывает не туда.
+
+    Правило: сначала записанный путь, потом тот же файл ПО ИМЕНИ внутри
+    каталога набора. Молчаливой подмены не происходит: если файла нет и там,
+    отказ приходит прежний, со списком недостающих.
+    """
+    p = Path(recorded)
+    if p.exists():
+        return p
+    # `PurePosixPath`/`PureWindowsPath` не угадать по строке, а разделитель у
+    # сборщика мог быть чужой: берём имя по обоим разделителям сразу.
+    name = recorded.replace("\\", "/").rsplit("/", 1)[-1]
+    for cand in (root / "img" / name, root / name):
+        if cand.exists():
+            return cand
+    return p
+
+
 def load_pairs(dataset_dir) -> list:
     """Набор с диска -> [(путь к картинке, подпись, повторов)]. Без torch.
 
@@ -80,7 +106,7 @@ def load_pairs(dataset_dir) -> list:
     man = json.loads(man_path.read_text(encoding="utf-8"))
     pairs, missing = [], []
     for s in man.get("samples", []):
-        img = Path(s["path"])
+        img = _resolve(root, s["path"])
         txt = img.with_suffix(".txt")
         if not img.exists():
             missing.append(f"{img} (картинка)")
@@ -442,6 +468,16 @@ def main(argv: list) -> int:
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--dry-run", action="store_true",
                     help="только предполёт и план, без загрузки весов")
+    # БАЗА ОБУЧЕНИЯ ОБЯЗАНА СОВПАДАТЬ С БАЗОЙ РИСОВАНИЯ, и это не гигиена.
+    # FaceID-LoRA обучена под ванильную SD1.5; на epiCRealism она бьёт по тем
+    # самым весам, которые дают этой базе фотореализм, — измерено вечером:
+    # с `--ip-adapter-scale 0 --faceid-lora-scale 0` кадр стал резким и
+    # фактурным, с ними — радужные потёки. Обучив СВОЮ LoRA на другой базе,
+    # мы воспроизвели бы ровно тот же дефект своими руками.
+    ap.add_argument("--base", default="",
+                    help="база обучения; ДОЛЖНА совпадать с --base у probe и "
+                         "run_local, иначе LoRA окажется чужой для той базы, "
+                         "на которой рисуем")
     args = ap.parse_args(argv)
 
     cfg = config(args.vram)
@@ -452,13 +488,22 @@ def main(argv: list) -> int:
         print(f"\nЛЕЧЕНИЕ: {n}")
     if rep["ok"]:
         plan = budget(rep["pairs"], cfg, epochs=args.epochs)
+        from .animate import BASE_MODEL
+
         print(f"\nплан: {plan['steps']} шагов, ранг {cfg.rank}, разрешение "
               f"{cfg.resolution}, {cfg.optimizer}")
         print(f"      {plan['note']}")
+        # База печатается ВСЕГДА, в том числе при --dry-run: несовпадение с
+        # базой рисования обнаруживается глазом здесь за секунду, а иначе —
+        # через час обучения и испорченный кадр.
+        print(f"      база: {args.base or BASE_MODEL}"
+              + ("" if args.base else "  (умолчание; на другой базе рисуете "
+                                      "— передайте --base)"))
     if args.dry_run or not rep["ok"]:
         return 0 if rep["ok"] else 1
 
-    got = train(args.dataset, args.out, cfg, epochs=args.epochs)
+    got = train(args.dataset, args.out, cfg, base=args.base,
+                epochs=args.epochs)
     print("\n" + got["note"])
     return 0 if got["ok"] else 1
 

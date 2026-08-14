@@ -634,11 +634,35 @@ def variations(limit: int | None = None) -> list:
     return out[:limit] if limit else out
 
 
+#: ТРЕБОВАНИЕ ФОТОРЕАЛИЗМА, вынесенное из строки промта в именованную величину.
+#:
+#: ЗАЧЕМ ОТДЕЛЬНО. Реализм набора — не украшение промта, а свойство, ради
+#: которого набор и собирают, и настраивать его придётся отдельно от осей
+#: разнообразия. Пока эти слова были хвостом f-строки, их нельзя было ни
+#: проверить тестом, ни поменять, не трогая сборку запроса.
+#:
+#: ПОЧЕМУ ЭТО ВАЖНО ИМЕННО ЗДЕСЬ, а не в промте генерации клипа. Измерено
+#: вечером 2026-08-14: с выключенным каналом личности
+#: (`--ip-adapter-scale 0 --faceid-lora-scale 0`) кадр становится резким и
+#: фактурным, с включённым — расплывается. Канал личности тянет картинку в ту
+#: область, на которой он обучен. Значит область, в которую тянет НАША LoRA,
+#: задаётся здесь и только здесь: чему набор научит, то она потом и притащит.
+#: Нефотографичный набор гарантирует нефотографичный результат, и никакой
+#: промт на генерации этого не исправит.
+#:
+#: ЧТО СЮДА НЕ ПОПАДАЕТ. Ни слова о самом человеке: личность приходит
+#: референсом (см. `test_the_prompt_does_not_describe_the_person_either`).
+#: Слова только о СРЕДЕ СЪЁМКИ — камере, свете, коже как поверхности.
+REALISM = ("photograph, photorealistic, natural skin texture with visible "
+           "pores and fine detail, sharp focus on the face, shallow depth of "
+           "field, natural film grain, unretouched, not an illustration, "
+           "not a painting, not CGI, not 3d render")
+
+
 def prompt_for(row: dict, subject: str = "a woman") -> str:
     """Комбинация осей -> текст запроса. Личность НЕ описывается словами."""
     return (f"{subject}, {row['framing']}, {row['angle']}, "
-            f"{row['light']}, {row['place']}, photographic, natural skin "
-            f"texture, sharp focus on the face")
+            f"{row['light']}, {row['place']}, {REALISM}")
 
 
 def caption_for(row: dict, trigger: str) -> str:
@@ -964,6 +988,14 @@ def main(argv: list) -> int:
                     help="согласие потратить pollen при --generate")
     ap.add_argument("--subject", default="a person",
                     help="как называть человека в запросах при --generate")
+    # Модель шлюза была ЗАШИТА в `synth.MODEL`, и сменить её означало править
+    # исходник. Умолчание остаётся выбранным ЗАМЕРОМ (см. LORA_RUNBOOK), но
+    # проверить нового кандидата теперь можно, не трогая код: следующий
+    # кандидат появляется в каталоге шлюза чаще, чем выходит наша версия.
+    ap.add_argument("--model", default="",
+                    help="модель шлюза для --generate; пусто = выбранная "
+                         "замером (`synth.MODEL`). Смена модели требует "
+                         "ПЕРЕЗАМЕРА: ёмкость по референсам не есть верность")
     args = ap.parse_args(argv)
 
     # ПОРОЖДЕНИЕ ЗДЕСЬ, а не отдельной командой накануне. Девять локальных
@@ -980,8 +1012,11 @@ def main(argv: list) -> int:
             print(f"смета порождения: {args.generate} кадров, ~{est['pollen']} "
                   f"pollen. Ничего не потрачено — повторить с --yes.")
             return 0
+        from .synth import MODEL as SYNTH_MODEL
+
         got = synth_generate(args.face, args.generated, count=args.generate,
-                             subject=args.subject)
+                             subject=args.subject,
+                             model=args.model or SYNTH_MODEL)
         print("\n" + got["note"] + "\n")
         if not got["ok"]:
             return 1
