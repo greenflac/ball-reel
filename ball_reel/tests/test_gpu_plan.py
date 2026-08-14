@@ -900,3 +900,84 @@ class TheFaceIDLoRAFailureIsItsOwnOutcome(unittest.TestCase):
         src = inspect.getsource(animate.build)
         self.assertIn("size mismatch", src)
         self.assertIn("raise", src)
+
+
+class EveryStageWrittenMustAlsoBeCALLED(unittest.TestCase):
+    """Второй случай той же формы за час, и первый я допустил сам.
+
+    Семантическая ось была объявлена в `CHECK_ORDER`, имела параметр в
+    `_verdict` и корректное условие — и не вызывалась НИГДЕ, отчего условие
+    выходило тождественно истинным. Проверка выяснила, что ровно так же мертвы
+    были `refine` (не импортировался ни одним модулем пакета) и `upscale`
+    (импортировался только ради константы).
+
+    Модуль, написанный и не подключённый, опаснее ненаписанного: он есть в
+    отчёте, в справочнике и в разговоре, а в конвейере его нет. Проверяется
+    ВЫЗОВ в дереве разбора, а не подстрока: подстрочная версия зеленела при
+    удалённом вызове, потому что строка импорта оставалась на месте.
+    """
+
+    @staticmethod
+    def _calls(fn):
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        return {n.func.id if isinstance(n.func, ast.Name)
+                else getattr(n.func, "attr", "")
+                for n in ast.walk(tree) if isinstance(n, ast.Call)}
+
+    def test_the_face_refinement_stage_is_invoked(self):
+        from ball_reel import run_local
+
+        called = self._calls(run_local._animatediff_once)
+        self.assertIn("refine", called, "ступень доводки написана и не вызвана")
+        self.assertIn("union_box", called, "фиксированный бокс не строится")
+        self.assertIn("paste_series", called, "патчи не вклеиваются обратно")
+
+    def test_the_upscale_stage_is_invoked_and_sealed(self):
+        from ball_reel import run_local
+
+        called = self._calls(run_local._animatediff_once)
+        self.assertIn("upscale_frames", called, "апскейл написан и не вызван")
+        # Без печати он и не выполнится — но проверить надо, что печать
+        # СТАВИТСЯ, а не что её можно поставить.
+        self.assertIn("seal_verdict", called, "апскейл идёт без печати гейта")
+
+    def test_the_seal_is_taken_AFTER_the_gate_not_before(self):
+        """Порядок — весь смысл ступени. Проверяется по позиции в исходнике."""
+        import inspect
+
+        src = inspect.getsource(run_local_module()._animatediff_once)
+        gate = src.index("clip_gate(")
+        seal = src.index("seal_verdict(")
+        self.assertLess(gate, seal,
+                        "печать ставится до гейта — тогда судить будут "
+                        "апскейленные кадры, то есть выдумку апскейлера")
+
+    def test_both_stages_are_off_by_default(self):
+        # Ни одна не исполнялась на карте. Включить их вместе с генерацией —
+        # значит получить один отказ и трёх подозреваемых.
+        from ball_reel import run_local
+
+        got = run_local.build_parser().parse_args(
+            ["--face", "f.jpg", "--prompt", "p"])
+        self.assertFalse(got.refine)
+        self.assertFalse(got.upscale)
+
+    def test_the_face_box_comes_from_the_same_detector_that_judges(self):
+        # Бокс, снятый одним детектором, а судимый другим, разъедется
+        # незаметно: кроп окажется не там, где ArcFace ищет лицо.
+        import inspect
+
+        from ball_reel import run_local
+
+        src = inspect.getsource(run_local._face_box)
+        self.assertIn("identity_arcface", src)
+
+
+def run_local_module():
+    from ball_reel import run_local
+
+    return run_local

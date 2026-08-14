@@ -681,6 +681,21 @@ def build_parser():
                          "там нет, кадры считаются совместно")
 
     ad = ap.add_argument_group("animatediff")
+    # ОБЕ СТУПЕНИ ВЫКЛЮЧЕНЫ ПО УМОЛЧАНИЮ, и это не осторожность ради
+    # осторожности. Ни доводка лица, ни апскейл не исполнялись на карте ни
+    # разу. Включив их вместе с генерацией, мы получим один отказ и три
+    # подозреваемых. Порядок в рунбуке: голый прогон -> --refine -> --upscale,
+    # по одному неизвестному за раз.
+    ad.add_argument("--refine", action="store_true",
+                    help="ступень доводки лица: кроп по фиксированному боксу, "
+                         "16 кадров одним стеком, вклейка. Делает лицо судимым "
+                         "на полном росте — но лицо ПОРОЖДАЕТСЯ из фото, и "
+                         "число ArcFace после неё смещено в оптимистичную "
+                         "сторону")
+    ad.add_argument("--upscale", action="store_true",
+                    help="апскейл x2 ПОСЛЕ гейта, под печатью. Даёт пиксели, "
+                         "но не различающие детали: судимость лица приходит от "
+                         "--refine, а не отсюда")
     ad.add_argument("--full-body", action="store_true",
                     help="полный рост вместо кадра по пояс: доля лица падает с "
                          "19%% до 9.4%% высоты, и гейт перестаёт судить лицо")
@@ -836,6 +851,22 @@ def clip_gate(frames: list, face: str, points: list, clock=None, *,
     return [r for r in rows if garment or r["label"] != "одежда"]
 
 
+def _face_box(path: str):
+    """Рамка лица на кадре, или None. Тем же детектором, что судит личность.
+
+    Отдельной функцией, потому что доводке нужны боксы ПО ВСЕМ кадрам, а
+    `identity_arcface.face_detail` отвечает про один. Брать другой детектор
+    нельзя: бокс, снятый одним, а судимый другим, разъедется незаметно.
+    """
+    from .identity_arcface import face_detail
+
+    try:
+        d = face_detail(path)
+    except Exception:  # noqa: BLE001 — кадр без лица не должен ронять прогон
+        return None
+    return tuple(float(v) for v in d["bbox"]) if d else None
+
+
 def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
                       clock, motion_lora: str, label: str, measure) -> dict:
     """Одна генерация целиком: сборка -> кадры -> mp4 -> гейт. Возвращает числа.
@@ -912,6 +943,45 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
     paths = save_frames(made, frames_dir)
     _say("кадры", len(paths) == cfg.frames,
          f"{len(paths)} шт. в {frames_dir}, сид {args.seed}")
+
+    # ------------------------------------------------ ступень 2: доводка лица
+    #
+    # ПОРЯДОК ЗДЕСЬ — ВЕСЬ СМЫСЛ, и он такой: доводка -> ГЕЙТ -> печать ->
+    # апскейл. Гейт судит то, что породила модель (включая доводку: она тоже
+    # генерация), и НЕ судит апскейл — иначе мы мерили бы выдумку апскейлера.
+    # Печать (`upscale.seal_verdict`) хранит sha256 каждого судимого кадра, и
+    # апскейл без неё не выполняется: обратный порядок не получится собрать.
+    #
+    # По умолчанию ОБЕ ступени ВЫКЛЮЧЕНЫ. Ни одна из них не исполнялась на
+    # карте ни разу, и включать три неизвестных в одном прогоне — верный способ
+    # не понять, какое из них сломалось. Рунбук предписывает порядок: голый
+    # прогон, потом --refine, потом --upscale, по одному неизвестному за раз.
+    refine_row = {"label": "доводка лица", "ok": None, "value": None,
+                  "note": ("выключена (--refine чтобы включить): лицо остаётся "
+                           "мелким, и гейт по личности ответит «не смогли». На "
+                           "полном росте это ожидаемо")}
+    if args.refine:
+        from . import refine as refine_mod
+
+        boxes = [_face_box(p) for p in paths]
+        box, rep = refine_mod.union_box(boxes, size=(cfg.width, cfg.height))
+        if box is None:
+            refine_row = {"label": "доводка лица", "ok": rep["ok"],
+                          "value": rep.get("face_px"), "note": rep["reason"]}
+        else:
+            with clock.stage("refine", per=PER_RUN):
+                crops = refine_mod.crop_series(paths, box)
+                done = refine_mod.refine(pipe, crops, face_embeds=embeds,
+                                         prompt=prompt, negative=args.negative,
+                                         seed=args.seed)
+                paths = refine_mod.paste_series(paths, done, box, frames_dir)
+            refine_row = {"label": "доводка лица", "ok": True,
+                          "value": rep.get("face_px"),
+                          "note": (f"{rep['reason']}. ВАЖНО: лицо здесь не "
+                                   f"восстановлено, а ПОРОЖДЕНО из фото — "
+                                   f"число ArcFace ниже смещено в "
+                                   f"оптимистичную сторону")}
+    _row(refine_row, width=0)
 
     # Пайплайн больше не нужен: дальше только измерители, а они на CPU.
     pipe = None
@@ -998,8 +1068,41 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
         print("      луп не сошёлся: у окна нет возврата в первый кадр. "
               "Резать по лучшему стыку — motion.best_loop_cut / trim_to_loop, "
               "это ffmpeg и секунды, а не вторая генерация.")
+    # -------------------------------------------- ступень 4: апскейл, ПОСЛЕДНИМ
+    #
+    # Строго после гейта и только под ПЕЧАТЬЮ. Печать хранит sha256 каждого
+    # судимого кадра; `upscale_frames` сверяет дайджесты входа и отказывается,
+    # если они не те. Собрать обратный порядок («апскейлить, потом судить») не
+    # выйдет: печати неоткуда взяться, а `seal_verdict` отказывается печатать
+    # то, что сам апскейлер и произвёл.
+    #
+    # ЗАЧЕМ такая строгость. Апскейлер переписывает верхнюю полосу частот — ту
+    # самую, которую меряют ArcFace и DWPose (замерено: 2.54x энергии против
+    # интерполяции). Посудив апскейленный кадр, мы измерили бы апскейлер, а не
+    # генератор.
+    up_row = {"label": "апскейл", "ok": None, "value": None,
+              "note": "выключен (--upscale чтобы включить)"}
+    if args.upscale:
+        from . import upscale as up
+
+        code, _ = run_verdict(rows)
+        seal = up.seal_verdict(paths, code == 0, gate="run_local.clip_gate")
+        with clock.stage("upscale", per=PER_RUN):
+            res = up.upscale_frames(paths, seal)
+        up_row = {"label": "апскейл", "ok": res["outcome"] != "skipped",
+                  "value": res.get("factor"), "note": res["note"]}
+        if res.get("frames"):
+            try:
+                clip = frames_to_mp4(Path(res["frames"][0]).parent,
+                                     out / "clip_2x.mp4", fps=fps)
+                _say("mp4 x2", True, clip)
+            except Exception as e:  # noqa: BLE001
+                _say("mp4 x2", False, f"{type(e).__name__}: {str(e)[:70]}")
+    _row(up_row, width=0)
+
     return {"label": label, "loras": active, "rows": rows, "clip": clip,
             "frames": paths, "fps": fps, "seed": args.seed,
+            "refine": refine_row, "upscale": up_row,
             "measured": {"face": len(idents), "pose": len(poses), "of": n}}
 
 
