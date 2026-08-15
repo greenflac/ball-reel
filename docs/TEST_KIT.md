@@ -52,7 +52,7 @@ kit/
 лежит намеренно, это бинарь.
 
 ```bash
-git clone -b claude/ball-reel-mvp-pollinations-ruasf1 <repo> && cd llm_radar/ball_reel
+git clone https://github.com/greenflac/ball-reel.git && cd ball-reel
 tar xzf ~/Downloads/ball_reel_kit.tar.gz     # появится kit/
 export POLLINATIONS_API_KEY=sk_...           # нужен только на шаге 4
 ```

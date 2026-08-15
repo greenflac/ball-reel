@@ -109,8 +109,8 @@ active_loras          -> []
 На ноутбуке:
 
 ```bash
-git clone -b claude/ball-reel-mvp-pollinations-ruasf1 <repo>
-cd llm_radar/ball_reel
+git clone https://github.com/greenflac/ball-reel.git
+cd ball-reel
 tar xzf ~/ball_reel_kit.tar.gz          # появится kit/
 ls kit/conditions/*.png | wc -l         # ожидается: 71
 ```

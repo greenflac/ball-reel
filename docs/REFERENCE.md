@@ -1,7 +1,7 @@
 # ball_reel — справочная памятка
 
 Собрано чтением кода (`ball_reel/ball_reel/*.py`) и документов `README.md`,
-`POLLINATIONS_CONTRACT.md`, `MVP_RUNBOOK.md`, `GPU_BRANCH.md`, `GPU_RUNBOOK.md`.
+`POLLINATIONS_CONTRACT.md`, `GPU_BRANCH.md`, `GPU_RUNBOOK.md`.
 Ничего не додумано: где в коде нет — написано «нет».
 Версия пакета: `__version__ = "0.1.0"`. Составлено 2026-08-12, **сверено с кодом
 2026-08-14** по состоянию рабочего дерева (часть изменений на тот момент была не
@@ -64,7 +64,6 @@ tests`. Ни одна цифра в markdown не переживает рабо�
 | `chain.py` | Цепочка пиннинга движения: выбор кейфреймов по экстремумам, рендер кейфрейма в позе донора с проверкой, сборка сегментов `start|end` через ffmpeg. | `pollinations`, `pose`, `identity*` | сеть (платно), ffmpeg |
 | `pollinations.py` | Клиент единственного шлюза: upload, image, images_edit, compose, video, video_loop, extract_frames, chat/judge, tts. | requests, ffmpeg | сеть (платно) |
 | `produce.py` | Боевой пайплайн: старт-кадр → ранний отсев → upload → видео → гейт → ретрай; отчёт `produce_report.json`. CLI. | `pollinations`, `motion`, `pose`, `subject`, `identity*` | сеть (платно) |
-| `mvp.py` | Урезанный прогон: кадры (свои или сгенерированные) + РЕАЛЬНЫЙ VLM-судья → тот же критик; пишет `mvp_report.md`. | `pollinations`, `critic`, `gen` | сеть (платно) |
 | `doctor.py` | Предполёт по эндпоинтам Pollinations в порядке возрастания стоимости; видео — только с `--video`. | `pollinations`, requests | сеть (дёшево; `--video` платно) |
 | `codeaudit.py` | Аудит самих тестов: прогон, покрытие несущих модулей и МУТАЦИОННАЯ проверка — каждый порог по очереди ломается в копии исходника, тесты обязаны покраснеть. Ничего не генерирует, в сеть не ходит. | unittest, coverage | нет |
 | `preflight_gpu.py` | Предполёт на арендованной GPU-машине: torch/CUDA, VRAM, диск, кэш весов, модель позы, условия, лицо, живость ключа. Ничего не генерирует. Единственный модуль с русскими сообщениями. | torch, `pose`, `intake`, `pollinations` | GPU (проверяет), сеть (только `/account/key`) |
@@ -205,17 +204,6 @@ Argparse НЕТ, проверяется `"--video" in argv`.
 Env: `BALL_REEL_DOCTOR_OUT` (`doctor_out`), `BALL_REEL_VIDEO_MODEL` (`seedance-2.0`), `BALL_REEL_VIDEO_DURATION` (`4`).
 Деньги: image/edit/upload/tts — «дёшево», video — платно. Возврат 0/1, 2 если нет ключа.
 
-### `python3 -m ball_reel.mvp`
-Прогон критика на реальных кадрах с реальным VLM-судьёй. Argparse НЕТ, флаги по вхождению в argv.
-
-| аргумент | тип | по умолчанию | смысл |
-|---|---|---|---|
-| `--generate` | флаг | выкл | сгенерировать по 4 кадра на стратегию в `mvp_input/<sid>/NN.png` и выйти — **платно** |
-| `--arcface` | флаг | выкл | идентичность настоящим ArcFace вместо dhash-прокси |
-| `--no-judge` | флаг | выкл | не звать VLM, взять синтетический вердикт из фикстур |
-
-Env: `POLLINATIONS_IMAGE_MODEL` (`flux`), `POLLINATIONS_JUDGE_MODEL` (`openai`).
-Деньги: да (генерация кадров и/или судья), без `--generate --no-judge` — только судья. Пишет `ball_reel/mvp_report.md`.
 
 ### `python3 -m ball_reel.produce` — основной боевой вход (argparse есть)
 
@@ -510,7 +498,6 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 
 **`gen.py`** (офлайн-шлюз): `Gateway(root, live=False)`, `.start_frame(brief, strategy) -> Frame`, `.video(brief, strategy, start) -> list[str]`, `.voice(brief, start, script_ru="") -> str|None` (офлайн всегда `None`).
 **`live_gen.py`**: `start_frame_live(prompt, face_ref, seed, width, height, out_path, *, base_model="stabilityai/stable-diffusion-xl-base-1.0", lora_path=None, lora_scale=0.8, ip_adapter_scale=0.6) -> str`; `video_live(start_frame, prompt, out_dir, *, duration_s=5, fps=24) -> list[str]`; `voice_live(start_frame, script_ru, out_path) -> str`.
-**`mvp.py`**: `prompts_for(brief) -> {sid: prompt}`, `generate(brief, *, n=4)`, `run(brief, *, use_arcface=False, real_judge=True, bar=DEFAULT_BAR) -> {ranked, accepted, considered, judged_by, identity}`, `render(result) -> str`.
 
 ### 3.4 Проверка и гейт
 
@@ -751,8 +738,6 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 | `POLLINATIONS_API_KEY` | `pollinations._key` | **нет; `RuntimeError`** | Bearer-ключ `sk_...` для всех вызовов шлюза |
 | `POLLINATIONS_BASE` | `pollinations._base` | `https://gen.pollinations.ai` | базовый хост генерации |
 | `POLLINATIONS_MEDIA` | `pollinations._media` | `https://media.pollinations.ai` | ОТДЕЛЬНЫЙ хост загрузки; видео-эндпоинт фетчит старт-кадр оттуда серверной стороной |
-| `POLLINATIONS_IMAGE_MODEL` | `mvp` | `flux` | модель для `mvp --generate` |
-| `POLLINATIONS_JUDGE_MODEL` | `mvp` | `openai` | VLM-судья для оси мнения (у `pollinations.judge_frame` свой дефолт `claude`) |
 | `BALL_REEL_DOCTOR_OUT` | `doctor` | `doctor_out` | каталог артефактов предполёта |
 | `BALL_REEL_VIDEO_MODEL` | `doctor` | `seedance-2.0` | чем гонять `--video` (для отладки ставить `wan-fast`, в 18 раз дешевле) |
 | `BALL_REEL_VIDEO_DURATION` | `doctor` | `4` | длительность тестового клипа в секундах |
@@ -781,7 +766,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 
 **Офлайн-демо:** только `Pillow`.
 
-**Живой путь (`requirements-live.txt` + `MVP_RUNBOOK.md`):**
+**Живой путь (`requirements-live.txt`):**
 ```
 pip install Pillow requests insightface onnxruntime numpy
 apt-get install -y ffmpeg          # извлечение кадров и склейка
