@@ -757,8 +757,11 @@ def build_parser():
                     help="каждый N-й кадр условий в окно движения. 1 — истинный "
                          "темп и ~1.3 с; больше — шире охват движения, но mp4 "
                          "играется на 12/N fps и выглядит рвано")
-    ad.add_argument("--from-frame", type=int, default=0,
-                    help="с какого условия начать окно")
+    ad.add_argument("--from-frame", default="0",
+                    help="с какого условия начать окно; `auto` — выбрать "
+                         "ЗАМЕРОМ то окно исходника, которое замыкается лучше "
+                         "всех. Стоит один декод и ноль генераций, а разница "
+                         "измерена: 4.374 против 1.245 на нашем драйвинге")
     ad.add_argument("--fps", type=float, default=0.0,
                     help="частота mp4; 0 — посчитать из --stride так, чтобы "
                          "темп движения остался настоящим")
@@ -1185,14 +1188,60 @@ def _animatediff_once(args, *, cfg, conditions, driving_paths, prompt, out,
                       driving_paths=driving_paths)
     for r in rows:
         _row(r)
+    # ------------------------------------ ступень 3.4: замкнуть луп ОБРЕЗКОЙ
+    #
+    # Клип AnimateDiff не замкнут ПО ПОСТРОЕНИЮ: у окна модуля движения нет
+    # возврата в первый кадр (в отличие от цепочки, где последний сегмент
+    # возвращается в первый кейфрейм). Ось `луп` поэтому валится на КАЖДОМ
+    # прогоне, и валится предсказуемо.
+    #
+    # ПОЧЕМУ ЭТО БЫЛО ДЕФЕКТОМ, А НЕ ПРОБЕЛОМ. Лечение существовало в
+    # `motion.best_loop_cut`, вызывалось шлюзовым путём (`produce`) — и на
+    # локальном пути ТОЛЬКО ПЕЧАТАЛОСЬ СОВЕТОМ. То есть отчёт содержал адрес
+    # починки, а починка не происходила: ровно та форма «написано и не
+    # подключено», на которую в этом репозитории заведён отдельный тест.
+    # Стоит она секунд ffmpeg против 31 минуты второй генерации.
+    #
+    # ЧЕГО ЭТО НЕ ДЕЛАЕТ, и цену надо назвать вслух: обрезка НЕ ПОРОЖДАЕТ
+    # замыкания, она находит кадр, наиболее похожий на первый, и отбрасывает
+    # хвост. Клип становится КОРОЧЕ — при 16 кадрах и разрезе на 11-м это 1.33 с
+    # против 0.92 с. И бар она берёт не всегда: замерено на шлюзовых клипах, где
+    # wan поднялся 1.71 -> 0.41, а happyhorse -> 0.75 при планке 0.30, то есть
+    # улучшила обоих и не спасла ни одного. Поэтому судимый клип НЕ
+    # ПЕРЕЗАПИСЫВАЕТСЯ: обрезанный ложится рядом, и выбор между «длиннее» и
+    # «замкнутее» остаётся за человеком.
+    loop_row = {"label": "обрезка лупа", "ok": None, "value": None,
+                "note": "не потребовалась: луп сошёлся сам"}
     if next((r for r in rows if r["label"] == "луп" and r["ok"] is False), None):
-        # Клип AnimateDiff не замкнут по построению (в отличие от цепочки, где
-        # последний сегмент возвращается в первый кейфрейм). Это не оправдание
-        # провала, а адрес починки: подрезать по лучшему стыку локально,
-        # бесплатно и без второй генерации.
-        print("      луп не сошёлся: у окна нет возврата в первый кадр. "
-              "Резать по лучшему стыку — motion.best_loop_cut / trim_to_loop, "
-              "это ffmpeg и секунды, а не вторая генерация.")
+        from .motion import SEAMLESS_MAX, best_loop_cut
+
+        cut = best_loop_cut(paths)
+        if cut["ratio"] is None:
+            loop_row["note"] = cut["note"]
+        elif cut["cut_at"] >= len(paths) - 1:
+            loop_row["note"] = ("лучший стык — последний кадр: резать нечего, "
+                                "клип нигде не возвращается к началу")
+        else:
+            loop_row = {"label": "обрезка лупа",
+                        "ok": cut["ratio"] <= SEAMLESS_MAX,
+                        "value": cut["ratio"],
+                        "note": (f"стык {cut['ratio']} при баре {SEAMLESS_MAX} "
+                                 f"после реза на кадре {cut['cut_at']} из "
+                                 f"{len(paths) - 1}; остаётся "
+                                 f"{cut['kept_fraction']:.0%} клипа")}
+            if clip:
+                try:
+                    from .motion import trim_to_loop
+
+                    got = trim_to_loop(clip, paths, out / "clip_loop.mp4",
+                                       fps=fps)
+                    loop_row["note"] += f"; {got['out']} ({got['duration']} с)"
+                except Exception as e:  # noqa: BLE001
+                    # Как и сборка mp4: не роняет прогон. Кадры целы, число
+                    # стыка посчитано, ролик пересобирается одной строкой.
+                    loop_row["note"] += f"; mp4 не обрезан ({type(e).__name__})"
+    rows.append(loop_row)
+    _row(loop_row)
     # ------------------------------- ступень 3.5: подражание драйвингу, ПОСЛЕ
     #
     # МЕСТО ВЫБРАНО ПО ТОМУ ЖЕ ПРАВИЛУ, ЧТО И У АПСКЕЙЛА, и по той же причине:
@@ -1576,8 +1625,39 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
                                  plan_px=getattr(cfg, "face_px", None))
     _row(forecast, width=0)
 
+    # ОКНО ВЫБИРАЕТСЯ ЗАМЕРОМ, А НЕ НАУГАД. Исходник длиннее окна модуля
+    # движения (192 кадра против 16), и какой отрезок брать — это решение,
+    # которое до сих пор принималось умолчанием 0. Цена умолчания измерена: у
+    # окна 8..23 стык 4.374, у лучшего окна 66..81 — 1.245, то есть в 3.5 раза
+    # меньше при той же генерации. Бар 0.30 не берёт ни одно (движение
+    # исходника нециклично), но выбирать худшее, имея замер, незачем.
+    #
+    # Замер идёт по driving-КАДРАМ, а не по условиям: условия — это отрисовка
+    # скелета, и на ней «похожесть кадров» меряется по линиям, а не по телу.
+    start = args.from_frame
+    if str(start).lower() == "auto":
+        from .motion import best_loop_window
+
+        pool = [driving_of.get(Path(c).stem) for c in conditions]
+        pool = [p for p in pool if p]
+        if len(pool) == len(conditions):
+            got = best_loop_window(pool, size=cfg.frames, stride=args.stride)
+            start = got["start"] if got["ratio"] is not None else 0
+            _say("выбор окна", got["ratio"] is not None, got["note"])
+        else:
+            start = 0
+            _say("выбор окна", None,
+                 f"driving-кадры есть не у всех условий ({len(pool)} из "
+                 f"{len(conditions)}) — выбирать замером не по чему, взято 0")
+    else:
+        try:
+            start = int(start)
+        except ValueError:
+            return _stop(f"--from-frame принимает число или `auto`, а не "
+                         f"{args.from_frame!r}")
+
     chosen, fps, note = choose_conditions(
-        conditions, cfg.frames, stride=args.stride, start=args.from_frame)
+        conditions, cfg.frames, stride=args.stride, start=start)
     _say("окно условий", bool(chosen), note)
     if not chosen:
         return _stop("окно модуля движения не набирается из этих условий")

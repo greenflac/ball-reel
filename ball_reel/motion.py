@@ -116,6 +116,57 @@ def motion_quality(frames: list[str]) -> dict:
                         if jumps else "; motion is continuous") + ".")}
 
 
+def best_loop_window(frames: list[str], *, size: int, stride: int = 1) -> dict:
+    """Какое ОКНО исходника замыкается лучше всех. Выбор до генерации, не после.
+
+    ЗАЧЕМ ОТДЕЛЬНО ОТ `best_loop_cut`. Обрезка работает с уже отрисованным
+    клипом и умеет только отбросить хвост — значит она ограничена тем, что
+    внутри выбранного окна вообще есть кадр, похожий на первый. ИЗМЕРЕНО, что
+    это ограничение бывает непреодолимым: на нашем драйвинге текущее окно даёт
+    стык 4.374, а лучшая обрезка внутри него — 3.742 при баре 0.30. Движение за
+    эти 16 кадров никуда не возвращается, и резать нечего.
+
+    А исходник длиннее окна: 192 кадра против 16. Перебор всех окон на тех же
+    данных даёт стык 1.245 (окно 66..81) против 4.374 у текущего — В 3.5 РАЗА
+    лучше и БЕСПЛАТНО: та же генерация, другой отрезок. Бар 0.30 не берёт и оно,
+    потому что движение в этом видео нециклично в принципе, — но выбирать окно
+    наугад, имея замер, незачем.
+
+    Порядок поэтому такой: сначала ВЫБРАТЬ окно (здесь), потом генерировать,
+    потом при нужде подрезать (`best_loop_cut`). Обратный порядок оплачивает
+    31 минуту генерации за отрезок, который заведомо хуже соседнего.
+
+    Стоит один декод исходника и ноль генераций.
+    """
+    import numpy as np
+
+    span = (size - 1) * stride + 1
+    if size < 2 or stride < 1 or len(frames) < span:
+        return {"start": 0, "ratio": None, "seamless": False,
+                "note": (f"кадров {len(frames)}, а окно требует {span} — "
+                         f"выбирать не из чего")}
+    arrs = [_gray(f) for f in frames]
+    steps = [float(np.abs(arrs[i + 1] - arrs[i]).mean())
+             for i in range(len(arrs) - 1)]
+    typical = float(np.median(steps)) or 1.0
+    # Стык окна — расстояние между его ПОСЛЕДНИМ и ПЕРВЫМ кадром, в единицах
+    # обычного шага. Та же шкала, что у `loop_seam`, иначе числа «до» и «после»
+    # выбора окна нельзя сравнивать.
+    scored = [(float(np.abs(arrs[s + span - 1] - arrs[s]).mean()) / typical, s)
+              for s in range(len(frames) - span + 1)]
+    ratio, start = min(scored)
+    worst = max(scored)[0]
+    return {"start": start, "ratio": round(ratio, 3),
+            "seamless": ratio <= SEAMLESS_MAX,
+            "worst_ratio": round(worst, 3), "candidates": len(scored),
+            "note": (f"лучшее окно {start}..{start + span - 1} из "
+                     f"{len(scored)} возможных: стык {ratio:.3f} при баре "
+                     f"{SEAMLESS_MAX} (худшее окно дало бы {worst:.3f})"
+                     + ("" if ratio <= SEAMLESS_MAX else
+                        " — бар не взят: движение исходника нециклично, и "
+                        "выбор окна это улучшает, а не чинит"))}
+
+
 def best_loop_cut(frames: list[str], *, min_keep: float = 0.5) -> dict:
     """Find where to cut so the clip loops, without generating anything new.
 
