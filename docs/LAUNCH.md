@@ -39,7 +39,10 @@
 
 **Судья независим от судимого, и это не лозунг.** Условия снимает DWPose —
 проверяет MediaPipe. Набор для LoRA порождает шлюз — отбирает FaceNet — судит
-ArcFace. Спросить генератор, получилось ли у него, нельзя ни в одном месте
+ArcFace. **Оговорка про набор, который лежит в репозитории:** ступень отбора на
+нём НЕ ПРИМЕНЯЛАСЬ (`manifest.json`: `"selector": "не применялся"`), см.
+`LORA_RUNBOOK.md`. Конвейер поддержан кодом; этот конкретный набор прошёл его
+без отбора, и судья всё равно остался независим — он читает готовое. Спросить генератор, получилось ли у него, нельзя ни в одном месте
 пайплайна; проверка разведения написана кодом (`dataset.independence_report`) и
 стоит первой и в предполёте, и в приёмке.
 
@@ -78,7 +81,8 @@ ArcFace. Спросить генератор, получилось ли у не�
    доводка лица (--refine, опц.)
          |
          v
-   ГЕЙТ: 13 осей, все меряют            <- MediaPipe, ArcFace, CLIP
+   ГЕЙТ: 11 останавливающих строк       <- MediaPipe, ArcFace
+   (+ 4 справочных; CLIP только в `produce`)
          |
          v
    ПЕЧАТЬ: sha256 судимых кадров (GateSeal)
@@ -203,7 +207,7 @@ available` на первом же ядре — то есть после загр
 ### Шаг 1 — предполёт (минуты, ничего не генерирует)
 
 ```bash
-python3 -m ball_reel.preflight_gpu --conditions kit/conditions --face kit/face.jpg --vram 6
+python3 -m ball_reel.preflight_gpu --conditions demo/kit/conditions --face demo/kit/face.jpg --vram 6
 ```
 
 Проверяет по возрастанию цены: пакеты (1 мс на `find_spec`) → диск → torch →
@@ -215,7 +219,7 @@ python3 -m ball_reel.preflight_gpu --conditions kit/conditions --face kit/face.j
 ### Шаг 2 — набор для LoRA (~3 минуты, ~1.75 pollen)
 
 ```bash
-python3 -m ball_reel.dataset --face kit/face.jpg --out ds \
+python3 -m ball_reel.dataset --face demo/kit/face.jpg --out ds \
         --trigger ohwx_person --generate 20 --yes
 ```
 
@@ -282,7 +286,7 @@ python3 -m ball_reel.train --dataset ds --out lora_out --vram 6
 
 ```bash
 python3 -m ball_reel.run_local --engine animatediff \
-        --face kit/face.jpg --conditions kit/conditions \
+        --face demo/kit/face.jpg --conditions demo/kit/conditions \
         --prompt "..." --vram 6 --smoke
 ```
 
@@ -304,7 +308,7 @@ FaceID-LoRA адресованы attention базового SD1.5, а после
 
 ```bash
 python3 -m ball_reel.run_local --engine animatediff \
-        --face kit/face.jpg --conditions kit/conditions \
+        --face demo/kit/face.jpg --conditions demo/kit/conditions \
         --prompt "a person in a bright red tank top and black shorts, in a sunlit gym" \
         --lora lora_out --lora-scale 0.8 \
         --vram 6 --out run_out

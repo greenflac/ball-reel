@@ -112,7 +112,7 @@ active_loras          -> []
 git clone https://github.com/greenflac/ball-reel.git
 cd ball-reel
 tar xzf ~/ball_reel_kit.tar.gz          # появится kit/
-ls kit/conditions/*.png | wc -l         # ожидается: 71
+ls demo/kit/conditions/*.png | wc -l         # ожидается: 71
 ```
 
 Домены, которые обязаны быть доступны с ноутбука:
@@ -293,7 +293,7 @@ python3 -m ball_reel.animate --vram 6 --full-body
 
 ```bash
 # ИЗ КОРНЯ РЕПОЗИТОРИЯ (ball_reel/), не из kit/ — иначе ModuleNotFoundError
-python3 -m ball_reel.preflight_gpu --conditions kit/conditions --face kit/face.jpg --skip-gateway
+python3 -m ball_reel.preflight_gpu --conditions demo/kit/conditions --face demo/kit/face.jpg --skip-gateway
 ```
 
 Шестнадцать проверок, сгруппированных **по цене**. Внутри группы выполняется
@@ -345,7 +345,7 @@ PASS        onnxruntime         24 мс  CPUExecutionProvider доступен (
 | `FAIL диск свободно N, нужно ~M` | не хватит на недостающие веса | освободить или `export HF_HOME=/другой/диск` |
 | `FAIL веса ...` | качка не закончилась | строка печатает готовую команду `snapshot_download` с именами файлов |
 | `FAIL условия` | кит не распакован, или пропуски в нумерации, или размер не тот, что в плане | раздел 0 |
-| `FAIL лицо` | не то фото | брать `kit/face.jpg`: 148 px, детектор 0.819 |
+| `FAIL лицо` | не то фото | брать `demo/kit/face.jpg`: 148 px, детектор 0.819 |
 
 `--skip-gateway` здесь **обязателен**: проверка шлюза требует
 `POLLINATIONS_API_KEY` и сети, а локальный путь генерации наружу не ходит вовсе.
@@ -392,7 +392,7 @@ python3 -m ball_reel.codeaudit --quick
 файл `diffusion_pytorch_model.safetensors`, 77 МБ каждая.
 
 **DWPose** (`yzd-v/DWPose`: `yolox_l.onnx` 217 МБ + `dw-ll_ucoco_384.onnx` 134 МБ)
-для демо **не нужен**: им сняты условия, которые уже лежат в `kit/conditions`
+для демо **не нужен**: им сняты условия, которые уже лежат в `demo/kit/conditions`
 готовыми. Качать его — минус 350 МБ трафика и ноль пользы. Нужен, только если
 снимать условия с другого видео.
 
@@ -426,7 +426,7 @@ curl -sSL -o ~/.mediapipe/selfie_multiclass_256x256.tflite \
   https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite
 
 # эмбеддинг лица: скачается сам при первом обращении, но лучше заранее и явно
-python3 -c "from ball_reel.identity_arcface import face_detail; print(face_detail('kit/face.jpg')['face_px'])"
+python3 -c "from ball_reel.identity_arcface import face_detail; print(face_detail('demo/kit/face.jpg')['face_px'])"
 ```
 
 Ожидаемый вывод последней строки: `148`. По пути insightface напечатает
@@ -572,7 +572,7 @@ python3 -m ball_reel.semantic --attribution demo_out/frames
 ```
 
 ИЗМЕРЕНО на кадрах, где ответ известен заранее: driving-кадры дают «driving-видео»
-с отрывом 0.0911, `kit/face.jpg` — «фото личности» с отрывом 0.1651, при шуме
+с отрывом 0.0911, `demo/kit/face.jpg` — «фото личности» с отрывом 0.1651, при шуме
 0.012. Третьего положительного контроля — кадра, где одежда пришла ИЗ ЗАКАЗА, —
 в репозитории нет и быть не может до первого прогона: этот исход НЕПРОВЕРЕН.
 
@@ -580,7 +580,7 @@ python3 -m ball_reel.semantic --attribution demo_out/frames
 
 ```bash
 python3 -m ball_reel.run_local --engine animatediff --smoke \
-  --face kit/face.jpg --conditions kit/conditions \
+  --face demo/kit/face.jpg --conditions demo/kit/conditions \
   --vram 6 --full-body --from-frame 50 --out demo_out --prompt "$P"
 ```
 
@@ -685,7 +685,7 @@ EOF
 
 ```bash
 python3 -m ball_reel.run_local --engine animatediff \
-  --face kit/face.jpg --conditions kit/conditions \
+  --face demo/kit/face.jpg --conditions demo/kit/conditions \
   --vram 6 --full-body --from-frame 50 --seed 0 --out demo_out --prompt "$P"
 ```
 
@@ -837,7 +837,7 @@ pipe.enable_sequential_cpu_offload()
 pipe.set_ip_adapter_scale(0.7)
 out = pipe(prompt=P, negative_prompt="blurry, deformed, extra limbs, watermark, text",
            num_frames=16, width=512, height=768,
-           ip_adapter_image_embeds=[face_embeds("kit/face.jpg")],
+           ip_adapter_image_embeds=[face_embeds("demo/kit/face.jpg")],
            num_inference_steps=20, guidance_scale=7.5,
            generator=torch.Generator("cpu").manual_seed(0))
 frames = out.frames[0]
@@ -853,11 +853,11 @@ from ball_reel import animate
 from ball_reel.gpu_keyframes import face_embeds
 
 cfg = animate.plan(6.0, waist_up=False); cfg.offload = "sequential"
-paths = sorted(glob.glob("kit/conditions/*.png"))[55:55 + cfg.frames]
+paths = sorted(glob.glob("demo/kit/conditions/*.png"))[55:55 + cfg.frames]
 cond = [Image.open(p).convert("RGB") for p in paths]
 pipe = animate.build(cfg)
 assert animate.active_loras(pipe), "LoRA FaceID не прицепилась: ставить peft"
-frames = animate.animate(pipe, cfg, face_embeds=face_embeds("kit/face.jpg"),
+frames = animate.animate(pipe, cfg, face_embeds=face_embeds("demo/kit/face.jpg"),
                          conditions=cond, prompt=P,
                          negative="blurry, deformed, extra limbs, watermark, text",
                          steps=20, seed=0)
@@ -931,8 +931,8 @@ du -sh $D
 
 **Порядок показа** (он же порядок доказательства, а не эффектности):
 
-1. `kit/face.jpg` и driving-кадр рядом — «личность отсюда, движение отсюда»;
-2. условие `kit/conditions/0055.png` — «движение едет скелетом, а не картинкой:
+1. `demo/kit/face.jpg` и driving-кадр рядом — «личность отсюда, движение отсюда»;
+2. условие `demo/kit/conditions/0055.png` — «движение едет скелетом, а не картинкой:
    внешность донора не переносится в принципе»;
 3. клип `evidence/demo_*/clip.mp4`;
 4. `report.json` на экране — **это и есть продукт**. Не клип, а то, что система
@@ -997,7 +997,7 @@ du -sh $D
 
 | где | что там сказано | что на самом деле |
 |---|---|---|
-| `TEST_KIT.md` §2 | `cd kit`, затем `python3 -m ball_reel.preflight_gpu` | падает с `ModuleNotFoundError: No module named 'ball_reel'`. Либо из корня с `--conditions kit/conditions`, либо из `kit/` с `PYTHONPATH=..` |
+| `TEST_KIT.md` §2 | `cd kit`, затем `python3 -m ball_reel.preflight_gpu` | падает с `ModuleNotFoundError: No module named 'ball_reel'`. Либо из корня с `--conditions demo/kit/conditions`, либо из `kit/` с `PYTHONPATH=..` |
 | `TEST_KIT.md` §1 | ~~«ожидается `Ran 249 tests`»~~ | закрыто: число вынесено в `docs/NUMBERS.md`, в документах остался `<N>` и указание сверять `PASS` |
 | `TEST_KIT.md` §0 | `pip install torch --index-url .../cu126` | тег `cu126` под torch 2.13 не сверен, см. 1.2 |
 | `TEST_KIT.md` §3–4 | `run_local ... --smoke` = один кейфрейм, потом `--video-model wan-fast` | у `run_local` появился `--engine`; умолчание — `animatediff` (локально, без шлюза), а `--smoke` там останавливается **до** генерации. Путь из TEST_KIT теперь `--engine chain` |

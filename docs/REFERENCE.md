@@ -68,9 +68,9 @@ tests`. Ни одна цифра в markdown не переживает рабо�
 | `codeaudit.py` | Аудит самих тестов: прогон, покрытие несущих модулей и МУТАЦИОННАЯ проверка — каждый порог по очереди ломается в копии исходника, тесты обязаны покраснеть. Ничего не генерирует, в сеть не ходит. | unittest, coverage | нет |
 | `preflight_gpu.py` | Предполёт на арендованной GPU-машине: torch/CUDA, VRAM, диск, кэш весов, модель позы, условия, лицо, живость ключа. Ничего не генерирует. Единственный модуль с русскими сообщениями. | torch, `pose`, `intake`, `pollinations` | GPU (проверяет), сеть (только `/account/key`) |
 | `gpu_keyframes.py` | Кейфреймы на 4 ГБ VRAM: SD1.5 + ControlNet OpenPose + IP-Adapter FaceID. `plan()` инспектируется на CPU, `render_keyframes()` — только на карте. | torch, diffusers, Pillow | GPU + веса (~7 ГБ) |
-| `live_gen.py` | Альтернатива шлюзу на своём железе: SDXL + IP-Adapter FaceID для старт-кадра, произвольный video-API, TTS+липсинк. Всё за env-переменными. | torch, diffusers, insightface, requests | GPU + сеть + веса |
+| `live_gen.py` | **НЕ ИСПОЛНЯЛСЯ НИ РАЗУ.** Альтернатива шлюзу на своём железе: SDXL + IP-Adapter FaceID для старт-кадра, произвольный video-API, TTS+липсинк. Всё за env-переменными, без них `RuntimeError`. Из тестов его касается только `test_reachable` (импортируемость), поведения не проверял никто. Липсинк в коде ЕСТЬ — `voice_live` делает два вызова, TTS и `LIPSYNC_API_URL`, — но это ШОВ под чужой сервис: ни одного провайдера к нему не подключено и ни одного прогона не было. | torch, diffusers, insightface, requests | GPU + сеть + веса |
 | `tools/make_fixtures.py` | Рисует синтетические офлайн-фикстуры Pillow'ом (3 стратегии = 3 режима отказа) и хэнд-написанные вердикты судьи. | Pillow | нет |
-| `tests/` (**47 файлов**, `git ls-files ball_reel/tests \| wc -l`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. Размер набора и число пропусков — `docs/NUMBERS.md`. Здесь стояло «27 файлов, 801 тест» — устарело по обоим. | unittest | нет |
+| `tests/` (**49 файлов**, `git ls-files ball_reel/tests \| wc -l`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. Размер набора и число пропусков — `docs/NUMBERS.md`. Здесь стояло «27 файлов, 801 тест» — устарело по обоим. | unittest | нет |
 
 Файлы тестов (`git ls-files ball_reel/tests`): `test_action`, `test_animate`,
 `test_arcface_math`, `test_bench`, `test_bodyparts`, `test_calibrate_marks`,
@@ -78,7 +78,8 @@ tests`. Ни одна цифра в markdown не переживает рабо�
 `test_dataset`, `test_defaults`, `test_demo_kit`, `test_device`,
 `test_docs_numbers`, `test_driving`, `test_dwpose`, `test_encoding`,
 `test_expression`, `test_face_size_cost`, `test_fluid`, `test_garment_fit`,
-`test_gpu_plan`, `test_identity_gate`, `test_intake`, `test_judge_audit`,
+`test_gate_membership`, `test_gpu_plan`, `test_identity_gate`, `test_intake`,
+`test_judge_audit`,
 `test_loop_pose`, `test_loop_trim`, `test_loop_window`, `test_lora`,
 `test_marks`, `test_motion_subject`, `test_native_resolution`, `test_plumbing`,
 `test_pose`, `test_preflight`, `test_reachable`, `test_refine`, `test_router`,
@@ -134,8 +135,8 @@ independence_report`, проверяется в предполёте и в пр�
     суд         ->  ArcFace buffalo_l, бар 0.35 (`identity_arcface`)
 
 Порог отбора **измерен на этой реализации**, а не перенесён из `deepface`:
-команда `python3 -m ball_reel.synth --calibrate kit/driving --other
-kit/face.jpg` даёт на всём ките (71 кадр, 2485 пар своих) p95 своих 0.242 при
+команда `python3 -m ball_reel.synth --calibrate demo/kit/driving --other
+demo/kit/face.jpg` даёт на всём ките (71 кадр, 2485 пар своих) p95 своих 0.242 при
 минимуме чужих 0.713 — разрыв +0.370. Рабочий порог 0.30 и посчитанный 0.36
 хранятся оба и оба стоят в разрыве; почему выбран более строгий — в шапке
 `synth`.
@@ -433,7 +434,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
   шагал вперёд. После починки 0.072..1.041 — диапазон донора, умноженный на
   0.701.
 
-  **Почему зеркало.** На `kit/face.jpg` измеримы 3 кости из 8 (портрет
+  **Почему зеркало.** На `demo/kit/face.jpg` измеримы 3 кости из 8 (портрет
   показывает одну сторону). Прежний код молча пропускал остальные пять, и в
   кадр приезжало тело, у которого левая половина от клиента, а правая от
   донора: асимметрия бедра росла с 0.214 у донора до 0.759 доли длины. После
@@ -629,7 +630,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 - `compare_trajectories(driving, generated, *, stride=STEP_STRIDE, direction_min=DIRECTION_MIN, amplitude_min=AMPLITUDE_MIN, min_frames=MIN_TRAJECTORY_FRAMES, min_donor_step=MIN_DONOR_STEP) -> dict` — чистая арифметика, без картинок и модели. `verdict`: `same` / `different` / `not_measurable`; `follows` при третьем исходе `None`, а не `False`.
 - `action_match(generated_frames, driving_frames, **kw) -> dict` — то же по путям к кадрам (нужен MediaPipe).
 - `driving_frames_for(manifest, conditions=None, *, root=None) -> list` — карта «условие → driving-кадр» из манифеста, а не догадка.
-- `controls(driving_dir, *, window=16) -> list` — пять контрольных случаев на НАСТОЯЩИХ кадрах; воспроизводится `python3 -m ball_reel.action --controls kit/driving`.
+- `controls(driving_dir, *, window=16) -> list` — пять контрольных случаев на НАСТОЯЩИХ кадрах; воспроизводится `python3 -m ball_reel.action --controls demo/kit/driving`.
 - Сравниваются ТРАЕКТОРИИ, а не позы, двумя раздельными числами (`amplitude`, `direction`): каждое слепо там, где видит другое. Третий канал (корреляция величин) ИЗМЕРЕН и ВЫБРОШЕН — на 66 парах давал от −0.66 до +0.77 при честном сдвиге +0.41, порога не существует.
 - Чего ось НЕ видит, названо в докстринге: не тот объект и не та одежда (это семантика, `semantic.py`), перенос тела целиком, зеркало, абсолютная скорость.
 
@@ -902,5 +903,5 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 9. **`/account/usage` и `/account/balance` отдают 403** — баланс не прочитать, предполётом может быть только `GET /account/key`.
 10. **`supported_endpoints` в `/v1/models` врут** для видео-моделей; верить `/openapi.json` и `/video/models` (а `video_capabilities` — можно).
 11. **Два имени одной базы SD1.5** — `runwayml/stable-diffusion-v1-5` в `gpu_keyframes` против `stable-diffusion-v1-5/stable-diffusion-v1-5` в `animate`. **НЕПРОВЕРЕНО**, одни ли это веса: нужен доступ к `huggingface.co`, в этой среде его нет.
-12. **Кит `kit/conditions/manifest.json` отрендерен старым `skeleton`** — в нём нет ключей `framing`/`face_share`/`face_px`/`identity_judgeable`. `run_local.framing_from_manifest` честно скажет «манифест не называет кадрировку» и возьмёт намерение флага, то есть прогноз идентичности на этом ките недостоверен. Лечится перерендером условий текущим кодом.
+12. **Кит `demo/kit/conditions/manifest.json` отрендерен старым `skeleton`** — в нём нет ключей `framing`/`face_share`/`face_px`/`identity_judgeable`. `run_local.framing_from_manifest` честно скажет «манифест не называет кадрировку» и возьмёт намерение флага, то есть прогноз идентичности на этом ките недостоверен. Лечится перерендером условий текущим кодом.
 13. **`marks` в боевой прогон не подключён.** Проверено grep'ом: из `marks` вне тестов и стенда импортируется только геометрия (`garment_fit` берёт `BONES`, `limb_uv`, `half_width_for`); ни `mark_transferred`, ни `transfer`, ни `marks_report` не вызываются ни из `produce`, ни из `run_local`. То есть заявленный дифференциатор измерим и переносим, но в гейт пока не входит. Тот же порядок «сначала счётчик» выдержан, долг записан.

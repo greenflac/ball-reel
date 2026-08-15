@@ -107,7 +107,7 @@ python3 -m ball_reel.codeaudit --quick
 ## 2. Предполёт (бесплатно, ~10 с)
 
 ```bash
-python3 -m ball_reel.preflight_gpu --conditions kit/conditions --face kit/face.jpg
+python3 -m ball_reel.preflight_gpu --conditions demo/kit/conditions --face demo/kit/face.jpg
 ```
 
 **Из корня репозитория, а не из `kit/`.** Здесь стояло `cd kit` — и вся команда
@@ -164,7 +164,7 @@ PASS        DWPose               1 мс  веса на месте — услов
 
 ```bash
 python3 -m ball_reel.run_local --engine chain \
-  --face kit/face.jpg --conditions kit/conditions \
+  --face demo/kit/face.jpg --conditions demo/kit/conditions \
   --prompt "a woman exercising on a fitness ball in a bright studio, black sports top and grey leggings, natural light, photographic" \
   --smoke
 ```
@@ -199,7 +199,7 @@ python3 -m ball_reel.run_local --engine chain \
 
 ```bash
 python3 -m ball_reel.run_local --engine chain \
-  --face kit/face.jpg --conditions kit/conditions \
+  --face demo/kit/face.jpg --conditions demo/kit/conditions \
   --prompt "..." --video-model wan-fast --seconds 2 --every 12
 ```
 

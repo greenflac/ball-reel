@@ -7,7 +7,7 @@
 Числа воспроизводятся одной командой на любой машине:
 
 ```bash
-python3 -m ball_reel.timing --frames kit/driving --repeats 30
+python3 -m ball_reel.timing --frames demo/kit/driving --repeats 30
 ```
 
 ---
