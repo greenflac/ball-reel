@@ -59,3 +59,5 @@ conditions_clean/
 # который уйдёт на аудит, они не идут. Числа по ним идут: см. evidence/.
 startprobe/
 bench_base/
+ds_medoid/
+ds_clean/
