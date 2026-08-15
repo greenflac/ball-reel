@@ -1,0 +1,261 @@
+{
+  "engine": "animatediff",
+  "timing": {
+    "face_embeds": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 1261.385,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "build": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 44024.499,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "animate": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 3137652.436,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "mp4": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 1393.029,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "arcface": {
+      "per": "frame",
+      "calls": 15,
+      "cold_ms": 2454.328,
+      "p50_ms": 2299.495,
+      "p95_ms": 2559.519,
+      "total_ms": 34000.214
+    },
+    "landmarks": {
+      "per": "frame",
+      "calls": 15,
+      "cold_ms": 237.72,
+      "p50_ms": 202.289,
+      "p95_ms": 261.819,
+      "total_ms": 3090.418
+    },
+    "pose_delta": {
+      "per": "frame",
+      "calls": 15,
+      "cold_ms": 0.583,
+      "p50_ms": 0.43,
+      "p95_ms": 0.588,
+      "total_ms": 6.64
+    },
+    "garment": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 629.251,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "garment_fit": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 299.594,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "expression": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 0.726,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "arcface_clip": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 18514.267,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "motion": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 931.816,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "limbs": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 675.445,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    },
+    "action": {
+      "per": "run",
+      "calls": 0,
+      "cold_ms": 1188.96,
+      "p50_ms": null,
+      "p95_ms": null,
+      "total_ms": 0.0
+    }
+  },
+  "latency": {
+    "budget_ms": 10.0,
+    "online": [],
+    "optimise": [],
+    "precompute": [],
+    "borderline": [],
+    "thin": [
+      "arcface",
+      "landmarks",
+      "pose_delta"
+    ],
+    "unmeasured": [],
+    "note": "бюджет 10 мс по p95. СУДИТЬ РАНО (нужно 20+ замеров, иначе p95 держится на одном случайном выбросе): arcface 2559.52 по 15, landmarks 261.819 по 15, pose_delta 0.588 по 15."
+  },
+  "seed": 0,
+  "vram_gb": 6.0,
+  "plan": "512x768, 16 кадров, float16, выгрузка: model\nлицо в кадре ~146 px -> идентичность проверяема\n  - 6 ГБ — впритык: три довеска на одной UNet. Если упадёт по памяти, первым снимать ControlNet, а не разрешение: без него теряется движение, но кадр остаётся судимым\n  - веса в fp16 занимают ~3.85 ГБ, на активации остаётся ~2.15 ГБ (РАСЧЁТ по размерам файлов, не замер)",
+  "framing": {
+    "label": "кадрировка",
+    "ok": true,
+    "value": null,
+    "note": "waist_up, подтверждено манифестом условий"
+  },
+  "identity_forecast": {
+    "label": "идентичность заранее",
+    "ok": true,
+    "value": 140.4,
+    "note": "лицо ~140.4 px при 768 px высоты (доля 0.1828 измерена по условиям) — бар видео 100, старт-кадра 70: гейту будет что судить"
+  },
+  "conditions": [
+    "demo\\kit_waist\\conditions\\0000.png",
+    "demo\\kit_waist\\conditions\\0001.png",
+    "demo\\kit_waist\\conditions\\0002.png",
+    "demo\\kit_waist\\conditions\\0003.png",
+    "demo\\kit_waist\\conditions\\0004.png",
+    "demo\\kit_waist\\conditions\\0005.png",
+    "demo\\kit_waist\\conditions\\0006.png",
+    "demo\\kit_waist\\conditions\\0007.png",
+    "demo\\kit_waist\\conditions\\0008.png",
+    "demo\\kit_waist\\conditions\\0009.png",
+    "demo\\kit_waist\\conditions\\0010.png",
+    "demo\\kit_waist\\conditions\\0011.png",
+    "demo\\kit_waist\\conditions\\0012.png",
+    "demo\\kit_waist\\conditions\\0013.png",
+    "demo\\kit_waist\\conditions\\0014.png",
+    "demo\\kit_waist\\conditions\\0015.png"
+  ],
+  "fps": 12.0,
+  "runs": [
+    {
+      "label": "без motion LoRA",
+      "loras": [
+        "subject"
+      ],
+      "rows": [
+        {
+          "label": "лицо по кадрам",
+          "ok": false,
+          "value": 0.4868,
+          "note": "0/16 кадров в баре; медиана 0.487 по 16 измеренным"
+        },
+        {
+          "label": "поза по кадрам",
+          "ok": false,
+          "value": 0.09570000000000001,
+          "note": "15/16 кадров в баре; медиана 0.096 по 16 измеренным"
+        },
+        {
+          "label": "одежда",
+          "ok": true,
+          "value": 0.0065,
+          "note": "разброс цвета одежды: torso 0.006 (бар 0.03); держится; не судилось 0 кадр(ов)."
+        },
+        {
+          "label": "прилегание",
+          "ok": null,
+          "value": null,
+          "note": "прилегание НЕ ПРОВЕРЕНО: измеренных пар 0 из нужных 5. Отказы: not_observed 105, no_texture 0, weak_match 0. Это отсутствие измерения, а не вердикт"
+        },
+        {
+          "label": "мимика",
+          "ok": null,
+          "value": null,
+          "note": "измеримо только 0 кадр(ов) из 16 — нужно 6. Это НЕ «мимика не совпала», это отсутствие измерения: лицо не найдено, слишком мелкое или сетка не села."
+        },
+        {
+          "label": "идентичность",
+          "ok": false,
+          "value": 0.4868,
+          "note": "identity via ArcFace cosine distance: median 0.4868, p90 0.5439, worst 0.5536 on 16/16 judgeable frame(s) (coverage 100%; 0 face(s) under 100px, 0 with no face). 16 judgeable frame(s) past 0.35."
+        },
+        {
+          "label": "луп",
+          "ok": false,
+          "value": 2.879,
+          "note": "loop seam 2.88x a typical frame step (visible cut on repeat; bar 0.3)."
+        },
+        {
+          "label": "движение",
+          "ok": true,
+          "value": 2.011,
+          "note": "largest frame step 2.0x the median; motion is continuous."
+        },
+        {
+          "label": "анатомия",
+          "ok": true,
+          "value": 0.0582,
+          "note": "limb length varies most on r_elbow->r_wrist (6% of its own length) over 16 frame(s); anatomically stable."
+        },
+        {
+          "label": "действие",
+          "ok": false,
+          "value": -0.1629,
+          "note": "движение НЕ ТО: клип воспроизвёл 0.24 движения донора при пороге 0.35 — движется в такт, но вяло."
+        },
+        {
+          "label": "обрезка лупа",
+          "ok": false,
+          "value": 1.908,
+          "note": "стык 1.908 при баре 0.3 после реза на кадре 9 из 15; остаётся 62% клипа; release2\\lora_off\\clip_loop.mp4 (0.833 с)"
+        }
+      ],
+      "clip": "C:\\Users\\User\\llm_radar\\ball_reel\\release2\\lora_off\\clip.mp4",
+      "fps": 12.0,
+      "seed": 0,
+      "refine": {
+        "label": "доводка лица",
+        "ok": null,
+        "value": null,
+        "note": "выключена (--refine чтобы включить): лицо остаётся мелким, и гейт по личности ответит «не смогли». На полном росте это ожидаемо"
+      },
+      "upscale": {
+        "label": "апскейл",
+        "ok": null,
+        "value": null,
+        "note": "выключен (--upscale чтобы включить)"
+      },
+      "measured": {
+        "face": 16,
+        "pose": 16,
+        "of": 16
+      }
+    }
+  ]
+}
