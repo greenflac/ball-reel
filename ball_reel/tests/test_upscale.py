@@ -774,7 +774,8 @@ class WhatOnlyTheWeightsCanAnswer(unittest.TestCase):
         # у шума нет структуры, которую апскейлеру есть смысл восстанавливать.
         from pathlib import Path
 
-        frame = Path(__file__).resolve().parents[2] / "kit/driving/0000.jpg"
+        # `demo/kit`: каталог `kit` в `.gitignore`, и тест пропускался в клоне.
+        frame = Path(__file__).resolve().parents[2] / "demo/kit/driving/0000.jpg"
         if not frame.exists():
             self.skipTest(f"нет кадра {frame}")
         from PIL import Image

@@ -266,7 +266,9 @@ class CouldNotMeasureIsItsOwnAnswer(unittest.TestCase):
         self.assertEqual(got["pairs"], 0)
 
 
-KIT = Path(__file__).resolve().parents[2] / "kit" / "driving"
+# `demo/kit`, а не `kit`: последний в `.gitignore`, и класс ниже молчал в любом
+# клоне. Кадры те же, их 16 вместо 71.
+KIT = Path(__file__).resolve().parents[2] / "demo" / "kit" / "driving"
 MODEL = Path(os.environ.get("BALL_REEL_FACE_MODEL",
                             "~/.mediapipe/face_landmarker.task")).expanduser()
 _CACHE: dict = {}

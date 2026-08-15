@@ -101,19 +101,58 @@ class Choosing(unittest.TestCase):
 
 
 class MeasuredOnTheRealDriving(unittest.TestCase):
-    """Числа из шапки — воспроизводимые, а не запомненные."""
+    """Числа из шапки — воспроизводимые, а не запомненные.
+
+    ДАННЫЕ ИЗ ИНДЕКСА, А НЕ С ДИСКА АВТОРА. Раньше здесь стоял `ref_frames` —
+    каталог, которого в git НЕТ ни одного файла. У автора он лежал локально,
+    тест был зелёным, а у склонировавшего молча пропускался: в клоне пропусков
+    оказалось 22 против 7 в рабочем дереве, то есть пятнадцать сторожей спали.
+    Пропущенный тест не сторожит ничего, и заметить это можно только по числу.
+
+    Первая попытка починки — перевести тест на `demo/kit/driving` — БЫЛА
+    НЕВЕРНОЙ, и это видно числом: там лежат 16 кадров, которые сами есть
+    РЕЗУЛЬТАТ выбора окна. Выбирать окно внутри уже выбранного окна незачем, и
+    тест краснел честно (2.817 против требуемых < 1.857). Мерить надо на том,
+    на чём мера имеет смысл, — на длинном исходнике.
+
+    Поэтому в индекс положен стенд `demo/bench/driving` — те же 96 кадров,
+    уменьшенные до 240 px по ширине (1.46 МБ против 67 МБ полного размера).
+    Пиксельная мера — отношение, и уменьшение его почти не трогает:
+
+        полный размер 720x1278   окно 66  стык 1.245  худшее 6.568  выигрыш 5.28x
+        стенд         240x426    окно 66  стык 1.227  худшее 6.394  выигрыш 5.21x
+
+    Выбрано ТО ЖЕ окно, числа разошлись на 1.5%. Пересчитать:
+
+        python3 -c "import glob;from ball_reel import motion;\
+g=motion.best_loop_window(sorted(glob.glob('demo/bench/driving/*.jpg')),size=16);\
+print(g['start'],g['ratio'],g['worst_ratio'])"
+    """
 
     POOL = sorted(glob.glob(str(Path(__file__).resolve().parents[2]
-                                / "ref_frames" / "*.png")))
+                                / "demo" / "bench" / "driving" / "*.jpg")))
 
     def test_choosing_the_window_beats_the_default_by_a_lot(self):
-        if len(self.POOL) < 32:
-            self.skipTest("нет исходника драйвинга в дереве")
+        if len(self.POOL) < 96:
+            self.skipTest("стенда demo/bench/driving нет в дереве")
         got = motion.best_loop_window(self.POOL, size=16)
         self.assertIsNotNone(got["ratio"])
         self.assertLess(got["ratio"], got["worst_ratio"] / 2,
                         "выбор окна перестал что-либо давать — проверить "
                         "числа в шапке, а не смягчать тест")
+
+    def test_the_bench_picks_the_window_the_header_names(self):
+        """Не «лучше худшего», а РОВНО то окно, о котором написано.
+
+        Без этого предыдущий тест зеленел бы на любом окне, лишь бы выигрыш был
+        двукратным, и шапка могла разойтись с кодом незаметно.
+        """
+        if len(self.POOL) < 96:
+            self.skipTest("стенда demo/bench/driving нет в дереве")
+        got = motion.best_loop_window(self.POOL, size=16)
+        self.assertEqual(got["start"], 66, got["note"])
+        self.assertAlmostEqual(got["ratio"], 1.227, places=2)
+        self.assertAlmostEqual(got["worst_ratio"], 6.394, places=2)
 
 
 class ItIsWiredIntoTheRun(unittest.TestCase):

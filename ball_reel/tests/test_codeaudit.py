@@ -80,6 +80,145 @@ class TheCopyUnderMutationIsNotWeakerThanTheTree(unittest.TestCase):
         self.assertIn("ОСТАНОВЛЕНО", src)
 
 
+class TheCloneIsNotWeakerThanTheAuthorsDisk(unittest.TestCase):
+    """Второй дефект той же формы, и копия для мутаций его не ловит.
+
+    Три живых теста ходили в каталог `ref_frames`, которого в индексе git нет
+    ни одним файлом. У автора он лежал на диске, тесты были зелёными; в клоне
+    пропускались. ИЗМЕРЕНО: 22 пропуска против 7 — пятнадцать сторожей спали у
+    всех, кроме одного человека, а прогон при этом печатал `OK`.
+
+    Проверка копии для мутаций этого не видит ПО УСТРОЙСТВУ: `_stage_copy`
+    линкует данные из рабочего дерева, то есть воспроизводит диск автора.
+    Вопроса два — «доехали ли данные до копии» и «есть ли они в индексе», — и
+    отвечать на них надо порознь.
+
+    Полный `clone_is_as_strong_as_the_tree` здесь не зовётся по той же причине,
+    что и его сосед: он гоняет весь набор, а мы внутри набора.
+    """
+
+    def setUp(self):
+        from ball_reel import codeaudit
+
+        self.c = codeaudit
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def _staged(self) -> bool:
+        self.c._stage_clone(self.dir)
+        return (self.dir / "ball_reel" / "codeaudit.py").exists()
+
+    def test_the_staged_tree_holds_what_the_index_holds(self):
+        if not self._staged():
+            self.skipTest("не рабочее дерево git")
+        self.assertTrue((self.dir / "demo" / "bench" / "pose_96.json").exists(),
+                        "стенд лупа не доехал — значит его нет в индексе")
+
+    def test_the_staged_tree_does_NOT_hold_what_only_the_disk_holds(self):
+        """Суть проверки. Если сюда попадает неотслеживаемое — она бесполезна.
+
+        Неотслеживаемый файл СОЗДАЁТСЯ здесь же, а не берётся из дерева. Первая
+        редакция смотрела на `ref_frames` — тот самый каталог, из-за которого
+        всё завелось, — и пропускалась там, где его нет. То есть в клоне. То
+        есть добавляла восьмой пропуск к семи и ломала ту самую сверку, ради
+        которой написана: `clone_is_as_strong_as_the_tree` вернула
+        `в клоне пропущено 8 против 7`. Сторож, роняющий собственную меру,
+        хуже отсутствующего.
+        """
+        import os
+
+        if not self._staged():
+            self.skipTest("не рабочее дерево git")
+        root = Path(__file__).resolve().parents[2]
+        probe = root / "codeaudit_clone_probe.tmp"
+        probe.write_text("не в индексе\n", encoding="utf-8")
+        self.addCleanup(lambda: probe.unlink(missing_ok=True))
+        again = Path(self.tmp.name) / "second"
+        again.mkdir()
+        cwd = os.getcwd()
+        try:
+            os.chdir(root)
+            self.c._stage_clone(again)
+        finally:
+            os.chdir(cwd)
+        self.assertTrue((again / "ball_reel" / "codeaudit.py").exists())
+        self.assertFalse((again / probe.name).exists(),
+                         "в клон попало то, чего нет в индексе — проверка "
+                         "сравнивает диск автора с диском автора")
+
+    def test_the_clone_gets_an_index_of_its_own(self):
+        """Без индекса проверка врёт В СВОЮ ПОЛЬЗУ.
+
+        Тесты, читающие состав репозитория, вне рабочего дерева git
+        пропускаются — ровно два лишних пропуска, измерено. Голый каталог с
+        файлами показал бы 9 против 7 там, где настоящий клон даёт 7, и аудит
+        останавливался бы на дефекте, которого нет.
+        """
+        if not self._staged():
+            self.skipTest("не рабочее дерево git")
+        self.assertTrue((self.dir / ".git").exists(),
+                        "у клона нет индекса — проверка насчитает лишние "
+                        "пропуски и остановит аудит без причины")
+
+    def test_the_self_check_stops_the_audit_instead_of_warning(self):
+        import inspect
+
+        src = inspect.getsource(self.c.main)
+        self.assertIn("clone_is_as_strong_as_the_tree", src)
+        i = src.index("clone_is_as_strong_as_the_tree")
+        self.assertIn("ОСТАНОВЛЕНО", src[i:],
+                      "слабый клон только печатается, но аудит не роняет")
+
+    def test_it_says_what_to_do_and_forbids_the_easy_way_out(self):
+        """Самый вероятный «ремонт» — смягчить тест, и он же самый вредный.
+
+        Читается исходник, а не результат вызова: вызов гоняет весь набор
+        дважды, и звать его изнутри набора значит устроить рекурсию.
+        """
+        import inspect
+
+        src = inspect.getsource(self.c.clone_is_as_strong_as_the_tree)
+        fail = src[src.index("return False"):]
+        self.assertIn("git add", fail, "отказ не говорит, чем лечить")
+        self.assertIn("Смягчать", fail,
+                      "отказ не запрещает самый вероятный ложный ремонт")
+
+
+class TheExemptionListIsNotAPlaceToHideThings(unittest.TestCase):
+    """`TREE_ONLY_SKIPS` вычитается из числа пропусков — значит он ослабляет.
+
+    Ослабление тут законное: три-четыре проверки читают состав репозитория, и в
+    копии без индекса им нечего делать ни при какой мутации. Но список
+    вычитается ПО ДЛИНЕ, а имена никто не сверял, и устаревшее имя молча
+    ослабляло бы самопроверку ровно на единицу — навсегда и незаметно.
+    """
+
+    def setUp(self):
+        from ball_reel import codeaudit
+
+        self.c = codeaudit
+        self.src = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in Path(__file__).resolve().parent.glob("test_*.py"))
+
+    def test_every_exempted_name_is_a_test_that_exists(self):
+        missing = [n for n in self.c.TREE_ONLY_SKIPS
+                   if f"def test_{n}" not in self.src]
+        self.assertEqual(
+            missing, [],
+            "имя в списке исключений ни на что не указывает — вычитание "
+            f"осталось, а сторожа нет: {missing}")
+
+    def test_every_exemption_explains_itself(self):
+        for name, why in self.c.TREE_ONLY_SKIPS.items():
+            with self.subTest(name=name):
+                self.assertGreater(
+                    len(why), 40,
+                    "попасть в список — это заявление «мутация этот тест не "
+                    "затрагивает», и оно должно стоить осознанной строки")
+
+
 class TheMutationTableIsWellFormed(unittest.TestCase):
     def setUp(self):
         from ball_reel import codeaudit

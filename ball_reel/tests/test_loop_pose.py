@@ -124,28 +124,128 @@ class TheCriterionIsLocal(unittest.TestCase):
         self.assertIn("Порога здесь НЕТ намеренно", got["note"])
 
 
-class MeasuredOnTheRealDriving(unittest.TestCase):
-    """Числа из шапки пересчитываются, а не запоминаются."""
+def _bench_poses() -> list:
+    """96 скелетов драйвинга, снятых с ПОЛНОГО размера и положенных в индекс.
 
-    POOL = sorted(glob.glob(str(ROOT / "ref_frames" / "*.png")))
+    ПОЧЕМУ ФИКСТУРА, А НЕ ЭКСТРАКЦИЯ НА ЛЕТУ. Раньше тест ходил в `ref_frames`
+    — каталог, которого в git нет ни одним файлом. У автора он лежал локально,
+    и тест был зелёным; в клоне он молча пропускался (22 пропуска против 7 в
+    рабочем дереве). Полные кадры весят 67 МБ и в репозиторий не поедут, а
+    уменьшенные дают ДРУГОЙ ВЫБОР ОКНА — см. `ResolutionChangesTheChoice`.
+    Поэтому в индекс кладётся то, что тест на самом деле судит: выход
+    экстрактора, 0.08 МБ JSON. Сам экстрактор сторожится отдельно, ниже.
+
+    Побочно это снимает зависимость от весов MediaPipe: выбор окна теперь
+    проверяется в любом клоне, а не только там, где веса скачались.
+    """
+    import json
+
+    p = ROOT / "demo" / "bench" / "pose_96.json"
+    if not p.exists():
+        return []
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return [{k: tuple(v) for k, v in f.items()} for f in data["frames"]]
+
+
+class MeasuredOnTheRealDriving(unittest.TestCase):
+    """Числа из шапки пересчитываются, а не запоминаются.
+
+    Пересчитать:
+
+        python3 -c "import json;from ball_reel import motion;\
+d=json.load(open('demo/bench/pose_96.json',encoding='utf-8'));\
+g=motion.best_loop_window_pose([{k:tuple(v) for k,v in f.items()} \
+for f in d['frames']],size=16);print(g['note'])"
+    """
+
+    POSES = _bench_poses()
 
     def test_the_chosen_window_hides_the_seam_behind_most_steps(self):
-        if len(self.POOL) < 32:
-            self.skipTest("нет исходника драйвинга в дереве")
-        from ball_reel.pose import landmarks
-
-        got = motion.best_loop_window_pose([landmarks(p) for p in self.POOL],
-                                           size=16)
+        if len(self.POSES) < 96:
+            self.skipTest("стенда demo/bench/pose_96.json нет в дереве")
+        got = motion.best_loop_window_pose(self.POSES, size=16)
         self.assertIsNotNone(got["seam"])
         self.assertGreater(got["hidden"], 0.5,
                            f"стык перестал прятаться за движением: {got['note']}")
 
+    def test_the_bench_reproduces_the_numbers_in_the_header(self):
+        """Шапка называет окно 52..67 со стыком 0.0695 при медиане 0.1048.
+
+        Проверяется именно это, а не «что-нибудь лучше нуля»: иначе шапка может
+        разойтись с кодом, и разошедшийся документ вреднее отсутствующего.
+        """
+        if len(self.POSES) < 96:
+            self.skipTest("стенда demo/bench/pose_96.json нет в дереве")
+        got = motion.best_loop_window_pose(self.POSES, size=16)
+        self.assertEqual(got["start"], 52, got["note"])
+        self.assertAlmostEqual(got["seam"], 0.0695, places=3)
+        self.assertAlmostEqual(got["local_median"], 0.1048, places=3)
+
+    def test_the_slow_segment_the_header_warns_about_does_not_win(self):
+        """Окно 35..50 выигрывает по глобальной мере и проигрывать обязано.
+
+        Это тот самый медленный участок из шапки: стык там мельче абсолютно
+        (0.0357 против 0.0695), но и всё вокруг мельче, так что виден он будет
+        сильнее. Локальный критерий и заведён ради этого различия — тест
+        краснеет, если критерий тихо станет глобальным.
+        """
+        if len(self.POSES) < 96:
+            self.skipTest("стенда demo/bench/pose_96.json нет в дереве")
+        got = motion.best_loop_window_pose(self.POSES, size=16)
+        self.assertNotEqual(got["start"], 35, got["note"])
+
+
+class ResolutionChangesTheChoice(unittest.TestCase):
+    """НАХОДКА: выбор окна по позе зависит от размера кадра. Записана числом.
+
+    Скелеты сняты одним и тем же экстрактором с одного и того же видео, разница
+    только в ширине кадра:
+
+        720 px  ->  окно 52   (то, что в шапке)
+        360 px  ->  окно 64
+        240 px  ->  окно 35   МЕДЛЕННЫЙ УЧАСТОК, против которого писан критерий
+        180 px  ->  окно 66
+
+    Согласия нет ни у одной пары. Причина не в критерии, а в дрожании
+    MediaPipe: на мелком кадре шум сустава сравним с шагом движения, и
+    локальная медиана — знаменатель критерия — плывёт вместе с ним. Следствие
+    для продукта: позы для выбора окна снимаются с ИСХОДНОГО размера, а не с
+    рабочего, иначе выбор достаётся участку, где просто мало движения.
+
+    Тест сторожит ровно это: если кто-нибудь заменит фикстуру экстракцией с
+    уменьшенных кадров стенда ради скорости, он тут же увидит цену.
+    """
+
+    POOL = sorted(glob.glob(str(ROOT / "demo" / "bench" / "driving" / "*.jpg")))
+
+    def test_poses_from_the_shrunken_bench_pick_the_slow_segment(self):
+        if len(self.POOL) < 96:
+            self.skipTest("стенда demo/bench/driving нет в дереве")
+        try:
+            from ball_reel.pose import landmarks
+        except Exception as exc:                     # весов MediaPipe нет
+            self.skipTest(f"экстрактор недоступен: {exc}")
+
+        pts = [landmarks(p) for p in self.POOL]
+        if not all(pts):
+            self.skipTest("веса MediaPipe недоступны — скелеты не сняты")
+        got = motion.best_loop_window_pose(pts, size=16)
+        self.assertEqual(
+            got["start"], 35,
+            "уменьшённый стенд перестал выбирать медленный участок — находка "
+            f"про чувствительность к размеру устарела, перезамерить: {got['note']}")
+
     def test_the_skeleton_is_found_on_every_frame_unlike_pixels(self):
-        if len(self.POOL) < 32:
-            self.skipTest("нет исходника драйвинга в дереве")
-        from ball_reel.pose import landmarks
+        if len(self.POOL) < 96:
+            self.skipTest("стенда demo/bench/driving нет в дереве")
+        try:
+            from ball_reel.pose import landmarks
+        except Exception as exc:
+            self.skipTest(f"экстрактор недоступен: {exc}")
 
         pts = [landmarks(p) for p in self.POOL[:24]]
+        if not any(pts):
+            self.skipTest("веса MediaPipe недоступны")
         self.assertEqual(sum(1 for p in pts if p), len(pts),
                          "скелет найден не везде — тогда выбор окна опирается "
                          "на дырявые данные, и это надо сказать в отчёте")

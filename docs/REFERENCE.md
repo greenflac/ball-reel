@@ -70,15 +70,24 @@ tests`. Ни одна цифра в markdown не переживает рабо�
 | `gpu_keyframes.py` | Кейфреймы на 4 ГБ VRAM: SD1.5 + ControlNet OpenPose + IP-Adapter FaceID. `plan()` инспектируется на CPU, `render_keyframes()` — только на карте. | torch, diffusers, Pillow | GPU + веса (~7 ГБ) |
 | `live_gen.py` | Альтернатива шлюзу на своём железе: SDXL + IP-Adapter FaceID для старт-кадра, произвольный video-API, TTS+липсинк. Всё за env-переменными. | torch, diffusers, insightface, requests | GPU + сеть + веса |
 | `tools/make_fixtures.py` | Рисует синтетические офлайн-фикстуры Pillow'ом (3 стратегии = 3 режима отказа) и хэнд-написанные вердикты судьи. | Pillow | нет |
-| `tests/` (**27 файлов**, см. ниже) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. **801 тест за ~88 c** (последний замер 2026-08-14; 1 пропущен). | unittest | нет |
+| `tests/` (**47 файлов**, `git ls-files ball_reel/tests \| wc -l`) | Арифметика и вердикты без моделей и сети: синтетические скелеты, эмбеддинги, кадры; модельные швы заглушены. Размер набора и число пропусков — `docs/NUMBERS.md`. Здесь стояло «27 файлов, 801 тест» — устарело по обоим. | unittest | нет |
 
-Файлы тестов: `test_animate`, `test_arcface_math`, `test_bench`,
-`test_bodyparts`, `test_calibrate_marks`, `test_chain`, `test_condition_render`,
-`test_dataset`, `test_device`, `test_driving`, `test_dwpose`, `test_expression`,
-`test_fluid`, `test_garment_fit`, `test_gpu_plan`, `test_identity_gate`,
-`test_intake`, `test_marks`, `test_motion_subject`, `test_plumbing`, `test_pose`,
-`test_preflight`, `test_router`, `test_skeleton`, `test_timing`, `test_verdict`.
-Ранее здесь стояло «14 файлов, 214 тестов, 1.0 c» — устарело по всем трём числам.
+Файлы тестов (`git ls-files ball_reel/tests`): `test_action`, `test_animate`,
+`test_arcface_math`, `test_bench`, `test_bodyparts`, `test_calibrate_marks`,
+`test_chain`, `test_codeaudit`, `test_condition_render`, `test_cure`,
+`test_dataset`, `test_defaults`, `test_demo_kit`, `test_device`,
+`test_docs_numbers`, `test_driving`, `test_dwpose`, `test_encoding`,
+`test_expression`, `test_face_size_cost`, `test_fluid`, `test_garment_fit`,
+`test_gpu_plan`, `test_identity_gate`, `test_intake`, `test_judge_audit`,
+`test_loop_pose`, `test_loop_trim`, `test_loop_window`, `test_lora`,
+`test_marks`, `test_motion_subject`, `test_native_resolution`, `test_plumbing`,
+`test_pose`, `test_preflight`, `test_reachable`, `test_refine`, `test_router`,
+`test_semantic`, `test_skeleton`, `test_style`, `test_synth`, `test_timing`,
+`test_train`, `test_upscale`, `test_verdict`.
+
+Ранее здесь стояло ~~«14 файлов, 214 тестов, 1.0 c»~~, потом ~~«27 файлов»~~ —
+оба устарели. Список перечислен целиком намеренно: усечённый список выглядит
+как полный и молчит о том, чего в нём нет.
 
 ### 1b. Модули, добавленные после первой редакции памятки
 
@@ -258,7 +267,7 @@ DWPose) → `доли секунды` (драйвер, условия, driving-�
 | `--quick` | флаг | выкл | только тесты и покрытие, без мутаций |
 
 Что делает: прогоняет `unittest discover`; если красно — останавливается (аудит на красных тестах бессмысленен);
-считает покрытие по `CORE_MODULES` с порогом 50%; затем по очереди портит **56 порогов** в КОПИИ пакета
+считает покрытие по `CORE_MODULES` с порогом 50%; проверяет две парности — копии для мутаций и клона из индекса; затем по очереди портит **119 порогов** в КОПИИ пакета
 (`motion`, `pose`, `identity_arcface`, `intake`, `chain`, `dwpose`, `garment`, `gpu_keyframes`,
 `preflight_gpu`, `marks`, `dataset`, `bodyparts`, `fluid`, `bench`, `router`, `timing`)
 и требует, чтобы тесты покраснели.
@@ -269,7 +278,7 @@ DWPose) → `доли секунды` (драйвер, условия, driving-�
 
 ```
 ========================================================================
-PASS  тесты          Ran 631 tests in 63.854s
+PASS  тесты          Ran <N> tests        # текущее N — docs/NUMBERS.md
 PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose 76%, subject 78%, motion 83%
 ========================================================================
 мутации пропущены (--quick)
@@ -279,7 +288,7 @@ PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose
 
 ```
 ========================================================================
-мутационное покрытие: 100% (77/77)
+мутационное покрытие: 100% (119/119)
 
 АУДИТ ПРОЙДЕН
 ```
@@ -840,7 +849,7 @@ pip install mediapipe              # поза, мимика, скелеты (в 
 - **Ограничение kontext**: `width/height/size` игнорируются, всегда 1024x1024 — вертикальный старт-кадр от kontext получить нельзя, 9:16 делает видео-модель через `aspectRatio`. При этом `produce` продолжает передавать `width/height` (безвредно, но бессмысленно).
 - **`chain.render_keyframes` исполнялся живьём и НЕ сошёлся**: `chain_out/keyframes.json` — два узла отвалились по 400 от провайдера картинок, два отклонены гейтом позы (0.5914 и 0.6516 при пороге 0.25), идентичность 0.5547 / 0.3886. `generate_chain` на этих данных отработать не мог (нужно ≥2 принятых узла).
 - **`produce` на своём фото** (`wiretest/produce_report.json`): `passed=False`, одна попытка, «identity not verifiable: 0% кадров с лицом ≥100 px», при этом луп получился (ratio 0.15, seamless) и движение 0.0669. То есть отказ честный, а не молчаливый.
-- **Офлайн-тесты**: `python3 -m unittest discover -s ball_reel/tests -p 'test_*.py'` → **`Ran 1283 tests`, OK (skipped=7)**, ~115 c (последний прогон 2026-08-14; за смену число выросло с 631). ~~148 тестов~~ — из первой редакции памятки.
+- **Офлайн-тесты**: `python3 -m unittest discover -s ball_reel/tests -p 'test_*.py'` → зелено, пропусков 7 и все семь объяснены в `docs/NUMBERS.md`, где и живёт текущий размер набора. ~~148 тестов~~, ~~631~~, ~~1283~~ — числа из прежних редакций памятки, каждое было верным меньше суток.
 - **Мутационный аудит** (`codeaudit`, полный прогон 2026-08-14): **119/119, покрытие 100%, выживших нет, «АУДИТ ПРОЙДЕН»**. Он уже дал результат по существу: было обнаружено, что снятый `MIN_COVERAGE` не ронял ни одного теста, из-за чего вердикт `produce` вынесли в отдельную чистую функцию `verdict()`. Отмечено там же: подмена константы через `setattr` не работает для порогов, использованных как значения по умолчанию у аргументов (проверено на `LIMB_WOBBLE_MAX`), поэтому мутация правит ИСХОДНИК копии пакета.
 
   Второй урок оттуда же, про ВЫБОР мутации, а не про тесты: для

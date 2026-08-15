@@ -16,6 +16,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+
+#: Кадры кита адресуются ОТ КОРНЯ ДЕРЕВА, а не от текущего каталога. Раньше
+#: здесь стоял `glob("kit/driving/*.jpg")`: он зависел от того, откуда запущен
+#: прогон, и вдобавок смотрел в `kit`, которого нет в git. Тест поэтому молчал
+#: дважды — и в клоне, и при запуске из любого каталога, кроме одного.
+KIT = Path(__file__).resolve().parents[2] / "demo" / "kit"
 
 
 def _flat(value: float, n: int = 16) -> list:
@@ -416,11 +423,9 @@ class WithTheRealWeights(unittest.TestCase):
         self.assertLess(got["margin"], -0.05, got)
 
     def test_real_footage_of_the_ordered_clothing_passes(self):
-        import glob
-
-        frames = sorted(glob.glob("kit/driving/*.jpg"))[:16]
+        frames = [str(p) for p in sorted((KIT / "driving").glob("*.jpg"))][:16]
         if not frames:
-            self.skipTest("kit/driving нет в этом рабочем каталоге")
+            self.skipTest("нет demo/kit/driving в дереве")
         got = self.s.semantic_match(frames)
         self.assertEqual(got["verdict"], "matches", got)
 
@@ -482,17 +487,15 @@ class WhoseClothesAreTheseAnyway(unittest.TestCase):
                          "живой прогон под BALL_REEL_SEMANTIC_LIVE=1")
     def test_it_names_the_right_source_on_frames_with_a_known_answer(self):
         """ИЗМЕРЕНО: driving-кадры -> driving, фото -> фото. Отрывы 0.09 и 0.17."""
-        import glob
-
         ordered = ("in a bright red tank top and black shorts",)
         identity = ("in a frilly pink tulle dress", "in a tutu",
                     "in a party dress")
         driving = ("in a navy sports bra and leggings",
                    "in dark athletic sportswear")
-        got = self.s.attribution(sorted(glob.glob("kit/driving/*.jpg"))[::6],
-                                 ordered=ordered, identity=identity,
-                                 driving=driving)
+        got = self.s.attribution(
+            [str(p) for p in sorted((KIT / "driving").glob("*.jpg"))][::6],
+            ordered=ordered, identity=identity, driving=driving)
         self.assertEqual(got["source"], self.s.SOURCE_DRIVING, got["note"])
-        got = self.s.attribution(["kit/face.jpg"], ordered=ordered,
+        got = self.s.attribution([str(KIT / "face.jpg")], ordered=ordered,
                                  identity=identity, driving=driving)
         self.assertEqual(got["source"], self.s.SOURCE_IDENTITY, got["note"])

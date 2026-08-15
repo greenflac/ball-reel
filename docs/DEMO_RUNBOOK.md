@@ -362,9 +362,9 @@ PASS        onnxruntime         24 мс  CPUExecutionProvider доступен (
 python3 -m ball_reel.codeaudit --quick
 ```
 
-Ожидается `PASS тесты Ran <N> tests` и `PASS покрытие ядра`. Сейчас N = 527
-(в `TEST_KIT.md` написано 249 — цифра устарела, растёт каждую сессию). Сверять
-слово `PASS`, а не число.
+Ожидается `PASS тесты Ran <N> tests` и `PASS покрытие ядра`. Текущее N — в
+`docs/NUMBERS.md`; здесь стояло 527, в `TEST_KIT.md` в тот же момент 249.
+Сверять слово `PASS`, а не число.
 
 ---
 
@@ -998,7 +998,7 @@ du -sh $D
 | где | что там сказано | что на самом деле |
 |---|---|---|
 | `TEST_KIT.md` §2 | `cd kit`, затем `python3 -m ball_reel.preflight_gpu` | падает с `ModuleNotFoundError: No module named 'ball_reel'`. Либо из корня с `--conditions kit/conditions`, либо из `kit/` с `PYTHONPATH=..` |
-| `TEST_KIT.md` §1 | «ожидается `Ran 249 tests`» | сейчас 527, растёт каждую сессию: сверять `PASS`, а не число |
+| `TEST_KIT.md` §1 | ~~«ожидается `Ran 249 tests`»~~ | закрыто: число вынесено в `docs/NUMBERS.md`, в документах остался `<N>` и указание сверять `PASS` |
 | `TEST_KIT.md` §0 | `pip install torch --index-url .../cu126` | тег `cu126` под torch 2.13 не сверен, см. 1.2 |
 | `TEST_KIT.md` §3–4 | `run_local ... --smoke` = один кейфрейм, потом `--video-model wan-fast` | у `run_local` появился `--engine`; умолчание — `animatediff` (локально, без шлюза), а `--smoke` там останавливается **до** генерации. Путь из TEST_KIT теперь `--engine chain` |
 | `GPU_RUNBOOK.md` §0b | «RTX 3050, 4 ГБ» | здесь 6 ГБ: план другой (512x768 вместо 448x640) и лестница отступления другая |

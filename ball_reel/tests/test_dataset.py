@@ -27,7 +27,11 @@ except ImportError:  # pragma: no cover
 #: пакет, поэтому живые проверки там просто пропускаются, а сторожат пороги
 #: синтетические тесты ниже. Числа, снятые с этих кадров, стоят в docstring'ах
 #: `dataset.py`, и живой класс в конце файла пересчитывает их командой.
-KIT = Path(__file__).resolve().parents[2] / "kit"
+#: `demo/kit`, а НЕ `kit`: второй стоит в `.gitignore` (7 МБ бинарей отдавались
+#: файлом), и живой класс из-за этого пропускался у всех, кроме автора — 22
+#: пропуска в клоне против 7 в рабочем дереве. `demo/kit/driving` — это те же
+#: кадры того же материала, отрезок 50..65 из 71, и `face.jpg` побайтно тот же.
+KIT = Path(__file__).resolve().parents[2] / "demo" / "kit"
 
 
 def _live_ready() -> bool:
@@ -725,8 +729,11 @@ class TheNumbersInTheDocstringsAreREPRODUCIBLE(unittest.TestCase):
 
         python3 -m unittest ball_reel.tests.test_dataset -v
 
-    Сам полный прогон по 71 кадру `kit/driving` сюда не вынесен — он занимает
-    минуты; вынесены концы диапазона и те кадры, на которых стоят решения.
+    Материал — `demo/kit`, отрезок 50..65 того же съёмочного дубля из 71 кадра.
+    Полный дубль лежит вне git (7 МБ), и числа в `dataset.py`, помеченные «по
+    71 кадру», сняты на нём; здесь пересчитывается то, что воспроизводимо на
+    отслеживаемых шестнадцати. Различие названо намеренно: число, которое
+    нельзя пересчитать командой, устаревает молча.
     """
 
     def setUp(self):
@@ -788,15 +795,29 @@ class TheNumbersInTheDocstringsAreREPRODUCIBLE(unittest.TestCase):
         self.assertIsNotNone(got["axes"]["light"])
 
     def test_the_turn_number_is_measured_and_is_not_trustworthy_enough(self):
-        # Основание решения «ракурс не подписывать»: на 71 фронтальном кадре
-        # число ушло до 1.221, что для косинуса невозможно.
-        frontal = self.d.measure_frame(str(KIT / "driving" / "0000.jpg"))
+        """Основание решения «ракурс не подписывать» — косинус выше единицы.
+
+        Замер по НАБОРУ, а не по одному кадру, и это исправление настоящего
+        дефекта: раньше здесь стоял `driving/0000.jpg` полного кита, у которого
+        число случайно оказалось 1.221. На отрезке в индексе тот же нулевой
+        кадр даёт 0.9889 — тест покраснел бы на утверждении, которое верно.
+
+        По 16 кадрам `demo/kit/driving`: min 0.949, max 1.109, выше единицы
+        ДЕСЯТЬ из шестнадцати. Утверждение от этого стало сильнее: невозможное
+        значение здесь не выброс, а больше половины материала.
+        """
+        vals = [self.d.measure_frame(str(p))["turn"]
+                for p in sorted((KIT / "driving").glob("*.jpg"))]
+        self.assertTrue(all(v is not None for v in vals))
         turned = self.d.measure_frame(str(KIT / "face.jpg"))
-        self.assertIsNotNone(frontal["turn"])
-        self.assertGreater(frontal["turn"], turned["turn"])
-        self.assertGreater(frontal["turn"], 1.0,
-                           "косинус больше единицы — это шум оценщика, и он "
-                           "шире, чем расстояние от анфаса до полуоборота")
+        self.assertGreater(min(vals), turned["turn"],
+                           "полуоборот перестал отличаться от анфаса вовсе")
+        impossible = [v for v in vals if v > 1.0]
+        self.assertGreaterEqual(
+            len(impossible), len(vals) // 2,
+            f"косинус больше единицы — это шум оценщика, и он шире, чем "
+            f"расстояние от анфаса до полуоборота; получено {len(impossible)} "
+            f"из {len(vals)}, max {max(vals):.4f}")
 
 
 if __name__ == "__main__":
