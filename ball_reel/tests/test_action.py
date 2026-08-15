@@ -263,7 +263,7 @@ class TheDrivingMapIsResolvedNotGuessed(unittest.TestCase):
             (kit / "conditions" / f"{i:04d}.png").write_bytes(b"x")
             table[f"{i:04d}"] = f"{rel + '/' if rel else ''}driving/{i:04d}.jpg"
         mp = kit / "conditions" / "manifest.json"
-        mp.write_text(json.dumps({"driving_frames": table}))
+        mp.write_text(json.dumps({"driving_frames": table}), encoding="utf-8")
         return mp, root
 
     def test_the_map_resolves_at_every_depth_not_just_the_lucky_one(self):
@@ -293,7 +293,8 @@ class TheDrivingMapIsResolvedNotGuessed(unittest.TestCase):
 
         mp = self.dir / "manifest.json"
         mp.write_text(json.dumps(
-            {"driving_frames": {"0000": "нет-такого/0000.jpg"}}))
+            {"driving_frames": {"0000": "нет-такого/0000.jpg"}}),
+            encoding="utf-8")
         with self.assertRaises(FileNotFoundError) as e:
             self.a.driving_frames_for(mp)
         self.assertIn("не находятся", str(e.exception))

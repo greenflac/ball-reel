@@ -92,9 +92,12 @@ class SegmentsJoinFromARelativePath(unittest.TestCase):
         parts = [self._segment("run_out/chain/seg_0.mp4", "red"),
                  self._segment("run_out/chain/seg_1.mp4", "blue")]
         _concat(parts, "run_out/chain/chain.mp4")
-        listing = Path("run_out/chain/segments.txt").read_text()
+        listing = Path("run_out/chain/segments.txt").read_text(encoding="utf-8")
         for line in listing.strip().splitlines():
-            self.assertTrue(line.startswith("file '/"), line)
+            # Абсолютность проверяется Path, а не первым символом: на
+            # Windows абсолютный путь начинается с буквы диска.
+            self.assertTrue(
+                Path(line.split("'")[1]).is_absolute(), line)
 
 
 class PoseDeltaRefusesAnEmptyPose(unittest.TestCase):
@@ -227,7 +230,7 @@ class ConditionsExplainThemselves(unittest.TestCase):
         frames = ["drive/a.png", "drive/b.png", "drive/c.png"]
         render_sequence(frames, self.out,
                         source=self._fake_points)
-        saved = json.loads((self.out / "manifest.json").read_text())
+        saved = json.loads((self.out / "manifest.json").read_text(encoding="utf-8"))
         # Ключ — основа имени условия, значение — исходный кадр. Без этой карты
         # сгенерированный кейфрейм не с чем сверять по позе: условие — рисунок,
         # на нём детектор поз ничего не находит.
@@ -245,7 +248,7 @@ class ConditionsExplainThemselves(unittest.TestCase):
 
         render_sequence(["drive/a.png", "drive/b.png", "drive/c.png"],
                         self.out, source=sometimes)
-        saved = json.loads((self.out / "manifest.json").read_text())
+        saved = json.loads((self.out / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(saved["driving_frames"]), ["0000", "0002"])
         self.assertEqual(saved["missing_frames"], [1])
 

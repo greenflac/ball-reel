@@ -532,7 +532,9 @@ class TheJudgesWeightsAreNamedWithTheirCommands(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("buffalo_l.zip", detail)
         self.assertIn("det_10g.onnx", detail)
-        self.assertIn("/nonexistent-insightface", detail)
+        # Имя каталога, а не путь с разделителем: разделитель у платформы
+        # свой, и сообщение печатает системный.
+        self.assertIn("nonexistent-insightface", detail)
         # ЧЕМ качать — не проверяем: раньше здесь стоял `curl`, и это оказалось
         # проверкой утилиты вместо проверки исполнимости. На Windows пара
         # curl+unzip нерабочая (unzip там нет), и лечение переехало на
@@ -698,7 +700,7 @@ class ThereIsSomethingToCheckThePoseAgainst(unittest.TestCase):
 
     def _manifest(self, mapping):
         (self.cond / "manifest.json").write_text(
-            json.dumps({"driving_frames": mapping}))
+            json.dumps({"driving_frames": mapping}), encoding="utf-8")
 
     def _driving(self, names):
         d = self.root / "driving"
@@ -712,7 +714,8 @@ class ThereIsSomethingToCheckThePoseAgainst(unittest.TestCase):
         self.assertIn("render_sequence", detail)
 
     def test_an_old_manifest_without_the_map_is_refused(self):
-        (self.cond / "manifest.json").write_text(json.dumps({"size": [512, 768]}))
+        (self.cond / "manifest.json").write_text(json.dumps({"size": [512, 768]}),
+                                                 encoding="utf-8")
         ok, _, detail = self.p.check_driving(str(self.cond))
         self.assertFalse(ok)
         self.assertIn("driving_frames", detail)

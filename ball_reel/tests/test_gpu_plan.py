@@ -400,7 +400,12 @@ class TheDrivingFrameIsFoundOrDeclaredMissing(unittest.TestCase):
     def test_a_path_relative_to_the_kit_root_is_found_next_to_the_conditions(self):
         got = self.r.resolve_driving("driving/0000.jpg",
                                      self.tmp / "conditions")
-        self.assertTrue(got and got.endswith("driving/0000.jpg"))
+        # os.sep, а не "/": на Windows Path отдаёт обратные слэши, и
+        # проверка на POSIX-разделитель краснела бы на исправном коде.
+        import os
+
+        self.assertTrue(got and got.endswith(os.path.join("driving",
+                                                          "0000.jpg")))
 
     def test_a_path_that_already_works_is_left_alone(self):
         direct = str(self.tmp / "driving" / "0000.jpg")

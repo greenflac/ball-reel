@@ -128,7 +128,7 @@ class TheCutCarriesTheWHOLEBodyMeasurement(unittest.TestCase):
         self.assertEqual(m["cut_from"]["of_total"], 40)
         self.assertTrue(m["cut_from"]["why"])
         on_disk = json.loads(
-            (self.dir / "cut5" / "conditions" / "manifest.json").read_text())
+            (self.dir / "cut5" / "conditions" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(on_disk["cut_from"]["start"], 10)
 
     def test_the_window_length_is_taken_from_the_motion_module_not_copied(self):

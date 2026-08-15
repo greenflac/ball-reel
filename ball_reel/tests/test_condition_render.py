@@ -677,7 +677,7 @@ class TheManifestSaysWhetherTheGateWillSeeAFace(unittest.TestCase):
 
         m = self._run("waist_up", name="disk")
         saved = json.loads(
-            (self.dir / "disk_waist_up_768" / "manifest.json").read_text())
+            (self.dir / "disk_waist_up_768" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["framing"], "waist_up")
         self.assertEqual(saved["face_px"], m["face_px"])
         self.assertEqual(saved["identity_judgeable"], m["identity_judgeable"])
@@ -855,7 +855,7 @@ class ADrawingNeverInventsAJoint(unittest.TestCase):
 
         m = self.s.render_sequence(["a"], self.dir / "seq4",
                                    source=lambda _p: _points())
-        saved = json.loads((self.dir / "seq4" / "manifest.json").read_text())
+        saved = json.loads((self.dir / "seq4" / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["source"], m["source"])
         self.assertNotIn(saved["source"], ("dwpose", "mediapipe"))
 

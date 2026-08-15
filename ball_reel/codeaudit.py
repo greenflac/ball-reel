@@ -459,6 +459,31 @@ TREE_ONLY_SKIPS = {
 }
 
 
+def _link_or_copy(link: Path, target: Path) -> None:
+    """Ссылка, а если нельзя — копия. Данные должны доехать в любом случае.
+
+    СИМВОЛИЧЕСКАЯ ССЫЛКА НА WINDOWS ТРЕБУЕТ ПРАВ, которых у обычного
+    пользователя нет: `OSError [WinError 1314] A required privilege is not held
+    by the client`. Измерено на живой машине — аудит падал тремя ошибками ещё
+    до первой мутации, то есть проверка тестов не запускалась вовсе.
+
+    Копия дороже ссылки, и ради этого ссылки и заводились. Но «дороже» — это
+    секунды на десяток мегабайт, а цена отказа — весь аудит. Поэтому ссылка
+    остаётся предпочтением, а не требованием.
+    """
+    import shutil
+
+    try:
+        link.symlink_to(target)
+        return
+    except OSError:
+        pass
+    if target.is_dir():
+        shutil.copytree(target, link, dirs_exist_ok=True)
+    else:
+        shutil.copyfile(target, link)
+
+
 def _stage_copy(tmp: Path) -> Path:
     """Копия пакета плюс ссылки на данные. Возвращает путь к копии пакета."""
     import shutil
@@ -467,14 +492,14 @@ def _stage_copy(tmp: Path) -> Path:
     shutil.copytree("ball_reel", dst,
                     ignore=shutil.ignore_patterns("__pycache__", "fixtures"))
     # fixtures нужны офлайн-тестам, но копировать их дорого — линкуем.
-    (dst / "fixtures").symlink_to(Path("ball_reel/fixtures").resolve())
+    _link_or_copy(dst / "fixtures", Path("ball_reel/fixtures").resolve())
     for name in DATA_LINKS:
         src = Path(name)
         if src.exists():
-            (tmp / name).symlink_to(src.resolve())
+            _link_or_copy(tmp / name, src.resolve())
     # Корневые картинки эксперимента с приметами лежат россыпью, а не в папке.
     for png in Path(".").glob("*.png"):
-        (tmp / png.name).symlink_to(png.resolve())
+        _link_or_copy(tmp / png.name, png.resolve())
     return dst
 
 
