@@ -1,0 +1,60 @@
+# Тесты и мутационный аудит на каждый пуш.
+#
+# ЧТО ЗДЕСЬ ГОНЯЕТСЯ И ЧТО НЕТ. Видеокарты в CI нет, поэтому генерация не
+# исполняется — и это не пробел, а устройство проекта: половина кода ничего не
+# генерирует, а измеряет, и вся она проверяема на CPU. Тесты, требующие весов
+# или карты, помечают себя пропуском сами.
+#
+# ДВА ШАГА, А НЕ ОДИН. Зелёные тесты ничего не доказывают: они зелены и на
+# коде, где пороги никто не сторожит. Поэтому вторым шагом идёт мутационный
+# аудит — он ломает пороги по одному и требует, чтобы хоть один тест покраснел.
+# Выживший мутант означает порог без сторожа.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Поставить измерительный слой
+        # Метрики ставятся отдельным шагом: они тяжёлые, и если упадут именно
+        # они, это должно быть видно в отдельной красной строке, а не внутри
+        # общего "pip install".
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[metrics]"
+
+      - name: Тесты
+        run: python -m unittest discover -s ball_reel/tests -p "test_*.py" -v
+
+  mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[metrics]"
+
+      - name: Мутационный аудит
+        # Ломает пороги по одному. Падает, если хоть один мутант выжил.
+        run: python -m ball_reel.codeaudit

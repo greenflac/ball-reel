@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ball-reel"
+version = "0.1.0"
+description = "Видео по фотографии человека и видео-референсу движения, с измерительным слоем, который судит собственный результат"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+# ЗАВИСИМОСТИ РАЗДЕЛЕНЫ НАМЕРЕННО, и это не стиль оформления.
+#
+# Здесь только то, без чего не работает ИЗМЕРИТЕЛЬНЫЙ слой — а он и есть та
+# половина проекта, которую можно запустить без видеокарты и без сети. Всё
+# тяжёлое (torch, diffusers, insightface) вынесено в extras, потому что torch
+# ставится ИЗ ДРУГОГО ИНДЕКСА под конкретную CUDA: вписав его сюда, мы бы
+# получили колесо с PyPI, а на Windows дефолтное колесо torch — БЕЗ CUDA.
+# Это уже случалось: получился 2.13.0+cpu и `cuda.is_available() == False`,
+# то есть провал, который вылезает на первом кадре после скачивания 4 ГБ весов.
+# Подробности и порядок установки — в requirements-gpu.txt.
+dependencies = [
+    "numpy>=2.4",
+    "pillow>=10",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Метрики: поза, лицо, сегментация. Работают на CPU.
+metrics = [
+    "mediapipe==1.0.0",
+    "insightface==1.0.1",
+    "onnxruntime==1.28.0",
+]
+# Генерация. torch СЮДА НЕ ВХОДИТ — см. комментарий выше и requirements-gpu.txt.
+gpu = [
+    "diffusers>=0.27",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "peft",
+    "huggingface_hub",
+]
+
+[project.scripts]
+ball-reel-run = "ball_reel.run_local:main"
+ball-reel-probe = "ball_reel.probe:main"
+ball-reel-train = "ball_reel.train:main"
+ball-reel-audit = "ball_reel.codeaudit:main"
+
+[tool.setuptools.packages.find]
+include = ["ball_reel*"]
+
+[tool.setuptools.package-data]
+ball_reel = ["fixtures/**/*"]
