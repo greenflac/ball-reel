@@ -61,3 +61,9 @@ startprobe/
 bench_base/
 ds_medoid/
 ds_clean/
+# Эксперимент с рёбрами: картинки ни в коде, ни в тестах не
+# используются. marktest_*.png НЕ здесь намеренно — на них
+# смотрят test_bodyparts и стенд calibrate_marks, и без них
+# склонировавший получит красные тесты.
+startprobe/
+edge_*.png
