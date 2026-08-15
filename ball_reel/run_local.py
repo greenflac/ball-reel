@@ -1632,18 +1632,33 @@ def _run_animatediff(args, out, clock, conditions, driving_of, prompt, measure,
     # меньше при той же генерации. Бар 0.30 не берёт ни одно (движение
     # исходника нециклично), но выбирать худшее, имея замер, незачем.
     #
+    # ПО СКЕЛЕТУ, А НЕ ПО ПИКСЕЛЯМ, и это не оптимизация, а смена измеряемого.
+    # Пиксельная разность меряет свет, фон и шум компрессии заодно с движением;
+    # скелет меряет движение. И он же — то, что потребляет ControlNet: замкнув
+    # его, мы замыкаем ровно то, что доедет до генерации. Измерено на нашем
+    # исходнике: поза найдена на 96 кадрах из 96, лучшее окно по пикселям
+    # 66..81, по скелету 52..67 — то есть меры выбирают РАЗНОЕ.
+    #
     # Замер идёт по driving-КАДРАМ, а не по условиям: условия — это отрисовка
     # скелета, и на ней «похожесть кадров» меряется по линиям, а не по телу.
     start = args.from_frame
     if str(start).lower() == "auto":
-        from .motion import best_loop_window
+        from .motion import best_loop_window_pose
 
         pool = [driving_of.get(Path(c).stem) for c in conditions]
         pool = [p for p in pool if p]
         if len(pool) == len(conditions):
-            got = best_loop_window(pool, size=cfg.frames, stride=args.stride)
-            start = got["start"] if got["ratio"] is not None else 0
-            _say("выбор окна", got["ratio"] is not None, got["note"])
+            from . import dwpose as _dw
+            from .pose import landmarks as _lm
+            from .timing import PER_RUN as _PER_RUN
+
+            src = _dw.pose_points if _dw.available() else _lm
+            with clock.stage("loop_window", per=_PER_RUN):
+                got = best_loop_window_pose([src(p) for p in pool],
+                                            size=cfg.frames,
+                                            stride=args.stride)
+            start = got["start"] if got.get("seam") is not None else 0
+            _say("выбор окна", got.get("seam") is not None, got["note"])
         else:
             start = 0
             _say("выбор окна", None,
