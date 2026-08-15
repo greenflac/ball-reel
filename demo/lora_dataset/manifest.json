@@ -1,20 +1,20 @@
 {
   "trigger": "ohwx_person",
-  "size": 17,
+  "size": 38,
   "captions": {
-    "measured": 17,
+    "measured": 38,
     "missing": [],
     "flagged": [],
     "unchecked": []
   },
-  "steps_equivalent": 21,
+  "steps_equivalent": 42,
   "by_origin": {
     "real": 1,
     "augmented": 16,
-    "generated": 0
+    "generated": 21
   },
   "independence": {
-    "generator": "локальные аугментации",
+    "generator": "внешний генератор",
     "selector": "не применялся (отбора не было)",
     "judge": "arcface/buffalo_l",
     "independent": true,
@@ -28,7 +28,7 @@
       "origin": "real",
       "repeats": 5,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "реальный якорь"
     },
@@ -37,7 +37,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "кадр плотнее на 10% — учит, что человек может быть ближе"
     },
@@ -46,7 +46,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "кадр шире на 10%"
     },
@@ -55,7 +55,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "поворот на 4 градуса против часовой"
     },
@@ -64,7 +64,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "поворот на 4 градуса по часовой"
     },
@@ -73,7 +73,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "ярче на 8% — свет меняется, человек нет"
     },
@@ -82,7 +82,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "темнее на 8%"
     },
@@ -91,7 +91,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "теплее по цветовой температуре"
     },
@@ -100,7 +100,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, neutral tones",
       "requested": "",
       "note": "холоднее по цветовой температуре"
     },
@@ -109,7 +109,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "кадр плотнее на 20% — вторая ступень масштаба"
     },
@@ -118,7 +118,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
       "requested": "",
       "note": "кадр шире на 20%"
     },
@@ -127,7 +127,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "поворот на 8 градусов против часовой"
     },
@@ -136,7 +136,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "поворот на 8 градусов по часовой"
     },
@@ -145,7 +145,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "контрастнее на 12% — другая экспозиция, тот же человек"
     },
@@ -154,7 +154,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "мягче по контрасту на 12%"
     },
@@ -163,7 +163,7 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "зерно матрицы: человек тот же, камера хуже"
     },
@@ -172,22 +172,211 @@
       "origin": "augmented",
       "repeats": 1,
       "score": null,
-      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
       "requested": "",
       "note": "мягче в фокусе — кадр не всегда резкий"
+    },
+    {
+      "path": "img/gen_0000.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0000.png"
+    },
+    {
+      "path": "img/gen_0001.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0001.png"
+    },
+    {
+      "path": "img/gen_0002.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones, turned away from the camera, looking back",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0002.png"
+    },
+    {
+      "path": "img/gen_0003.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0003.png"
+    },
+    {
+      "path": "img/gen_0004.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0004.png"
+    },
+    {
+      "path": "img/gen_0005.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0005.png"
+    },
+    {
+      "path": "img/gen_0006.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0006.png"
+    },
+    {
+      "path": "img/gen_0007.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0007.png"
+    },
+    {
+      "path": "img/gen_0008.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0008.png"
+    },
+    {
+      "path": "img/gen_0009.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0010.png"
+    },
+    {
+      "path": "img/gen_0010.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0011.png"
+    },
+    {
+      "path": "img/gen_0011.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0012.png"
+    },
+    {
+      "path": "img/gen_0012.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0013.png"
+    },
+    {
+      "path": "img/gen_0013.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones, turned away from the camera, looking back",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0014.png"
+    },
+    {
+      "path": "img/gen_0014.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0015.png"
+    },
+    {
+      "path": "img/gen_0015.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0016.png"
+    },
+    {
+      "path": "img/gen_0016.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0017.png"
+    },
+    {
+      "path": "img/gen_0017.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0018.png"
+    },
+    {
+      "path": "img/gen_0018.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0019.png"
+    },
+    {
+      "path": "img/gen_0019.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0020.png"
+    },
+    {
+      "path": "img/gen_0020.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0021.png"
     }
   ],
   "failed_captions": [],
   "judge_audit": {
     "ok": true,
     "bar": 0.35,
-    "measured": 17,
+    "measured": 38,
     "unmeasured": 0,
-    "inside": 17,
-    "share": 1.0,
-    "median": 0.009,
+    "inside": 36,
+    "share": 0.947,
+    "median": 0.208,
     "min": 0.0,
-    "max": 0.043,
+    "max": 0.358,
     "by_origin": {
       "real": {
         "n": 1,
@@ -197,9 +386,15 @@
       },
       "augmented": {
         "n": 16,
-        "median": 0.012,
+        "median": 0.009,
         "min": 0.001,
-        "max": 0.043
+        "max": 0.018
+      },
+      "generated": {
+        "n": 21,
+        "median": 0.258,
+        "min": 0.0,
+        "max": 0.358
       }
     },
     "rows": [
@@ -211,27 +406,27 @@
       {
         "path": "img/aug_crop_tight.png",
         "origin": "augmented",
-        "distance": 0.009
+        "distance": 0.015
       },
       {
         "path": "img/aug_crop_wide.png",
         "origin": "augmented",
-        "distance": 0.024
+        "distance": 0.016
       },
       {
         "path": "img/aug_rotate_ccw.png",
         "origin": "augmented",
-        "distance": 0.012
+        "distance": 0.016
       },
       {
         "path": "img/aug_rotate_cw.png",
         "origin": "augmented",
-        "distance": 0.018
+        "distance": 0.012
       },
       {
         "path": "img/aug_bright_up.png",
         "origin": "augmented",
-        "distance": 0.001
+        "distance": 0.002
       },
       {
         "path": "img/aug_bright_down.png",
@@ -246,12 +441,12 @@
       {
         "path": "img/aug_cool.png",
         "origin": "augmented",
-        "distance": 0.004
+        "distance": 0.003
       },
       {
         "path": "img/aug_crop_tighter.png",
         "origin": "augmented",
-        "distance": 0.025
+        "distance": 0.018
       },
       {
         "path": "img/aug_crop_wider.png",
@@ -261,17 +456,17 @@
       {
         "path": "img/aug_rotate_ccw2.png",
         "origin": "augmented",
-        "distance": 0.015
+        "distance": 0.018
       },
       {
         "path": "img/aug_rotate_cw2.png",
         "origin": "augmented",
-        "distance": 0.017
+        "distance": 0.007
       },
       {
         "path": "img/aug_contrast_up.png",
         "origin": "augmented",
-        "distance": 0.001
+        "distance": 0.002
       },
       {
         "path": "img/aug_contrast_down.png",
@@ -281,15 +476,121 @@
       {
         "path": "img/aug_grain.png",
         "origin": "augmented",
-        "distance": 0.043
+        "distance": 0.009
       },
       {
         "path": "img/aug_soft.png",
         "origin": "augmented",
-        "distance": 0.008
+        "distance": 0.007
+      },
+      {
+        "path": "img/gen_0000.png",
+        "origin": "generated",
+        "distance": 0.253
+      },
+      {
+        "path": "img/gen_0001.png",
+        "origin": "generated",
+        "distance": 0.327
+      },
+      {
+        "path": "img/gen_0002.png",
+        "origin": "generated",
+        "distance": 0.258
+      },
+      {
+        "path": "img/gen_0003.png",
+        "origin": "generated",
+        "distance": 0.228
+      },
+      {
+        "path": "img/gen_0004.png",
+        "origin": "generated",
+        "distance": 0.225
+      },
+      {
+        "path": "img/gen_0005.png",
+        "origin": "generated",
+        "distance": 0.261
+      },
+      {
+        "path": "img/gen_0006.png",
+        "origin": "generated",
+        "distance": 0.358
+      },
+      {
+        "path": "img/gen_0007.png",
+        "origin": "generated",
+        "distance": 0.208
+      },
+      {
+        "path": "img/gen_0008.png",
+        "origin": "generated",
+        "distance": 0.291
+      },
+      {
+        "path": "img/gen_0009.png",
+        "origin": "generated",
+        "distance": 0.276
+      },
+      {
+        "path": "img/gen_0010.png",
+        "origin": "generated",
+        "distance": 0.259
+      },
+      {
+        "path": "img/gen_0011.png",
+        "origin": "generated",
+        "distance": 0.253
+      },
+      {
+        "path": "img/gen_0012.png",
+        "origin": "generated",
+        "distance": 0.327
+      },
+      {
+        "path": "img/gen_0013.png",
+        "origin": "generated",
+        "distance": 0.258
+      },
+      {
+        "path": "img/gen_0014.png",
+        "origin": "generated",
+        "distance": 0.228
+      },
+      {
+        "path": "img/gen_0015.png",
+        "origin": "generated",
+        "distance": 0.225
+      },
+      {
+        "path": "img/gen_0016.png",
+        "origin": "generated",
+        "distance": 0.261
+      },
+      {
+        "path": "img/gen_0017.png",
+        "origin": "generated",
+        "distance": 0.358
+      },
+      {
+        "path": "img/gen_0018.png",
+        "origin": "generated",
+        "distance": 0.208
+      },
+      {
+        "path": "img/gen_0019.png",
+        "origin": "generated",
+        "distance": 0.291
+      },
+      {
+        "path": "img/gen_0020.png",
+        "origin": "generated",
+        "distance": 0.0
       }
     ],
-    "note": "судья принимает 17 из 17 кадров при баре 0.35, медиана 0.009"
+    "note": "судья принимает 36 из 38 кадров при баре 0.35, медиана 0.208"
   },
-  "root": "demo/lora_dataset"
+  "root": "demo/lora_dataset",
+  "identity_reference": "img/real_0000.png — МЕДОИД порождённых кадров, а не загруженная фотография. Загруженная снята со спины (поворот 0.152 против 0.989 у драйвинга), и все порождённые стоят от неё в 0.418..0.544, тогда как ДРУГ ОТ ДРУГА — в 0.208..0.374 (61 пара из 66 в баре). Выпадала она, а не они. Референсом взят самый центральный кадр: медианное расстояние до остальных 0.259, ракурс фронтальный (совпадает с драйвингом), кожа без ретуши. ЦЕНА: верифицируется человек, каким его рисует nanobanana-2, а не буквально человек с загруженной фотографии — решение владельца продукта, фотография была намеренно неудачной."
 }

@@ -1,0 +1,595 @@
+{
+  "trigger": "ohwx_person",
+  "size": 38,
+  "captions": {
+    "measured": 38,
+    "missing": [],
+    "flagged": [],
+    "unchecked": []
+  },
+  "steps_equivalent": 42,
+  "by_origin": {
+    "real": 1,
+    "augmented": 16,
+    "generated": 21
+  },
+  "independence": {
+    "generator": "внешний генератор",
+    "selector": "не применялся (отбора не было)",
+    "judge": "arcface/buffalo_l",
+    "independent": true,
+    "problems": [],
+    "note": "судья независим от порождения и отбора"
+  },
+  "mirror_used": false,
+  "samples": [
+    {
+      "path": "ds_medoid/img/real_0000.png",
+      "origin": "real",
+      "repeats": 5,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "реальный якорь"
+    },
+    {
+      "path": "ds_medoid/img/aug_crop_tight.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "кадр плотнее на 10% — учит, что человек может быть ближе"
+    },
+    {
+      "path": "ds_medoid/img/aug_crop_wide.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "кадр шире на 10%"
+    },
+    {
+      "path": "ds_medoid/img/aug_rotate_ccw.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "поворот на 4 градуса против часовой"
+    },
+    {
+      "path": "ds_medoid/img/aug_rotate_cw.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "поворот на 4 градуса по часовой"
+    },
+    {
+      "path": "ds_medoid/img/aug_bright_up.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "ярче на 8% — свет меняется, человек нет"
+    },
+    {
+      "path": "ds_medoid/img/aug_bright_down.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "темнее на 8%"
+    },
+    {
+      "path": "ds_medoid/img/aug_warm.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "теплее по цветовой температуре"
+    },
+    {
+      "path": "ds_medoid/img/aug_cool.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, neutral tones",
+      "requested": "",
+      "note": "холоднее по цветовой температуре"
+    },
+    {
+      "path": "ds_medoid/img/aug_crop_tighter.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "кадр плотнее на 20% — вторая ступень масштаба"
+    },
+    {
+      "path": "ds_medoid/img/aug_crop_wider.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "кадр шире на 20%"
+    },
+    {
+      "path": "ds_medoid/img/aug_rotate_ccw2.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "поворот на 8 градусов против часовой"
+    },
+    {
+      "path": "ds_medoid/img/aug_rotate_cw2.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "поворот на 8 градусов по часовой"
+    },
+    {
+      "path": "ds_medoid/img/aug_contrast_up.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "контрастнее на 12% — другая экспозиция, тот же человек"
+    },
+    {
+      "path": "ds_medoid/img/aug_contrast_down.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "мягче по контрасту на 12%"
+    },
+    {
+      "path": "ds_medoid/img/aug_grain.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "зерно матрицы: человек тот же, камера хуже"
+    },
+    {
+      "path": "ds_medoid/img/aug_soft.png",
+      "origin": "augmented",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "мягче в фокусе — кадр не всегда резкий"
+    },
+    {
+      "path": "ds_medoid/img/gen_0000.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0000.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0001.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0001.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0002.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones, turned away from the camera, looking back",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0002.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0003.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0003.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0004.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0004.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0005.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0005.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0006.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0006.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0007.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0007.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0008.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0008.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0009.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0010.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0010.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0011.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0011.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0012.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0012.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, full body in frame, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0013.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0013.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones, turned away from the camera, looking back",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0014.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0014.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0015.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0015.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0016.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0016.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0017.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0017.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, neutral tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0018.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0018.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the waist up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0019.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0019.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, framed from the knees up, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0020.png"
+    },
+    {
+      "path": "ds_medoid/img/gen_0020.png",
+      "origin": "generated",
+      "repeats": 1,
+      "score": null,
+      "caption": "ohwx_person, head and shoulders in frame, even light, warm tones",
+      "requested": "",
+      "note": "порождён внешним генератором из /tmp/claude-0/-home-user-llm-radar/9c79ac6e-e2ba-5573-b923-9d52c1980bbd/scratchpad/genall/gen_0021.png"
+    }
+  ],
+  "failed_captions": [],
+  "judge_audit": {
+    "ok": true,
+    "bar": 0.35,
+    "measured": 38,
+    "unmeasured": 0,
+    "inside": 36,
+    "share": 0.947,
+    "median": 0.208,
+    "min": 0.0,
+    "max": 0.358,
+    "by_origin": {
+      "real": {
+        "n": 1,
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "augmented": {
+        "n": 16,
+        "median": 0.009,
+        "min": 0.001,
+        "max": 0.018
+      },
+      "generated": {
+        "n": 21,
+        "median": 0.258,
+        "min": 0.0,
+        "max": 0.358
+      }
+    },
+    "rows": [
+      {
+        "path": "ds_medoid/img/real_0000.png",
+        "origin": "real",
+        "distance": 0.0
+      },
+      {
+        "path": "ds_medoid/img/aug_crop_tight.png",
+        "origin": "augmented",
+        "distance": 0.015
+      },
+      {
+        "path": "ds_medoid/img/aug_crop_wide.png",
+        "origin": "augmented",
+        "distance": 0.016
+      },
+      {
+        "path": "ds_medoid/img/aug_rotate_ccw.png",
+        "origin": "augmented",
+        "distance": 0.016
+      },
+      {
+        "path": "ds_medoid/img/aug_rotate_cw.png",
+        "origin": "augmented",
+        "distance": 0.012
+      },
+      {
+        "path": "ds_medoid/img/aug_bright_up.png",
+        "origin": "augmented",
+        "distance": 0.002
+      },
+      {
+        "path": "ds_medoid/img/aug_bright_down.png",
+        "origin": "augmented",
+        "distance": 0.001
+      },
+      {
+        "path": "ds_medoid/img/aug_warm.png",
+        "origin": "augmented",
+        "distance": 0.002
+      },
+      {
+        "path": "ds_medoid/img/aug_cool.png",
+        "origin": "augmented",
+        "distance": 0.003
+      },
+      {
+        "path": "ds_medoid/img/aug_crop_tighter.png",
+        "origin": "augmented",
+        "distance": 0.018
+      },
+      {
+        "path": "ds_medoid/img/aug_crop_wider.png",
+        "origin": "augmented",
+        "distance": 0.018
+      },
+      {
+        "path": "ds_medoid/img/aug_rotate_ccw2.png",
+        "origin": "augmented",
+        "distance": 0.018
+      },
+      {
+        "path": "ds_medoid/img/aug_rotate_cw2.png",
+        "origin": "augmented",
+        "distance": 0.007
+      },
+      {
+        "path": "ds_medoid/img/aug_contrast_up.png",
+        "origin": "augmented",
+        "distance": 0.002
+      },
+      {
+        "path": "ds_medoid/img/aug_contrast_down.png",
+        "origin": "augmented",
+        "distance": 0.002
+      },
+      {
+        "path": "ds_medoid/img/aug_grain.png",
+        "origin": "augmented",
+        "distance": 0.009
+      },
+      {
+        "path": "ds_medoid/img/aug_soft.png",
+        "origin": "augmented",
+        "distance": 0.007
+      },
+      {
+        "path": "ds_medoid/img/gen_0000.png",
+        "origin": "generated",
+        "distance": 0.253
+      },
+      {
+        "path": "ds_medoid/img/gen_0001.png",
+        "origin": "generated",
+        "distance": 0.327
+      },
+      {
+        "path": "ds_medoid/img/gen_0002.png",
+        "origin": "generated",
+        "distance": 0.258
+      },
+      {
+        "path": "ds_medoid/img/gen_0003.png",
+        "origin": "generated",
+        "distance": 0.228
+      },
+      {
+        "path": "ds_medoid/img/gen_0004.png",
+        "origin": "generated",
+        "distance": 0.225
+      },
+      {
+        "path": "ds_medoid/img/gen_0005.png",
+        "origin": "generated",
+        "distance": 0.261
+      },
+      {
+        "path": "ds_medoid/img/gen_0006.png",
+        "origin": "generated",
+        "distance": 0.358
+      },
+      {
+        "path": "ds_medoid/img/gen_0007.png",
+        "origin": "generated",
+        "distance": 0.208
+      },
+      {
+        "path": "ds_medoid/img/gen_0008.png",
+        "origin": "generated",
+        "distance": 0.291
+      },
+      {
+        "path": "ds_medoid/img/gen_0009.png",
+        "origin": "generated",
+        "distance": 0.276
+      },
+      {
+        "path": "ds_medoid/img/gen_0010.png",
+        "origin": "generated",
+        "distance": 0.259
+      },
+      {
+        "path": "ds_medoid/img/gen_0011.png",
+        "origin": "generated",
+        "distance": 0.253
+      },
+      {
+        "path": "ds_medoid/img/gen_0012.png",
+        "origin": "generated",
+        "distance": 0.327
+      },
+      {
+        "path": "ds_medoid/img/gen_0013.png",
+        "origin": "generated",
+        "distance": 0.258
+      },
+      {
+        "path": "ds_medoid/img/gen_0014.png",
+        "origin": "generated",
+        "distance": 0.228
+      },
+      {
+        "path": "ds_medoid/img/gen_0015.png",
+        "origin": "generated",
+        "distance": 0.225
+      },
+      {
+        "path": "ds_medoid/img/gen_0016.png",
+        "origin": "generated",
+        "distance": 0.261
+      },
+      {
+        "path": "ds_medoid/img/gen_0017.png",
+        "origin": "generated",
+        "distance": 0.358
+      },
+      {
+        "path": "ds_medoid/img/gen_0018.png",
+        "origin": "generated",
+        "distance": 0.208
+      },
+      {
+        "path": "ds_medoid/img/gen_0019.png",
+        "origin": "generated",
+        "distance": 0.291
+      },
+      {
+        "path": "ds_medoid/img/gen_0020.png",
+        "origin": "generated",
+        "distance": 0.0
+      }
+    ],
+    "note": "судья принимает 36 из 38 кадров при баре 0.35, медиана 0.208"
+  },
+  "root": "ds_medoid"
+}
