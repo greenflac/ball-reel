@@ -826,7 +826,13 @@ def build_parser():
     ch.add_argument("--train-epochs", type=int, default=10,
                     help="проходов по набору при --train-lora; потолок шагов "
                          "всё равно ставит план `lora.config`")
-    ch.add_argument("--lora-scale", type=float, default=0.7,
+    # УМОЛЧАНИЕ БЕРЁТСЯ ИЗ `probe`, А НЕ ДУБЛИРУЕТСЯ. Было 0.7 здесь и 0.8 там:
+    # настройка, найденная пробой за тридцать секунд, приезжала в прогон
+    # изменённой, и разница списывалась на «клип не кадр». Ручка с двумя
+    # умолчаниями — это два прибора под одним именем.
+    from .probe import DEFAULT_LORA_SCALE
+
+    ch.add_argument("--lora-scale", type=float, default=DEFAULT_LORA_SCALE,
                     help="сила LoRA; ближе к 1.0 она начинает перебивать лицо")
     ap.add_argument("--garment-ref", default="",
                     help="НЕ РЕАЛИЗОВАНО на GPU-ветке: единственный адаптер "

@@ -32,6 +32,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+#: Сила LoRA личности. ОДНА на все точки входа, и это не педантизм: у пробы
+#: стояло 0.8, у прогона 0.7, и настройка, найденная одним входом, приезжала в
+#: другой изменённой. Ручка, у которой два умолчания, — это два разных прибора
+#: под одним именем.
+#:
+#: Значение ВЫБРАНО и остаётся прежним значением пробы: менять его заодно с
+#: объединением значило бы смешать два решения в одном коммите. Измеренный
+#: лучший результат сессии получен на 1.2 (сходство 0.412 против 0.488 на 0.8),
+#: но одна точка — не основание двигать умолчание.
+DEFAULT_LORA_SCALE = 0.8
+
 
 def render(condition: str, face: str, prompt: str, out_path, *,
            base: str = "", negative: str = "", lora: str = "",
@@ -138,10 +149,19 @@ def main(argv: list) -> int:
                     help="фотореалистичное дообучение SD1.5; за реализм "
                          "отвечает ИМЕННО оно, а не LoRA личности")
     ap.add_argument("--lora", default="", help="обученная LoRA личности")
-    ap.add_argument("--lora-scale", type=float, default=0.8)
+    ap.add_argument("--lora-scale", type=float, default=DEFAULT_LORA_SCALE)
     ap.add_argument("--ip-adapter-scale", type=float, default=0.7)
-    ap.add_argument("--faceid-lora-scale", type=float, default=1.0,
-                    help="вес FaceID-LoRA. Вместе с проекцией они давят В ОДНУ ТОЧКУ: 1.0 + 0.7 на чужой базе даёт радужные потёки вместо лица")
+    # УМОЛЧАНИЕ БЫЛО 1.0 — то есть ровно та конфигурация, про которую ИЗМЕРЕНО,
+    # что она разваливает кадр: 1.0 + 0.7 на epiCRealism даёт радужные потёки, а
+    # при нуле кадр становится резким и фотографичным. Каждый годный кадр этой
+    # сессии получен с руками выставленным нулём.
+    #
+    # Тот же класс, что `--vram 4.0`, который стоил живого прогона: умолчание,
+    # выбранное «как в апстриме», тихо стало обычным случаем. Ноль — не
+    # осторожность, а измеренный рабочий режим; личность даёт обученная LoRA.
+    ap.add_argument("--faceid-lora-scale", type=float, default=0.0,
+                    help="вес FaceID-LoRA. Умолчание 0: измерено, что вместе с "
+                         "проекцией они давят В ОДНУ ТОЧКУ и дают потёки")
     ap.add_argument("--controlnet-scale", type=float, default=1.0)
     ap.add_argument("--steps", type=int, default=24)
     ap.add_argument("--guidance", type=float, default=6.0)
