@@ -113,6 +113,9 @@ def measure(frame: str, face: str, driving: str = "") -> dict:
             if delta:
                 got["pose"] = delta["mean"]
                 got["worst_joint"] = delta.get("worst")
+                got["compared"] = delta.get("compared")
+                got["measurable"] = delta.get("measurable")
+                got["coverage"] = delta.get("coverage")
     return got
 
 
@@ -194,7 +197,16 @@ def main(argv: list) -> int:
         print("сходство: НЕ ИЗМЕРЕНО (лицо мельче порога или не найдено) — "
               "это не «прошло» и не «провалено»")
     if m["pose"] is not None:
-        print(f"поза против driving: {m['pose']:.3f}"
+        # ПО СКОЛЬКИМ СУСТАВАМ — рядом с числом, а не в подробностях. Измерено:
+        # полноростовой кадр дал 0.239, поясной 0.081, и второе читалось как
+        # «поза втрое точнее». На деле у поясного просто нет в кадре ног, и
+        # среднее считалось по вчетверо меньшему набору. Без размера выборки
+        # среднее — впечатление, а не измерение.
+        cov = ""
+        if m.get("compared"):
+            cov = (f" по {m['compared']} суставам из {m['measurable']}"
+                   f" (покрытие {m['coverage']:.2f})")
+        print(f"поза против driving: {m['pose']:.3f}{cov}"
               + (f", худший сустав {m['worst_joint']}" if m["worst_joint"]
                  else ""))
     print(f"\nкадр: {args.out}  — смотреть ГЛАЗАМИ, числа не видят стиля")

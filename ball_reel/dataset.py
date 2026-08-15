@@ -754,6 +754,27 @@ def augmentations(*, allow_mirror: bool = False) -> list:
         ("bright_down", "темнее на 8%"),
         ("warm", "теплее по цветовой температуре"),
         ("cool", "холоднее по цветовой температуре"),
+        # ВТОРАЯ ВОЛНА, И ОНА ПОЯВИЛАСЬ ПО ИЗМЕРЕНИЮ, А НЕ ДЛЯ ЧИСЛА.
+        # Порождённые кадры оказались для судьи другим человеком (0.418..0.544
+        # при баре 0.35), и набор без них — девять кадров при пороге двенадцать.
+        # Локальные преобразования единственные, про которые ИЗМЕРЕНО, что
+        # личность в них сохраняется: 0.000..0.024. Поэтому добираем ими.
+        #
+        # Каждое из добавленных — про УСЛОВИЯ СЪЁМКИ, не про человека, и ни одно
+        # не меняет сторону (см. запрет зеркала выше).
+        ("crop_tighter", "кадр плотнее на 20% — вторая ступень масштаба"),
+        ("crop_wider", "кадр шире на 20%"),
+        ("rotate_ccw2", "поворот на 8 градусов против часовой"),
+        ("rotate_cw2", "поворот на 8 градусов по часовой"),
+        ("contrast_up", "контрастнее на 12% — другая экспозиция, тот же человек"),
+        ("contrast_down", "мягче по контрасту на 12%"),
+        # ЗЕРНО И МЯГКОСТЬ — не косметика. Замерено, что драйвинг мягче и
+        # зернистее выхода генератора (детальность 1.15 против 8.06, зерно 7.8
+        # против 24.6), а набор целиком состоит из резких кадров. Модель,
+        # видевшая лицо только резким, рисует его резким всегда — и это одна из
+        # причин «вылизанности», на которую жаловались глазами.
+        ("grain", "зерно матрицы: человек тот же, камера хуже"),
+        ("soft", "мягче в фокусе — кадр не всегда резкий"),
     ]
     if allow_mirror:
         rows.append(("mirror", "ЗЕРКАЛО: приметы меняют сторону — включать "
@@ -910,17 +931,34 @@ def apply_augmentation(im, name: str):
     from PIL import Image, ImageEnhance
 
     w, h = im.size
-    if name == "crop_tight":
-        d = 0.05
+    if name in ("crop_tight", "crop_tighter"):
+        d = 0.05 if name == "crop_tight" else 0.10
         return im.crop((int(w*d), int(h*d), int(w*(1-d)), int(h*(1-d))))
-    if name == "crop_wide":
-        pad = int(min(w, h) * 0.05)
+    if name in ("crop_wide", "crop_wider"):
+        pad = int(min(w, h) * (0.05 if name == "crop_wide" else 0.10))
         out = Image.new("RGB", (w + 2*pad, h + 2*pad), (127, 127, 127))
         out.paste(im, (pad, pad))
         return out
-    if name in ("rotate_ccw", "rotate_cw"):
-        return im.rotate(4 if name == "rotate_ccw" else -4,
+    if name in ("rotate_ccw", "rotate_cw", "rotate_ccw2", "rotate_cw2"):
+        deg = 8 if name.endswith("2") else 4
+        return im.rotate(deg if name.startswith("rotate_ccw") else -deg,
                          resample=Image.BICUBIC, expand=False)
+    if name in ("contrast_up", "contrast_down"):
+        return ImageEnhance.Contrast(im).enhance(
+            1.12 if name == "contrast_up" else 0.88)
+    if name == "grain":
+        import numpy as np
+
+        a = np.asarray(im, dtype="float64")
+        # Сид фиксирован: набор обязан пересобираться байт в байт, иначе два
+        # обучения на «одном» наборе несравнимы.
+        rng = np.random.default_rng(0)
+        a = np.clip(a + rng.normal(0, 6.0, a.shape), 0, 255)
+        return Image.fromarray(a.astype("uint8"))
+    if name == "soft":
+        from PIL import ImageFilter
+
+        return im.filter(ImageFilter.GaussianBlur(radius=1.0))
     if name in ("bright_up", "bright_down"):
         return ImageEnhance.Brightness(im).enhance(
             1.08 if name == "bright_up" else 0.92)

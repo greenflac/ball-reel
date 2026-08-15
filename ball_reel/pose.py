@@ -314,8 +314,22 @@ def pose_delta(a: dict, b: dict) -> dict | None:
         return None
     per = {n: float(np.linalg.norm(na[n][0] - nb[n][0])) for n in shared}
     worst = max(per, key=lambda n: per[n])
+    # СКОЛЬКО СУСТАВОВ УЧАСТВОВАЛО — ЧАСТЬ ОТВЕТА, А НЕ ПОДРОБНОСТЬ.
+    #
+    # Замерено на живых кадрах: полноростовой кадр дал mean 0.239, поясной —
+    # 0.081, и второе выглядело как «поза стала втрое точнее». На деле у
+    # поясного кадра просто нет в кадре ног: среднее считалось по вчетверо
+    # меньшему набору суставов. Два числа сравнили как однородные, а они
+    # однородными не были.
+    #
+    # Это тот же класс, что `coverage` у ArcFace, где он давно есть: средняя
+    # величина без размера выборки — не измерение, а впечатление. Пол в 4
+    # сустава оставлен как был (двигать порог без калибровки нельзя), но
+    # молчать о нём больше нельзя.
     return {"mean": round(float(np.mean(list(per.values()))), 4),
             "worst": round(per[worst], 4), "worst_joint": worst,
+            "compared": len(per), "measurable": len(na),
+            "coverage": round(len(per) / len(na), 3) if na else 0.0,
             "joints": {n: round(v, 4) for n, v in per.items()}}
 
 

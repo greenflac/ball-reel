@@ -24,7 +24,7 @@
   "mirror_used": false,
   "samples": [
     {
-      "path": "img/real_0000.png",
+      "path": "ds_clean/img/real_0000.png",
       "origin": "real",
       "repeats": 5,
       "score": null,
@@ -33,7 +33,7 @@
       "note": "реальный якорь"
     },
     {
-      "path": "img/aug_crop_tight.png",
+      "path": "ds_clean/img/aug_crop_tight.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -42,7 +42,7 @@
       "note": "кадр плотнее на 10% — учит, что человек может быть ближе"
     },
     {
-      "path": "img/aug_crop_wide.png",
+      "path": "ds_clean/img/aug_crop_wide.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -51,7 +51,7 @@
       "note": "кадр шире на 10%"
     },
     {
-      "path": "img/aug_rotate_ccw.png",
+      "path": "ds_clean/img/aug_rotate_ccw.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -60,7 +60,7 @@
       "note": "поворот на 4 градуса против часовой"
     },
     {
-      "path": "img/aug_rotate_cw.png",
+      "path": "ds_clean/img/aug_rotate_cw.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -69,7 +69,7 @@
       "note": "поворот на 4 градуса по часовой"
     },
     {
-      "path": "img/aug_bright_up.png",
+      "path": "ds_clean/img/aug_bright_up.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -78,7 +78,7 @@
       "note": "ярче на 8% — свет меняется, человек нет"
     },
     {
-      "path": "img/aug_bright_down.png",
+      "path": "ds_clean/img/aug_bright_down.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -87,7 +87,7 @@
       "note": "темнее на 8%"
     },
     {
-      "path": "img/aug_warm.png",
+      "path": "ds_clean/img/aug_warm.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -96,7 +96,7 @@
       "note": "теплее по цветовой температуре"
     },
     {
-      "path": "img/aug_cool.png",
+      "path": "ds_clean/img/aug_cool.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -105,7 +105,7 @@
       "note": "холоднее по цветовой температуре"
     },
     {
-      "path": "img/aug_crop_tighter.png",
+      "path": "ds_clean/img/aug_crop_tighter.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -114,7 +114,7 @@
       "note": "кадр плотнее на 20% — вторая ступень масштаба"
     },
     {
-      "path": "img/aug_crop_wider.png",
+      "path": "ds_clean/img/aug_crop_wider.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -123,7 +123,7 @@
       "note": "кадр шире на 20%"
     },
     {
-      "path": "img/aug_rotate_ccw2.png",
+      "path": "ds_clean/img/aug_rotate_ccw2.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -132,7 +132,7 @@
       "note": "поворот на 8 градусов против часовой"
     },
     {
-      "path": "img/aug_rotate_cw2.png",
+      "path": "ds_clean/img/aug_rotate_cw2.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -141,7 +141,7 @@
       "note": "поворот на 8 градусов по часовой"
     },
     {
-      "path": "img/aug_contrast_up.png",
+      "path": "ds_clean/img/aug_contrast_up.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -150,7 +150,7 @@
       "note": "контрастнее на 12% — другая экспозиция, тот же человек"
     },
     {
-      "path": "img/aug_contrast_down.png",
+      "path": "ds_clean/img/aug_contrast_down.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -159,7 +159,7 @@
       "note": "мягче по контрасту на 12%"
     },
     {
-      "path": "img/aug_grain.png",
+      "path": "ds_clean/img/aug_grain.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -168,7 +168,7 @@
       "note": "зерно матрицы: человек тот же, камера хуже"
     },
     {
-      "path": "img/aug_soft.png",
+      "path": "ds_clean/img/aug_soft.png",
       "origin": "augmented",
       "repeats": 1,
       "score": null,
@@ -204,92 +204,92 @@
     },
     "rows": [
       {
-        "path": "img/real_0000.png",
+        "path": "ds_clean/img/real_0000.png",
         "origin": "real",
         "distance": 0.0
       },
       {
-        "path": "img/aug_crop_tight.png",
+        "path": "ds_clean/img/aug_crop_tight.png",
         "origin": "augmented",
         "distance": 0.009
       },
       {
-        "path": "img/aug_crop_wide.png",
+        "path": "ds_clean/img/aug_crop_wide.png",
         "origin": "augmented",
         "distance": 0.024
       },
       {
-        "path": "img/aug_rotate_ccw.png",
+        "path": "ds_clean/img/aug_rotate_ccw.png",
         "origin": "augmented",
         "distance": 0.012
       },
       {
-        "path": "img/aug_rotate_cw.png",
+        "path": "ds_clean/img/aug_rotate_cw.png",
         "origin": "augmented",
         "distance": 0.018
       },
       {
-        "path": "img/aug_bright_up.png",
+        "path": "ds_clean/img/aug_bright_up.png",
         "origin": "augmented",
         "distance": 0.001
       },
       {
-        "path": "img/aug_bright_down.png",
+        "path": "ds_clean/img/aug_bright_down.png",
         "origin": "augmented",
         "distance": 0.001
       },
       {
-        "path": "img/aug_warm.png",
+        "path": "ds_clean/img/aug_warm.png",
         "origin": "augmented",
         "distance": 0.002
       },
       {
-        "path": "img/aug_cool.png",
+        "path": "ds_clean/img/aug_cool.png",
         "origin": "augmented",
         "distance": 0.004
       },
       {
-        "path": "img/aug_crop_tighter.png",
+        "path": "ds_clean/img/aug_crop_tighter.png",
         "origin": "augmented",
         "distance": 0.025
       },
       {
-        "path": "img/aug_crop_wider.png",
+        "path": "ds_clean/img/aug_crop_wider.png",
         "origin": "augmented",
         "distance": 0.018
       },
       {
-        "path": "img/aug_rotate_ccw2.png",
+        "path": "ds_clean/img/aug_rotate_ccw2.png",
         "origin": "augmented",
         "distance": 0.015
       },
       {
-        "path": "img/aug_rotate_cw2.png",
+        "path": "ds_clean/img/aug_rotate_cw2.png",
         "origin": "augmented",
         "distance": 0.017
       },
       {
-        "path": "img/aug_contrast_up.png",
+        "path": "ds_clean/img/aug_contrast_up.png",
         "origin": "augmented",
         "distance": 0.001
       },
       {
-        "path": "img/aug_contrast_down.png",
+        "path": "ds_clean/img/aug_contrast_down.png",
         "origin": "augmented",
         "distance": 0.002
       },
       {
-        "path": "img/aug_grain.png",
+        "path": "ds_clean/img/aug_grain.png",
         "origin": "augmented",
         "distance": 0.043
       },
       {
-        "path": "img/aug_soft.png",
+        "path": "ds_clean/img/aug_soft.png",
         "origin": "augmented",
         "distance": 0.008
       }
     ],
     "note": "судья принимает 17 из 17 кадров при баре 0.35, медиана 0.009"
   },
-  "root": "demo/lora_dataset"
+  "root": "ds_clean"
 }

@@ -306,14 +306,20 @@ class ShippedDataset(unittest.TestCase):
     LoRA» означало «сначала добудь ключ» — то есть на демо-дне шаг мог не
     состояться по причине, не имеющей отношения ни к коду, ни к карте.
 
-    Собран живьём 2026-08-14 на `nanobanana-2` с промтом, просящим ЖАНР
-    любительской съёмки: 24 порождённых -> взято 22 (92%) при баре FaceNet
-    0.30, дистанции 0.14..0.24, плюс 1 реальный кадр и 8 аугментаций = 31,
-    35 с повторами.
+    ТРЕТЬЯ редакция, и первая, которую признаёт СУДЬЯ. Ни одного порождённого
+    кадра: 1 реальный + 16 локальных аугментаций = 17, 21 с повторами.
+    ArcFace принимает 17 из 17 при баре 0.35, медиана 0.009, худший 0.043.
 
-    Прежняя редакция набора (`nanobanana`, промт про «качественное фото») дала
-    70% отбора при 23 кадрах. Заменена не по вкусу: выше и доля отбора, и
-    сходство лица.
+    Почему выброшены порождённые, хотя их отбирали и отобрали. Вскрытие судьёй
+    показало, что 22 порождённых кадра второй редакции стоят 0.418..0.544 —
+    для судьи это другой человек. Обученная на них LoRA дала 0.547 на поясном
+    кадре, то есть ПОПАЛА В ОБЛАКО СВОЕГО НАБОРА и дальше уйти не могла.
+    Отбор пропустил это потому, что бар FaceNet калиброван на «свои против
+    чужих», а порождённые падают в дыру между облаками — «похожий, но не тот».
+
+    Цена замены названа честно: один ракурс вместо разнообразия. Личность за
+    это платит меньше, чем платила за чужое лицо, а позу и сцену держат
+    ControlNet и промт, а не LoRA.
     """
 
     ROOT = Path(__file__).resolve().parents[2] / "demo" / "lora_dataset"
@@ -321,7 +327,7 @@ class ShippedDataset(unittest.TestCase):
     def test_it_is_on_disk_and_loads(self):
         self.assertTrue(self.ROOT.is_dir(), f"нет {self.ROOT}")
         pairs = train.load_pairs(self.ROOT)
-        self.assertEqual(len(pairs), 31)
+        self.assertEqual(len(pairs), 17)
         for path, caption, _ in pairs:
             self.assertTrue(Path(path).exists(), path)
             self.assertIn("ohwx_person", caption)
@@ -330,7 +336,7 @@ class ShippedDataset(unittest.TestCase):
         # Число из LORA_RUNBOOK обязано пересчитываться командой, а не
         # запоминаться: разошедшееся с кодом число хуже отсутствующего.
         pairs = train.load_pairs(self.ROOT)
-        self.assertEqual(train.steps_for(pairs, epochs=10), 350)
+        self.assertEqual(train.steps_for(pairs, epochs=10), 210)
 
     def test_the_manifest_paths_are_relative_and_survive_a_move(self):
         man = json.loads((self.ROOT / "manifest.json").read_text(
@@ -361,11 +367,11 @@ class ShippedDataset(unittest.TestCase):
         files = set(r.stdout.split())
         self.assertIn("demo/lora_dataset/manifest.json", files)
         self.assertEqual(
-            sum(1 for f in files if f.endswith(".png")), 31,
-            "в индексе не все 31 кадр набора")
+            sum(1 for f in files if f.endswith(".png")), 17,
+            "в индексе не все 17 кадров набора")
         self.assertEqual(
-            sum(1 for f in files if f.endswith(".txt")), 31,
-            "в индексе не все 31 подпись — кадр без подписи тянет на триггер "
+            sum(1 for f in files if f.endswith(".txt")), 17,
+            "в индексе не все 17 подписей — кадр без подписи тянет на триггер "
             "фон, свет и одежду")
 
 
