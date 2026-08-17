@@ -286,6 +286,73 @@ class TheFourthNumberSeparatesTwoDifferentIllnesses(unittest.TestCase):
         self.assertIn("УТЕЧКА К АКТЁРУ ДРАЙВИНГА", got["note"])
 
 
+class IdentityIsMeasuredAfterFaceRestoreAndReportedAsAPair(unittest.TestCase):
+    """ХЭНДОФ §6 A. Один бар на обе половины — иначе числа несравнимы.
+
+    Кадрировка во весь рост даёт лицо 63–80 px против видео-бара 100, то есть
+    «судить нечем». Доводка лица переводит кадры в судимые, и пара «до → после»
+    показывает, что дала именно она.
+    """
+
+    def tearDown(self):
+        self.restore()
+
+    def _pair(self, table, sizes=None):
+        self.restore = _with_instrument(_FakeInstrument(table, sizes))
+        return fi.before_after_restore(
+            ["/x/b1.png", "/x/b2.png"], ["/x/a1.png", "/x/a2.png"],
+            raw_photo="/x/raw.png", min_face_px=100)
+
+    def test_one_bar_serves_both_halves(self):
+        from ball_reel.identity_arcface import SAME_PERSON_MAX
+
+        got = self._pair({"raw.png": 0.0, "b1.png": 0.4, "b2.png": 0.42,
+                          "a1.png": 0.2, "a2.png": 0.22})
+        self.assertEqual(got["bar"], SAME_PERSON_MAX)
+        self.assertNotIn("min_face_px", got)
+
+    def test_the_pair_is_reported_not_just_the_better_number(self):
+        got = self._pair({"raw.png": 0.0, "b1.png": 0.4, "b2.png": 0.42,
+                          "a1.png": 0.2, "a2.png": 0.22})
+        self.assertIsNotNone(got["before"]["median"])
+        self.assertIsNotNone(got["after"]["median"])
+        self.assertIn("ДО доводки", got["note"])
+        self.assertIn("ПОСЛЕ", got["note"])
+        self.assertLess(got["delta"], 0, "фикстура задумана как улучшение")
+
+    def test_frames_that_were_unjudgeable_and_became_judgeable_are_not_a_loss(self):
+        """Главное различие модуля: первое измерение — не ухудшение."""
+        got = self._pair(
+            {"raw.png": 0.0, "b1.png": 0.4, "b2.png": 0.42,
+             "a1.png": 0.5, "a2.png": 0.52},
+            sizes={"raw.png": 200, "b1.png": 60, "b2.png": 60,
+                   "a1.png": 200, "a2.png": 200})
+        self.assertEqual(got["before"]["judged"], 0)
+        self.assertEqual(got["after"]["judged"], 2)
+        self.assertEqual(got["judged_gain"], 2)
+        self.assertIsNone(got["delta"])
+        self.assertIn("НЕ ухудшение, а первое измерение", got["note"])
+
+    def test_the_judged_gain_is_printed_even_when_it_is_zero(self):
+        got = self._pair({"raw.png": 0.0, "b1.png": 0.4, "b2.png": 0.42,
+                          "a1.png": 0.2, "a2.png": 0.22})
+        self.assertEqual(got["judged_gain"], 0)
+        self.assertIn("не прибавилось", got["note"])
+
+    def test_nothing_judgeable_after_restore_is_unmeasured(self):
+        got = self._pair(
+            {"raw.png": 0.0, "b1.png": 0.4, "b2.png": 0.42},
+            sizes={"raw.png": 200})
+        self.assertEqual(got["outcome"], fi.UNMEASURED)
+
+    def test_a_worse_median_after_restore_shows_as_positive_delta(self):
+        """Негативный контроль: пара умеет показать и ухудшение."""
+        got = self._pair({"raw.png": 0.0, "b1.png": 0.2, "b2.png": 0.22,
+                          "a1.png": 0.5, "a2.png": 0.52})
+        self.assertGreater(got["delta"], 0)
+        self.assertEqual(got["outcome"], fi.FAIL)
+
+
 class TheLoraIsAcceptedByWhetherItSpoilsDRaw(unittest.TestCase):
     """Приёмка гипотезы LoRA темплейта одним прямым вопросом.
 
@@ -329,15 +396,18 @@ class TheInstrumentIsAParameterAndItsLicenceIsSpoken(unittest.TestCase):
             fi._instrument("auraface")
         self.assertIn("обнуляет", str(caught.exception))
 
-    def test_the_non_commercial_licence_reaches_the_report(self):
+    def test_the_non_commercial_licence_reaches_the_report_without_blocking(self):
         restore = _with_instrument(_FakeInstrument(
             {"raw.png": 0.0, "f1.png": 0.05}))
         try:
             got = fi.axis(["/x/f1.png"], raw_photo="/x/raw.png")
         finally:
             restore()
-        self.assertIn("NON-COMMERCIAL", got["note"])
+        self.assertIn("non-commercial", got["note"].lower())
         self.assertIn("пересчёт всех порогов", got["note"].lower())
+        self.assertIn("работу не блокирует", got["note"],
+                      "лицензия подана как блокер — ХЭНДОФ §10 говорит, что на "
+                      "этапе разработки она не блокирует, это вопрос отгрузки")
 
 
 class TheSizeFilterChangesTheNumberAndSaysSo(unittest.TestCase):

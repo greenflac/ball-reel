@@ -58,10 +58,14 @@ from .fork_identity import PASS, UNMEASURED
 #: Корзины MVP. Две, и матрицы «N темплейтов x M фигур» здесь не будет: её
 #: стоимость растёт произведением, а двух плеч достаточно, чтобы механизм
 #: показал себя или не показал.
-BUCKET_A = "A"          # фигура с выраженными бёдрами: плечи узкие относительно бёдер
-BUCKET_B = "B"          # фигура с плечами шире бёдер
+#: Названы по ХЭНДОФ §2 и §6 F, а не буквами: буква «A» ничего не говорит тому,
+#: кто читает отчёт, и на разборе её приходится расшифровывать по памяти.
+#: Разрыв между двумя корзинами взят максимальным намеренно — это самый строгий
+#: тест механизма, а не самый удобный.
+BUCKET_DRIVING = "как в драйвинге"      # плечи широкие относительно бёдер
+BUCKET_FULL_W40 = "полная женщина 40+"  # бёдра выраженные, плечи уже
 UNSURE = "не уверен"
-BUCKETS = (BUCKET_A, BUCKET_B, UNSURE)
+BUCKETS = (BUCKET_DRIVING, BUCKET_FULL_W40, UNSURE)
 
 #: По какому числу делим. `shoulder_to_hip` — отношение уже нормированных на
 #: торс ширин, то есть безразмерное вдвойне и сравнимое между людьми. Ширины по
@@ -92,7 +96,7 @@ UNSURE_BAND = 0.08
 
 def route(photo: str | Path | None = None, *, proportions: dict | None = None,
           split: float = SPLIT, band: float = UNSURE_BAND) -> dict:
-    """Корзина A / корзина B / не уверен. Три исхода, третий обязателен.
+    """«как в драйвинге» / «полная женщина 40+» / «не уверен». Третий обязателен.
 
     Принимает либо путь к фотографии, либо уже снятые пропорции — второе для
     тестов и для случая, когда пропорции уже посчитаны выше по течению и
@@ -121,9 +125,9 @@ def route(photo: str | Path | None = None, *, proportions: dict | None = None,
 
     low, high = split - band, split + band
     if value < low:
-        bucket, why = BUCKET_A, f"{value} ниже {low:.4f}"
+        bucket, why = BUCKET_FULL_W40, f"{value} ниже {low:.4f}"
     elif value > high:
-        bucket, why = BUCKET_B, f"{value} выше {high:.4f}"
+        bucket, why = BUCKET_DRIVING, f"{value} выше {high:.4f}"
     else:
         bucket, why = UNSURE, (f"{value} внутри полосы [{low:.4f}, {high:.4f}], "
                                f"где у нас нет оснований выбирать")

@@ -25,33 +25,33 @@ def _p(value):
 class FakedProportionsMoveTheDecision(unittest.TestCase):
     """Приёмка §3b: тест, который умеет краснеть."""
 
-    def test_a_narrow_shoulder_figure_goes_to_A(self):
-        self.assertEqual(fbr.route(proportions=_p(1.30))["bucket"], fbr.BUCKET_A)
+    def test_a_narrow_shoulder_figure_goes_to_the_fuller_bucket(self):
+        self.assertEqual(fbr.route(proportions=_p(1.30))["bucket"], fbr.BUCKET_FULL_W40)
 
-    def test_a_broad_shoulder_figure_goes_to_B(self):
-        self.assertEqual(fbr.route(proportions=_p(1.90))["bucket"], fbr.BUCKET_B)
+    def test_a_broad_shoulder_figure_goes_to_the_driving_bucket(self):
+        self.assertEqual(fbr.route(proportions=_p(1.90))["bucket"], fbr.BUCKET_DRIVING)
 
     def test_moving_the_number_across_the_split_moves_the_bucket(self):
         low = fbr.route(proportions=_p(fbr.SPLIT - fbr.UNSURE_BAND - 0.01))
         high = fbr.route(proportions=_p(fbr.SPLIT + fbr.UNSURE_BAND + 0.01))
-        self.assertEqual(low["bucket"], fbr.BUCKET_A)
-        self.assertEqual(high["bucket"], fbr.BUCKET_B)
+        self.assertEqual(low["bucket"], fbr.BUCKET_FULL_W40)
+        self.assertEqual(high["bucket"], fbr.BUCKET_DRIVING)
         self.assertNotEqual(low["bucket"], high["bucket"])
 
     def test_the_split_is_guarded_in_both_directions(self):
         """Т1: подмена константы-решения строже и слабее."""
         value = _p(1.30)
         self.assertEqual(fbr.route(proportions=value, split=1.53)["bucket"],
-                         fbr.BUCKET_A)
+                         fbr.BUCKET_FULL_W40)
         self.assertEqual(fbr.route(proportions=value, split=1.00)["bucket"],
-                         fbr.BUCKET_B,
+                         fbr.BUCKET_DRIVING,
                          "точка раздела сдвинута ниже значения, а корзина не "
                          "изменилась — значит она ни на что не влияет")
 
     def test_the_band_is_guarded_in_both_directions(self):
         value = _p(1.55)
         self.assertEqual(fbr.route(proportions=value, band=0.0)["bucket"],
-                         fbr.BUCKET_B, "полоса снята, а решение не принято")
+                         fbr.BUCKET_DRIVING, "полоса снята, а решение не принято")
         self.assertEqual(fbr.route(proportions=value, band=5.0)["bucket"],
                          fbr.UNSURE,
                          "полоса шире всего диапазона, а корзина всё равно "
@@ -104,26 +104,26 @@ class AgreementCountsThreeNumbersNotOne(unittest.TestCase):
     """Маршрутизатор, отдающий человеку всё, согласуется идеально и не работает."""
 
     def test_full_agreement_on_decided_examples(self):
-        got = fbr.agreement([(_p(1.20), fbr.BUCKET_A),
-                             (_p(1.95), fbr.BUCKET_B)])
+        got = fbr.agreement([(_p(1.20), fbr.BUCKET_FULL_W40),
+                             (_p(1.95), fbr.BUCKET_DRIVING)])
         self.assertEqual((got["agreed"], got["disagreed"]), (2, 0))
         self.assertEqual(got["accuracy_on_decided"], 1.0)
 
     def test_a_disagreement_is_reported_with_what_was_chosen(self):
-        got = fbr.agreement([(_p(1.20), fbr.BUCKET_B)])
+        got = fbr.agreement([(_p(1.20), fbr.BUCKET_DRIVING)])
         self.assertEqual(got["disagreed"], 1)
-        self.assertEqual(got["disagreements"][0][2], fbr.BUCKET_A)
+        self.assertEqual(got["disagreements"][0][2], fbr.BUCKET_FULL_W40)
 
     def test_deferring_everything_is_not_reported_as_success(self):
-        got = fbr.agreement([(_p(fbr.SPLIT), fbr.BUCKET_A),
-                             (_p(fbr.SPLIT), fbr.BUCKET_B)])
+        got = fbr.agreement([(_p(fbr.SPLIT), fbr.BUCKET_FULL_W40),
+                             (_p(fbr.SPLIT), fbr.BUCKET_DRIVING)])
         self.assertEqual(got["deferred"], 2)
         self.assertIsNone(got["accuracy_on_decided"])
         self.assertIn("не сделал ничего", got["note"])
 
     def test_the_deferral_share_is_printed_next_to_the_accuracy(self):
-        got = fbr.agreement([(_p(1.20), fbr.BUCKET_A),
-                             (_p(fbr.SPLIT), fbr.BUCKET_A)])
+        got = fbr.agreement([(_p(1.20), fbr.BUCKET_FULL_W40),
+                             (_p(fbr.SPLIT), fbr.BUCKET_FULL_W40)])
         self.assertEqual(got["deferral_share"], 0.5)
         self.assertEqual(got["accuracy_on_decided"], 1.0)
 
@@ -132,7 +132,7 @@ class AgreementCountsThreeNumbersNotOne(unittest.TestCase):
         self.assertEqual(got["outcome"], UNMEASURED)
 
     def test_the_note_admits_the_handful_does_not_exist_yet(self):
-        got = fbr.agreement([(_p(1.20), fbr.BUCKET_A)])
+        got = fbr.agreement([(_p(1.20), fbr.BUCKET_FULL_W40)])
         self.assertEqual(got["outcome"], PASS)
         self.assertIn("НЕПРОВЕРЕНО", got["note"])
 

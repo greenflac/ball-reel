@@ -67,15 +67,21 @@ from .identity_arcface import HARD_DRIFT_MAX, SAME_PERSON_MAX
 #: вызывающего, а не следствием правки импорта.
 DEFAULT_INSTRUMENT = "identity_arcface"
 
-#: ЛИЦЕНЗИОННЫЙ БЛОКЕР РЕЛИЗА, а не примечание. Веса `buffalo_l`, на которых
-#: сняты все числа проекта, идут под non-commercial условиями InsightFace, а
-#: продукт коммерческий. Цена замены прибора известна и велика: ПЕРЕСЧЁТ ВСЕХ
-#: ПОРОГОВ, потому что 0.35 и 0.6 откалиброваны на этой шкале и на другой не
-#: значат ничего. Строка живёт в коде, чтобы попадать в отчёт вместе с числами,
-#: а не теряться в документе.
+#: УЧЁТНАЯ СТРОКА К ОТГРУЗКЕ, А НЕ БЛОКЕР РАБОТЫ. Веса `buffalo_l`, на которых
+#: сняты все числа проекта, идут под non-commercial условиями InsightFace.
+#: По ХЭНДОФ §10 лицензия на этапе разработки НЕ БЛОКИРУЕТ: прогон на своей
+#: машине не есть распространение. Поэтому строка ничего не запрещает — она
+#: едет вместе с числами в отчёт, чтобы к отгрузке вопрос не пришлось
+#: восстанавливать по памяти.
+#:
+#: Цена замены прибора известна и велика: ПЕРЕСЧЁТ ВСЕХ ПОРОГОВ, потому что
+#: 0.35 и 0.6 откалиброваны на этой шкале и на другой не значат ничего. Именно
+#: поэтому замена на AuraFace отложена (ХЭНДОФ §2), а прибор оставлен
+#: параметром.
 INSTRUMENT_LICENCE = {
-    "identity_arcface": ("buffalo_l / InsightFace — NON-COMMERCIAL. "
-                         "Блокер релиза. Цена замены: пересчёт всех порогов."),
+    "identity_arcface": ("buffalo_l / InsightFace — non-commercial. "
+                         "В учёт к отгрузке, работу не блокирует. "
+                         "Цена замены: пересчёт всех порогов."),
 }
 
 #: Три исхода вместо двух (Р1). «Не смогли» не сворачивается ни в один из двух.
@@ -309,6 +315,64 @@ def actor_leak_verdict(d_raw: dict, d_drv: dict) -> str:
                 f"клиента {d_raw['median']} — лицо утекло из драйвинга")
     return (f"{PASS}: до клиента {d_raw['median']}, до актёра "
             f"{d_drv['median']} — актёр дальше, утечки не видно")
+
+
+def before_after_restore(before_frames, after_frames, *,
+                         raw_photo: str | Path,
+                         instrument: str = DEFAULT_INSTRUMENT,
+                         min_face_px: int | None = None) -> dict:
+    """Личность ДО и ПОСЛЕ доводки лица, ОДНИМ баром, парой.
+
+    ЗАЧЕМ ЭТО НЕСУЩИЙ ШАГ, А НЕ СПРАВКА. Кадрировка во весь рост решена
+    владельцем, и у неё измеренное последствие: лицо выходит 63–80 px против
+    видео-бара 100 px, то есть покадровая ось чаще всего вернёт «судить нечем».
+    Это ОТСУТСТВИЕ ИЗМЕРЕНИЯ, а не провал. Доводка лица — то, что переводит
+    кадры из «нечем судить» в «судимо», поэтому личность меряется ПОСЛЕ неё, а
+    пара «до → после» показывает, что именно доводка дала.
+
+    ОДИН БАР НА ОБЕ ПОЛОВИНЫ, И ЭТО ГЛАВНОЕ ЗДЕСЬ. Разные бары для одних и тех
+    же пикселей — уже случавшийся на проекте дефект: два числа становятся
+    несравнимыми, и «стало лучше» перестаёт что-либо значить. Бар тут вообще не
+    параметр — он один и тот же по построению, взять два разные неоткуда.
+
+    Возвращает и «стало лучше», и «стало судимо» РАЗДЕЛЬНО: это разные события.
+    Кадр, который был «нечем судить», а стал судимым с плохим числом, — не
+    ухудшение, а первое измерение.
+    """
+    common = {"instrument": instrument, "min_face_px": min_face_px}
+    before = distances(before_frames, raw_photo, **common)
+    after = distances(after_frames, raw_photo, **common)
+
+    judged_gain = after["judged"] - before["judged"]
+    delta = (None if before["median"] is None or after["median"] is None
+             else round(after["median"] - before["median"], 4))
+
+    if after["median"] is None:
+        outcome = UNMEASURED
+    elif before["median"] is None:
+        outcome = PASS if after["outcome"] == PASS else after["outcome"]
+    else:
+        outcome = after["outcome"]
+
+    return {
+        "outcome": outcome,
+        "bar": SAME_PERSON_MAX,
+        "before": before, "after": after,
+        "delta": delta, "judged_gain": judged_gain,
+        "note": (
+            f"личность ОДНИМ баром {SAME_PERSON_MAX}. "
+            f"ДО доводки: медиана {before['median']}, судимо "
+            f"{before['judged']} из {before['total']}. "
+            f"ПОСЛЕ: медиана {after['median']}, судимо {after['judged']} из "
+            f"{after['total']}. "
+            + (f"Медиана сдвинулась на {delta}. " if delta is not None else
+               "Медианы не с чем сравнить — до доводки судить было нечем, и "
+               "это НЕ ухудшение, а первое измерение. ")
+            + (f"Судимых кадров стало больше на {judged_gain}."
+               if judged_gain > 0 else
+               f"Судимых кадров не прибавилось ({judged_gain})."
+               if judged_gain <= 0 else "")),
+    }
 
 
 def lora_regression(without: dict, with_lora: dict, *,

@@ -293,6 +293,78 @@ class TheAnswerToTheTenMinuteQuestionIsRecordedInCode(unittest.TestCase):
                         "раскладка разъехалась с чужим модулем")
 
 
+class TheGeometryContractIsCheckedOnCpuBeforeTheCard(unittest.TestCase):
+    """ХЭНДОФ §3.2: кратность 16 по сторонам, кратность 4 по длине.
+
+    Нарушение тихое: Comfy либо откажет уже после загрузки весов, либо молча
+    подгонит размер и сместит всё условие. Проверка стоит микросекунды на CPU.
+    """
+
+    def test_the_agreed_geometry_passes(self):
+        """480x848 на 77 кадрах — то, что стоит в стеке (ХЭНДОФ §3).
+
+        НАЙДЕННОЕ РАСХОЖДЕНИЕ, закреплённое тестом: §3.2 хэндофа говорит «длина
+        кратна 4», а §3 задаёт 77 кадров, и 77 на 4 не делится. Первоисточник
+        (`WanAnimateToVideo.doc.md:20`) говорит «default: 77, step: 4» при
+        минимуме 1 — то есть годны 1, 5, …, 77. Верх за файлом; проверка,
+        написанная по прозе, забраковала бы штатную геометрию.
+        """
+        got = fc.check_geometry(480, 848, 77)
+        self.assertTrue(got["ok"], got["note"])
+
+    def test_the_vendor_default_length_is_accepted(self):
+        self.assertTrue(fc.check_geometry(832, 480, 77)["ok"])
+
+    def test_a_length_that_is_a_plain_multiple_of_four_is_refused(self):
+        """Прямая проверка, что спор разрешён в пользу файла, а не прозы."""
+        got = fc.check_geometry(480, 848, 76)
+        self.assertFalse(got["ok"], "76 принято — значит читали «кратна 4»")
+        self.assertIn("шаге 4", got["note"])
+
+    def test_a_side_off_the_multiple_is_caught_and_the_neighbours_named(self):
+        got = fc.check_geometry(481, 848, 76)
+        self.assertFalse(got["ok"])
+        self.assertIn("не кратна 16", got["note"])
+        self.assertIn("480", got["note"])
+        self.assertIn("496", got["note"])
+
+    def test_a_length_off_the_step_is_caught_and_neighbours_named(self):
+        got = fc.check_geometry(480, 848, 78)
+        self.assertFalse(got["ok"])
+        self.assertIn("77", got["note"])
+        self.assertIn("81", got["note"])
+
+    def test_both_sides_are_checked_not_only_the_first(self):
+        got = fc.check_geometry(481, 849, 77)
+        self.assertEqual(len(got["problems"]), 2,
+                         "проверена только одна сторона — вторая пройдёт молча")
+
+    def test_nonsense_sizes_are_refused_rather_than_divided(self):
+        for w, h, n in ((0, 848, 77), (480, -16, 77), (480, 848, 0)):
+            with self.subTest(size=(w, h, n)):
+                self.assertFalse(fc.check_geometry(w, h, n)["ok"])
+
+    def test_the_multiples_are_the_ones_the_contract_names(self):
+        """Т2: литералы из §3.2, а не импорт из проверяемого модуля."""
+        self.assertEqual(fc.SIDE_MULTIPLE, 16)
+        self.assertEqual(fc.LENGTH_STEP, 4)
+        self.assertEqual(fc.LENGTH_MIN, 1)
+        self.assertEqual(fc.FACE_SIDE, 512)
+
+    def test_the_check_is_guarded_in_both_directions(self):
+        """Т1: подмена кратности обязана менять исход."""
+        original = fc.SIDE_MULTIPLE
+        try:
+            fc.SIDE_MULTIPLE = 1
+            self.assertTrue(fc.check_geometry(481, 849, 77)["ok"],
+                            "кратность снята, а размер всё равно отвергнут")
+            fc.SIDE_MULTIPLE = 512
+            self.assertFalse(fc.check_geometry(480, 848, 77)["ok"],
+                             "кратность поднята, а размер всё равно принят")
+        finally:
+            fc.SIDE_MULTIPLE = original
+
+
 class TheSequenceReportsThreeOutcomes(unittest.TestCase):
     """Р1/Р2: «не смогли» не сворачивается ни в успех, ни в провал."""
 

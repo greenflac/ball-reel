@@ -31,14 +31,23 @@ def _weights_ready() -> bool:
         return False
 
 
-def _points(head_y=100.0, body_top=140.0, body_bottom=600.0, score=0.9):
-    """133 точки: голова сверху, тело ниже. Числа литеральные (Т2)."""
+def _points(head_y=100.0, body_top=140.0, body_bottom=600.0, score=0.9,
+            hip_y=None):
+    """133 точки: голова сверху, тело ниже. Числа литеральные (Т2).
+
+    Таз задаётся ОТДЕЛЬНО и по умолчанию у самого низа: при кадрировке по пояс
+    нижняя граница берётся именно по нему, и таз, случайно оказавшийся выше
+    подбородка, даёт вырожденный прямоугольник. Поймано прогоном, когда
+    умолчанием кадрировки стало `waist_up`.
+    """
     pts = [(300.0, body_bottom, score)] * fork_channels.WHOLEBODY_JOINTS
     for i in list(fork_channels.group_indices("face")) + list(range(0, 5)):
         pts[i] = (300.0, head_y, score)
     for i in fork_channels.channel_indices("body"):
         if i >= 5:
             pts[i] = (300.0 + (i % 7) * 20, body_top + (i % 11) * 30, score)
+    for i in (11, 12):
+        pts[i] = (300.0, body_bottom if hip_y is None else hip_y, score)
     return pts
 
 
@@ -47,7 +56,7 @@ class TheCropStartsBelowTheWholeHead(unittest.TestCase):
 
     def test_the_top_edge_is_below_the_lowest_head_point(self):
         pts = _points(head_y=100.0, body_top=140.0)
-        box = fld.body_box(pts, 800, 800)
+        box = fld.body_box(pts, 800, 800, framing="full_body")
         self.assertIsNotNone(box)
         self.assertGreater(box[1], 100.0,
                            "верх кропа выше точки головы — лицо останется")
@@ -57,7 +66,7 @@ class TheCropStartsBelowTheWholeHead(unittest.TestCase):
         pts = _points(head_y=300.0, body_top=140.0)
         lifted = list(pts)
         lifted[5] = (280.0, 100.0, 0.9)          # плечо ВЫШЕ подбородка
-        box = fld.body_box(lifted, 800, 800)
+        box = fld.body_box(lifted, 800, 800, framing="full_body")
         self.assertGreater(box[1], 300.0,
                            "рез поехал за плечом — в кадре осталось лицо")
 
@@ -70,12 +79,12 @@ class TheCropStartsBelowTheWholeHead(unittest.TestCase):
         pts = _points()
         for i in list(fork_channels.group_indices("face")) + list(range(0, 5)):
             pts[i] = (300.0, 100.0, 0.0)
-        box = fld.body_box(pts, 800, 800)
+        box = fld.body_box(pts, 800, 800, framing="full_body")
         self.assertIsNotNone(box, "без головы кроп не построился вовсе")
 
     def test_the_box_stays_inside_the_frame(self):
         pts = _points(body_bottom=5000.0)
-        box = fld.body_box(pts, 800, 800)
+        box = fld.body_box(pts, 800, 800, framing="full_body")
         self.assertLessEqual(box[2], 800)
         self.assertLessEqual(box[3], 800)
         self.assertGreaterEqual(box[0], 0)
@@ -87,13 +96,71 @@ class TheCropStartsBelowTheWholeHead(unittest.TestCase):
         original = fld.CHIN_MARGIN
         try:
             fld.CHIN_MARGIN = 0.0
-            tight = fld.body_box(pts, 800, 800)[1]
+            tight = fld.body_box(pts, 800, 800, framing="full_body")[1]
             fld.CHIN_MARGIN = 0.5
-            loose = fld.body_box(pts, 800, 800)[1]
+            loose = fld.body_box(pts, 800, 800, framing="full_body")[1]
         finally:
             fld.CHIN_MARGIN = original
         self.assertGreater(loose, tight,
                            "отступ от подбородка ни на что не влияет")
+
+
+class TheSetIsBuiltForTheFramingTheTemplateActuallyGives(unittest.TestCase):
+    """Иначе LoRA учится на одном масштабе тела, а применяется на другом.
+
+    Не вкус, а арифметика прибора: полный рост при высоте 848 даёт лицо
+    63–80 px против бара ArcFace 100 px для видео, то есть «судить нечем»;
+    по пояс — 126–159 px. Источник числа — §4a хэндофа, здесь не пересчитывается.
+    """
+
+    def _pts(self):
+        pts = _points(head_y=100.0, body_top=140.0, body_bottom=600.0)
+        for i in (11, 12):                       # таз явно посередине
+            pts[i] = (300.0, 400.0, 0.9)
+        return pts
+
+    def test_waist_up_cuts_at_the_hips_and_full_body_does_not(self):
+        pts = self._pts()
+        waist = fld.body_box(pts, 800, 800, framing="waist_up")
+        full = fld.body_box(pts, 800, 800, framing="full_body")
+        self.assertAlmostEqual(waist[3], 400.0, places=6)
+        self.assertGreater(full[3], waist[3],
+                           "полный рост не ниже пояса — кадрировка ни на что "
+                           "не влияет")
+
+    def test_the_default_is_full_body_because_the_owner_decided_the_framing(self):
+        """ХЭНДОФ §2. Набор идёт за кадрировкой темплейта, а не наоборот.
+
+        Здесь стояло `waist_up` — по предыдущей редакции брифинга, где
+        кадрировка ещё не была решена. Цена полного роста (лицо 63–80 px против
+        видео-бара 100) закрывается доводкой лица на выходе, а не пересборкой
+        набора под другой масштаб.
+        """
+        self.assertEqual(fld.DEFAULT_FRAMING, "full_body")
+
+    def test_an_unknown_framing_is_refused_before_any_work(self):
+        with self.assertRaises(ValueError) as caught:
+            fld.body_box(None, 800, 800, framing="close_up")
+        self.assertIn("close_up", str(caught.exception))
+
+    def test_the_framing_vocabulary_is_the_pipelines_own(self):
+        """Е1: разъехавшись, список дал бы набор под несуществующую кадрировку."""
+        from ball_reel.skeleton import FRAMINGS
+
+        self.assertIs(fld.FRAMINGS, FRAMINGS)
+        self.assertIn(fld.DEFAULT_FRAMING, FRAMINGS)
+
+    def test_waist_up_without_visible_hips_is_refused_rather_than_guessed(self):
+        pts = self._pts()
+        for i in (11, 12):
+            pts[i] = (300.0, 400.0, 0.0)
+        self.assertIsNone(fld.body_box(pts, 800, 800, framing="waist_up"))
+
+    def test_the_framing_reaches_the_passport(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fld.build([], tmp, build_type="т", domain="photoreal",
+                            framing="full_body")
+        self.assertEqual(got["passport"]["framing"], "full_body")
 
 
 class TheFaceCheckIsAnInstrumentNotAPromise(unittest.TestCase):
@@ -176,7 +243,7 @@ class TheBuildReportsNumbersAndRefusesABadSet(unittest.TestCase):
         original = fld.crop_sample
         seq = list(outcomes)
 
-        def fake(frame, out):
+        def fake(frame, out, *, framing=fld.DEFAULT_FRAMING):
             o = seq.pop(0)
             if o == PASS:
                 return {"outcome": PASS, "path": str(out), "note": "ok"}

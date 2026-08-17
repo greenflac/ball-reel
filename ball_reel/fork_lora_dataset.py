@@ -73,6 +73,32 @@ from pathlib import Path
 from . import fork_channels
 from .fork_identity import FAIL, PASS, UNMEASURED
 
+#: Кадрировки. НЕ СВОЙ список: берётся у `skeleton`, потому что это один и тот
+#: же словарь понятий, и разъехавшись, он дал бы набор под кадрировку, которой
+#: пайплайн не умеет строить (Е1).
+from .skeleton import FRAMINGS  # noqa: E402
+
+#: Под какую кадрировку собирается набор. **Во весь рост — решение владельца**
+#: (ХЭНДОФ §2), и набор обязан идти за ним: если темплейт отдаёт полный рост, а
+#: набор собран по пояс, LoRA учится на одном масштабе тела и применяется на
+#: другом.
+#:
+#: ЦЕНА ЭТОГО РЕШЕНИЯ ИЗМЕРЕНА И ЗАКРЫВАЕТСЯ НЕ ЗДЕСЬ. Полный рост при высоте
+#: 848 даёт лицо 63–80 px против бара ArcFace в 100 px для видео — то есть
+#: покадровая ось личности будет чаще всего возвращать «СУДИТЬ НЕЧЕМ», и это
+#: отсутствие измерения, а не провал. Лечится не кадрировкой набора, а
+#: доводкой лица на выходе, которая по ХЭНДОФ §2 объявлена несущим шагом
+#: стека; личность меряется ПОСЛЕ неё.
+#:
+#: Числа не наши и здесь не пересчитываются: `skeleton.face_share()` и
+#: `identity_arcface`, сведены в ХЭНДОФ §4.
+#:
+#: DEBT(2026-08-17): здесь стояло `waist_up` — я поставил его по предыдущей
+#: редакции брифинга, где кадрировка ещё не была решена владельцем. Финальный
+#: хэндоф решает иначе; перечёркнуто, а не стёрто, потому что тесты на
+#: `waist_up` остаются годными и нужны, если решение когда-нибудь вернётся.
+DEFAULT_FRAMING = "full_body"
+
 #: Ранг адаптера. ВЫБРАНО — обоснование в докстринге модуля. Опорная точка:
 #: умолчание тренера 32 (прочитано из train.py:15), берём вдвое ниже.
 DEFAULT_RANK = 16
@@ -112,7 +138,8 @@ def _instrument():
     return identity_arcface
 
 
-def body_box(points, width: int, height: int) -> tuple | None:
+def body_box(points, width: int, height: int,
+             framing: str = DEFAULT_FRAMING) -> tuple | None:
     """Прямоугольник тела БЕЗ головы, в пикселях, или None.
 
     Верхняя граница — ниже самой нижней точки головы, а не «на уровне плеч»:
@@ -120,7 +147,19 @@ def body_box(points, width: int, height: int) -> tuple | None:
     в кадре половину лица. Голова берётся целиком — 68 лицевых точек плюс
     нос, глаза и уши COCO, — потому что край челюсти в лицевые точки входит,
     а ухо нет.
+
+    НИЖНЯЯ граница зависит от КАДРИРОВКИ, и это не украшение. Набор собирается
+    под ту кадрировку, которую темплейт реально даёт: если темплейт по пояс, а
+    набор в рост, LoRA учится на одном масштабе тела, а применяется на другом.
+    `waist_up` режет по тазу — ровно там же, где `skeleton._window`, и по той
+    же причине, что записана там: опущенные руки иначе вернут кадр к полному
+    росту и вся затея развалится.
     """
+    # Негодный аргумент отвергается ДО любой работы (П2): проверка стоит
+    # микросекунды, а стояла она ниже разбора точек.
+    if framing not in FRAMINGS:
+        raise ValueError(
+            f"неизвестная кадрировка {framing!r}; бывают только {FRAMINGS}")
     if not points:
         return None
     n = len(points)
@@ -138,7 +177,14 @@ def body_box(points, width: int, height: int) -> tuple | None:
     xs = [p[0] for p in body]
     ys = [p[1] for p in body]
     x0, x1 = max(0.0, min(xs)), min(float(width), max(xs))
-    y1 = min(float(height), max(ys))
+    if framing == "waist_up":
+        hips = [points[i][1] for i in (11, 12)
+                if i < n and points[i][2] >= fork_channels.MIN_SCORE]
+        if not hips:
+            return None
+        y1 = min(float(height), max(hips))
+    else:
+        y1 = min(float(height), max(ys))
 
     if head:
         chin = max(p[1] for p in head)
@@ -172,7 +218,8 @@ def face_free(path: str | Path) -> dict:
                      f"идёт")}
 
 
-def crop_sample(frame_path: str | Path, out_path: str | Path) -> dict:
+def crop_sample(frame_path: str | Path, out_path: str | Path,
+                *, framing: str = DEFAULT_FRAMING) -> dict:
     """Один кроп тела без головы, ПРОВЕРЕННЫЙ прибором. Три исхода.
 
     Проверка идёт ПОСЛЕ записи кропа и по самому файлу, а не по намерению:
@@ -189,7 +236,7 @@ def crop_sample(frame_path: str | Path, out_path: str | Path) -> dict:
 
     with Image.open(src) as im:
         rgb = im.convert("RGB")
-        box = body_box(points, *rgb.size)
+        box = body_box(points, *rgb.size, framing=framing)
         if box is None:
             return {"outcome": UNMEASURED, "path": None,
                     "note": f"{src.name}: тела в кадре нет"}
@@ -213,7 +260,8 @@ def crop_sample(frame_path: str | Path, out_path: str | Path) -> dict:
 
 
 def build(frame_paths, out_dir: str | Path, *, build_type: str,
-          domain: str, rank: int = DEFAULT_RANK) -> dict:
+          domain: str, rank: int = DEFAULT_RANK,
+          framing: str = DEFAULT_FRAMING) -> dict:
     """Собрать набор темплейта и написать его паспорт. Отчёт числами (Р2).
 
     `build_type` и `domain` — ВХОД, а не вывод. Классификатор телосложения
@@ -226,7 +274,8 @@ def build(frame_paths, out_dir: str | Path, *, build_type: str,
     frames = [Path(p) for p in frame_paths]
     kept, face_rejected, unmeasured, too_small = [], [], [], []
     for i, p in enumerate(frames):
-        got = crop_sample(p, out / "img" / f"body_{i:04d}.png")
+        got = crop_sample(p, out / "img" / f"body_{i:04d}.png",
+                          framing=framing)
         if got["outcome"] == PASS:
             kept.append(got["path"])
         elif got["outcome"] == UNMEASURED:
@@ -250,6 +299,7 @@ def build(frame_paths, out_dir: str | Path, *, build_type: str,
 
     passport = {
         "build_type": build_type, "domain": domain, "rank": rank,
+        "framing": framing,
         "trainer_default_rank": TRAINER_DEFAULT_RANK,
         "samples": len(kept), "from_frames": total,
         "face_rejected": rejected, "too_small": len(too_small),

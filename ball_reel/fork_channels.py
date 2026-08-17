@@ -138,6 +138,64 @@ HAND_EDGES = tuple(
 )
 
 
+#: Требования к размерности, снятые с контракта ноды (ХЭНДОФ §3.2), а не
+#: выдуманные. Нарушение каждого — ТИХОЕ: Comfy либо откажет уже на карте,
+#: после того как веса загружены, либо молча подгонит и сместит всё условие.
+#: Дешевле проверить здесь, на CPU, за микросекунды (П2).
+#: ИСТОЧНИК — `workflows/upstream/WanAnimateToVideo.doc.md`, строки 18–20, а не
+#: пересказ. Дословно: `width` «default: 832, step: 16», `height` «default: 480,
+#: step: 16», `length` «default: 77, step: 4», диапазон длины «1 to
+#: MAX_RESOLUTION».
+SIDE_MULTIPLE = 16          # ширина и высота кратны 16
+
+#: РАСХОЖДЕНИЕ, НАЙДЕННОЕ ПРОГОНОМ И РАЗРЕШЁННОЕ В ПОЛЬЗУ ФАЙЛА. Хэндоф §3.2
+#: говорит «длина кратна 4», но §3 и §3.1 того же хэндофа задают **77 кадров**,
+#: а 77 на 4 не делится. Оба утверждения одновременно верными быть не могут.
+#:
+#: Первоисточник разрешает спор: у `length` не «кратность 4», а **шаг 4 от
+#: минимума 1** — то есть допустимы 1, 5, 9, …, 77, 81. Вендорский темплейт
+#: ставит ровно 77 (`widgets_values` узла `WanAnimateToVideo`), и это его
+#: собственное умолчание.
+#:
+#: Первая редакция этой проверки читала «кратна 4» буквально и **отвергала 77**
+#: — то есть забраковала бы штатную геометрию стека. Поймано тем, что число из
+#: §3 не прошло проверку, написанную по §3.2.
+LENGTH_STEP = 4             # шаг 4
+LENGTH_MIN = 1              # от 1: годны длины вида 1 + 4k
+FACE_SIDE = 512             # лицевой канал вендор снимает при 512
+
+
+def check_geometry(width: int, height: int, length: int) -> dict:
+    """Годится ли геометрия для `WanAnimateToVideo`. Числа в отчёт, не флаг.
+
+    Отдельной функцией, а не проверкой внутри отрисовки (Т5): развилка,
+    спрятанная в вызове, который требует весов и сотни кадров, недостижима для
+    теста и деградирует молча.
+    """
+    problems = []
+    for name, value in (("ширина", width), ("высота", height)):
+        if value <= 0:
+            problems.append(f"{name} {value} — не размер")
+        elif value % SIDE_MULTIPLE:
+            problems.append(
+                f"{name} {value} не кратна {SIDE_MULTIPLE} "
+                f"(ближайшие {value // SIDE_MULTIPLE * SIDE_MULTIPLE} и "
+                f"{(value // SIDE_MULTIPLE + 1) * SIDE_MULTIPLE})")
+    if length < LENGTH_MIN:
+        problems.append(f"длина {length} меньше минимума {LENGTH_MIN}")
+    elif (length - LENGTH_MIN) % LENGTH_STEP:
+        below = length - (length - LENGTH_MIN) % LENGTH_STEP
+        problems.append(
+            f"длина {length} не лежит на шаге {LENGTH_STEP} от {LENGTH_MIN} "
+            f"(ближайшие {below} и {below + LENGTH_STEP})")
+    return {
+        "ok": not problems, "problems": problems,
+        "width": width, "height": height, "length": length,
+        "note": (f"геометрия {width}x{height}, {length} кадров: "
+                 + ("годна" if not problems else "; ".join(problems))),
+    }
+
+
 def group_indices(group: str) -> range:
     """Индексы одной группы COCO-WholeBody.
 
