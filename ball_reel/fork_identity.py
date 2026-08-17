@@ -216,6 +216,7 @@ def distances(frames, anchor: str | Path, *,
 def axis(frames, *, raw_photo: str | Path,
          reference: str | Path | None = None,
          foreign: str | Path | None = None,
+         driving_actor: str | Path | None = None,
          manifest: str | Path | None = None,
          instrument: str = DEFAULT_INSTRUMENT,
          min_face_px: int | None = None) -> dict:
@@ -247,7 +248,9 @@ def axis(frames, *, raw_photo: str | Path,
                            min_face_px=min_face_px),
         "d_ref": None,
         "d_neg": None,
+        "d_drv": None,
         "control": "НЕ СТАВИЛСЯ",
+        "leak_to_actor": "НЕ ПРОВЕРЯЛАСЬ",
     }
     if reference is not None:
         out["d_ref"] = distances(frames, reference, instrument=instrument,
@@ -256,6 +259,10 @@ def axis(frames, *, raw_photo: str | Path,
         out["d_neg"] = distances(frames, foreign, instrument=instrument,
                                  min_face_px=min_face_px)
         out["control"] = control_verdict(out["d_neg"])
+    if driving_actor is not None:
+        out["d_drv"] = distances(frames, driving_actor, instrument=instrument,
+                                 min_face_px=min_face_px)
+        out["leak_to_actor"] = actor_leak_verdict(out["d_raw"], out["d_drv"])
 
     out["verdict"] = out["d_raw"]["outcome"]
     out["note"] = _note(out)
@@ -281,6 +288,60 @@ def control_verdict(d_neg: dict) -> str:
     return f"{PASS}: чужой на {d_neg['median']}, ни одного кадра в баре"
 
 
+def actor_leak_verdict(d_raw: dict, d_drv: dict) -> str:
+    """Не уехал ли выход к АКТЁРУ ДРАЙВИНГА вместо клиента. Четвёртое число.
+
+    ЗАЧЕМ ОНО ОТДЕЛЬНО ОТ `d_raw`. Без него «стало похоже на драйвинг» и
+    «стало похоже на АКТЁРА драйвинга» неразличимы: `d_raw` одинаково
+    ухудшится и когда LoRA притащила чужое лицо, и когда она просто размыла
+    сходство. Разные болезни, разное лечение.
+
+    Сравниваются ДВА расстояния, а не одно с порогом: абсолютная величина тут
+    ничего не значит, а вот «до актёра ближе, чем до клиента» значит ровно то,
+    что написано.
+    """
+    if d_raw.get("median") is None or d_drv.get("median") is None:
+        return (f"{UNMEASURED}: нет одного из двух расстояний "
+                f"(до клиента {d_raw.get('median')}, "
+                f"до актёра {d_drv.get('median')})")
+    if d_drv["median"] < d_raw["median"]:
+        return (f"{FAIL}: до актёра драйвинга {d_drv['median']} БЛИЖЕ, чем до "
+                f"клиента {d_raw['median']} — лицо утекло из драйвинга")
+    return (f"{PASS}: до клиента {d_raw['median']}, до актёра "
+            f"{d_drv['median']} — актёр дальше, утечки не видно")
+
+
+def lora_regression(without: dict, with_lora: dict, *,
+                    worse_by: float = 0.02) -> dict:
+    """Портится ли `d_raw` при ВКЛЮЧЁННОЙ LoRA. Приёмка гипотезы LoRA темплейта.
+
+    Это тот самый дешёвый прямой вопрос, которым ловится риск «LoRA категории
+    тянет лицо клиента к среднему по категории». Сравниваются два прогона
+    ОДНОГО набора кадров при одном якоре — всё, кроме LoRA, совпадает.
+
+    `worse_by` ВЫБРАН 0.02, и это не порог качества, а порог РАЗЛИЧИМОСТИ:
+    два прогона одной связки не дают побитово одинаковых кадров, и мелкая
+    разница медиан — это шум сэмплера, а не эффект LoRA. Калибруется первым же
+    парным прогоном; до тех пор помечен как выбранный.
+
+    НЕПРОВЕРЕНО: парного прогона не было, LoRA не обучалась.
+    """
+    a, b = without.get("median"), with_lora.get("median")
+    if a is None or b is None:
+        return {"outcome": UNMEASURED, "delta": None,
+                "note": (f"нет одной из двух медиан (без LoRA {a}, с LoRA "
+                         f"{b}): сравнивать нечего. Это НЕ «LoRA безвредна».")}
+    delta = round(b - a, 4)
+    if delta > worse_by:
+        return {"outcome": FAIL, "delta": delta,
+                "note": (f"с LoRA {b} против {a} без неё — хуже на {delta} "
+                         f"при пороге различимости {worse_by}. LoRA тянет "
+                         f"лицо к среднему по категории.")}
+    return {"outcome": PASS, "delta": delta,
+            "note": (f"с LoRA {b} против {a} без неё — разница {delta} не "
+                     f"превышает порог различимости {worse_by}")}
+
+
 def _note(out: dict) -> str:
     """Отчёт числами (Р2): проверено N, в баре M, не смогли K."""
     raw = out["d_raw"]
@@ -292,6 +353,8 @@ def _note(out: dict) -> str:
         ref = out["d_ref"]
         head += (f" СПРАВОЧНО, НЕ ВЕРДИКТ — до референса: медиана "
                  f"{ref['median']}, в баре {ref['inside']} из {ref['judged']}.")
+    if out.get("d_drv") is not None:
+        head += f" УТЕЧКА К АКТЁРУ ДРАЙВИНГА: {out['leak_to_actor']}."
     head += f" КОНТРОЛЬ: {out['control']}."
     head += f" ЛИЦЕНЗИЯ ПРИБОРА: {out['licence']}"
     return head

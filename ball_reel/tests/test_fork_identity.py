@@ -233,6 +233,95 @@ class TheNegativeControlIsPartOfTheMeasurement(unittest.TestCase):
         self.assertIn(fi.PASS, got["control"])
 
 
+class TheFourthNumberSeparatesTwoDifferentIllnesses(unittest.TestCase):
+    """`d_drv`: «похоже на драйвинг» и «похоже на АКТЁРА драйвинга» — разное.
+
+    Без этой оси обе болезни одинаково ухудшают `d_raw`, а лечение у них
+    разное. Нужна она гипотезе LoRA темплейта: если такая LoRA потечёт, выход
+    поедет к актёру, а не к клиенту.
+    """
+
+    def tearDown(self):
+        if hasattr(self, "restore"):
+            self.restore()
+
+    def _axis(self, table, **kw):
+        self.restore = _with_instrument(_FakeInstrument(table))
+        return fi.axis(["/x/f1.png", "/x/f2.png"], raw_photo="/x/raw.png", **kw)
+
+    def test_a_run_without_the_actor_says_the_check_did_not_happen(self):
+        got = self._axis({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06})
+        self.assertEqual(got["leak_to_actor"], "НЕ ПРОВЕРЯЛАСЬ")
+        self.assertIsNone(got["d_drv"])
+
+    def test_frames_closer_to_the_actor_than_to_the_client_is_a_leak(self):
+        got = self._axis({"raw.png": 0.0, "actor.png": 0.6,
+                          "f1.png": 0.55, "f2.png": 0.56},
+                         driving_actor="/x/actor.png")
+        self.assertIn(fi.FAIL, got["leak_to_actor"])
+        self.assertIn("утекло", got["leak_to_actor"])
+
+    def test_frames_closer_to_the_client_are_clean(self):
+        """Негативный контроль: ось умеет и не находить утечку."""
+        got = self._axis({"raw.png": 0.0, "actor.png": 0.9,
+                          "f1.png": 0.1, "f2.png": 0.12},
+                         driving_actor="/x/actor.png")
+        self.assertIn(fi.PASS, got["leak_to_actor"])
+
+    def test_it_compares_two_distances_rather_than_using_a_bar(self):
+        """Обе далеко от бара, но актёр ближе — обязано ловиться."""
+        got = self._axis({"raw.png": 0.0, "actor.png": 0.7,
+                          "f1.png": 0.65, "f2.png": 0.66},
+                         driving_actor="/x/actor.png")
+        self.assertIn(fi.FAIL, got["leak_to_actor"])
+
+    def test_a_missing_distance_is_unmeasured(self):
+        got = fi.actor_leak_verdict({"median": None}, {"median": 0.5})
+        self.assertIn(fi.UNMEASURED, got)
+
+    def test_the_leak_verdict_reaches_the_note(self):
+        got = self._axis({"raw.png": 0.0, "actor.png": 0.6,
+                          "f1.png": 0.55, "f2.png": 0.56},
+                         driving_actor="/x/actor.png")
+        self.assertIn("УТЕЧКА К АКТЁРУ ДРАЙВИНГА", got["note"])
+
+
+class TheLoraIsAcceptedByWhetherItSpoilsDRaw(unittest.TestCase):
+    """Приёмка гипотезы LoRA темплейта одним прямым вопросом.
+
+    НЕПРОВЕРЕНО: парного прогона не было, LoRA не обучалась. Проверяется здесь
+    только арифметика сравнения — и то, что она умеет краснеть.
+    """
+
+    def test_a_worse_median_with_lora_fails(self):
+        got = fi.lora_regression({"median": 0.30}, {"median": 0.40})
+        self.assertEqual(got["outcome"], fi.FAIL)
+        self.assertIn("тянет лицо к среднему по категории", got["note"])
+
+    def test_a_noise_sized_difference_passes(self):
+        got = fi.lora_regression({"median": 0.30}, {"median": 0.31})
+        self.assertEqual(got["outcome"], fi.PASS)
+
+    def test_an_improvement_passes_too(self):
+        got = fi.lora_regression({"median": 0.40}, {"median": 0.30})
+        self.assertEqual(got["outcome"], fi.PASS)
+        self.assertEqual(got["delta"], -0.1)
+
+    def test_the_discriminability_bar_is_guarded_in_both_directions(self):
+        """Т1: подмена в обе стороны."""
+        pair = ({"median": 0.30}, {"median": 0.35})
+        self.assertEqual(fi.lora_regression(*pair, worse_by=0.01)["outcome"],
+                         fi.FAIL)
+        self.assertEqual(fi.lora_regression(*pair, worse_by=0.5)["outcome"],
+                         fi.PASS,
+                         "порог поднят выше разницы, а вердикт не изменился")
+
+    def test_a_missing_run_is_unmeasured_not_harmless(self):
+        got = fi.lora_regression({"median": 0.3}, {"median": None})
+        self.assertEqual(got["outcome"], fi.UNMEASURED)
+        self.assertIn("НЕ «LoRA безвредна»", got["note"])
+
+
 class TheInstrumentIsAParameterAndItsLicenceIsSpoken(unittest.TestCase):
 
     def test_an_unknown_instrument_is_refused_rather_than_stubbed(self):

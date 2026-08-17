@@ -75,14 +75,26 @@ class TheReportIsNumbersNotAFlag(unittest.TestCase):
 
 class TheStepOrderPutsCheapBeforeExpensive(unittest.TestCase):
 
-    def test_inputs_come_first_and_leak_last(self):
+    def test_inputs_come_first(self):
         self.assertEqual(fork_run.STEPS[0], "входы")
-        self.assertEqual(fork_run.STEPS[-1], "протечка")
 
     def test_conditions_and_masks_come_before_the_graph(self):
         order = list(fork_run.STEPS)
         self.assertLess(order.index("условия"), order.index("граф"))
         self.assertLess(order.index("маски"), order.index("граф"))
+
+    def test_the_bucket_is_chosen_before_anything_expensive(self):
+        """Корзина решает, какой темплейт поедет. Узнать это после снятия
+        условий по сотне кадров значит, возможно, снять их зря."""
+        order = list(fork_run.STEPS)
+        self.assertLess(order.index("корзина"), order.index("условия"))
+        self.assertLess(order.index("корзина"), order.index("маски"))
+
+    def test_the_axes_that_need_a_real_output_come_last(self):
+        order = list(fork_run.STEPS)
+        for axis in ("протечка", "шов"):
+            with self.subTest(axis=axis):
+                self.assertGreater(order.index(axis), order.index("граф"))
 
 
 class TheModulesAreActuallyWiredIn(unittest.TestCase):
@@ -101,7 +113,9 @@ class TheModulesAreActuallyWiredIn(unittest.TestCase):
             if isinstance(node, ast.Attribute) and isinstance(
                     node.value, ast.Name):
                 called.add(node.value.id)
-        for module in ("fork_channels", "fork_comfy", "fork_leak", "fork_mask"):
+        for module in ("fork_build_route", "fork_channels", "fork_comfy",
+                       "fork_leak", "fork_lora_dataset", "fork_mask",
+                       "fork_seam"):
             with self.subTest(module=module):
                 self.assertIn(module, called,
                               f"{module} импортирован, но не вызван — импорт "
