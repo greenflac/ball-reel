@@ -109,8 +109,10 @@ def activations_gb(n_tokens: int) -> float:
 
 def budget_table(nonblock_gb: float, block_gb: float) -> None:
     print(f"\n{'размер':>12} {'кадров':>7} {'токенов':>9} {'актив./блок':>12}")
-    for w, h, f in ((640, 640, 77), (832, 480, 77), (640, 640, 49),
-                    (480, 480, 77), (512, 512, 49)):
+    # Портрет, потому что драйвинг продукта портретный: demo/kit/driving —
+    # 720x1278, отношение 0.563. Все размеры кратны 16 (требование ноды).
+    for w, h, f in ((480, 848, 77), (480, 848, 49), (448, 800, 77),
+                    (416, 736, 77), (640, 640, 77)):
         n, *_ = tokens(w, h, f)
         print(f"{f'{w}x{h}':>12} {f:>7} {n:>9,} {activations_gb(n):>11.2f} GB")
 
@@ -121,13 +123,15 @@ def budget_table(nonblock_gb: float, block_gb: float) -> None:
 
     quants = (("Q3_K_M", 8.04), ("Q4_K_M", 10.71), ("Q5_K_M", 12.11),
               ("Q6_K", 13.60), ("Q8_0", 17.43))
-    n77, *_ = tokens(640, 640, 77)
-    n49, *_ = tokens(640, 640, 49)
-    print(f"\nв габарит какой карты влезает (640x640, резерв Comfy {COMFY_RESERVE_GB:.1f} GB):")
-    print(f"{'квант':>8} {'веса':>8} {'+77 кадров':>11} {'+49 кадров':>11}")
+    n77, *_ = tokens(480, 848, 77)
+    n49, *_ = tokens(480, 848, 49)
+    print(f"\nбюджет 16 ГБ при 480x848 (резерв Comfy {COMFY_RESERVE_GB:.1f} GB):")
+    print(f"{'квант':>8} {'веса':>8} {'77 кадров':>9} {'':>6}  {'49 кадров':>8} {'':>6}")
     for name, gb in quants:
-        print(f"{name:>8} {gb:>7.2f}  {gb + activations_gb(n77) + COMFY_RESERVE_GB:>10.2f} "
-              f"{gb + activations_gb(n49) + COMFY_RESERVE_GB:>11.2f}")
+        t77 = gb + activations_gb(n77) + COMFY_RESERVE_GB
+        t49 = gb + activations_gb(n49) + COMFY_RESERVE_GB
+        mark = lambda t: "OK " if t < 14.0 else ("тесно" if t < 16.0 else "НЕТ")
+        print(f"{name:>8} {gb:>7.2f}  {t77:>8.2f} {mark(t77):>6}  {t49:>8.2f} {mark(t49):>6}")
 
 
 def licences() -> None:
@@ -148,7 +152,7 @@ def main() -> int:
     offline = "--offline" in sys.argv
     if offline:
         print("--offline: заголовок не читается, беру ЗАМЕРЕННЫЕ ранее величины")
-        nonblock, block = 2.0947, 0.3762
+        nonblock, block = 2.0885, 0.3762
     else:
         nonblock, block = describe_weights(safetensors_header(FP8_URL))
     budget_table(nonblock, block)
