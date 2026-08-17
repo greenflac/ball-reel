@@ -476,8 +476,17 @@ class TheMeasuredRowsAreReproduced(unittest.TestCase):
                       "не появилась ли настоящая сырая фотография, и если да "
                       "— дописать строку d_raw в приёмку потока A")
 
+    #: Контрольный кадр лежит в `ball_reel/fixtures/`, а НЕ в `veoprobe/`, и это
+    #: не вкус. Полный аудит с мутациями поймал: `veoprobe` не входит в
+    #: `codeaudit.DATA_LINKS`, то есть в копию для мутаций не попадает, и оба
+    #: теста контроля там ПРОПУСКАЛИСЬ — «2 сторожа молчат во время КАЖДОЙ
+    #: мутации». Пропущенный тест мутанта не убивает, и аудит тихо слабел.
+    #: `fixtures` в копию линкуется, поэтому негативный контроль живёт там же,
+    #: где остальной измерительный инвентарь.
+    ALIEN = ROOT / "ball_reel" / "fixtures" / "foreign_face.png"
+
     def test_the_negative_control_says_different_person(self):
-        alien = ROOT / "veoprobe" / "f_1080p" / "0009.png"
+        alien = self.ALIEN
         if not alien.exists():
             self.skipTest("контрольного кадра нет в дереве")
         got = fi.distances(self.generated, alien)
@@ -492,7 +501,7 @@ class TheMeasuredRowsAreReproduced(unittest.TestCase):
         В задании контроль стоит на 0.96–1.05. Самое далёкое, что нашлось в
         дереве, — около 0.70. Тест закрепляет РАЗРЫВ, чтобы его не забыли.
         """
-        alien = ROOT / "veoprobe" / "f_1080p" / "0009.png"
+        alien = self.ALIEN
         if not alien.exists():
             self.skipTest("контрольного кадра нет в дереве")
         got = fi.distances(self.generated, alien)
