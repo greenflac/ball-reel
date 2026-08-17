@@ -23,13 +23,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import (fork_build_route, fork_channels, fork_comfy, fork_leak,
-               fork_lora_dataset, fork_mask, fork_seam)
+               fork_lora_dataset, fork_mask, fork_preflight, fork_seam)
 from .fork_identity import FAIL, PASS, UNMEASURED
 
 #: Порядок шагов. Дешёвое раньше дорогого (П2): отсутствующий вход ловится за
 #: миллисекунды, а поиск его после снятия условий по сотне кадров стоил бы
 #: всего прогона. Длительность каждого шага печатается.
-STEPS = ("входы", "корзина", "условия", "маски", "граф", "протечка", "шов")
+STEPS = ("предполёт", "входы", "корзина", "условия", "маски",
+         "граф", "протечка", "шов")
 
 
 def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
@@ -53,6 +54,12 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     out.mkdir(parents=True, exist_ok=True)
     frames = [Path(p) for p in driving_frames]
     steps: list[dict] = []
+
+    # Предполёт первым: он самый дешёвый и решает, поедет ли вообще что-то.
+    t = time.perf_counter()
+    pre = fork_preflight.report()
+    steps.append(_step("предполёт", pre["outcome"], pre["note"],
+                       time.perf_counter() - t))
 
     t = time.perf_counter()
     missing = [str(p) for p in [Path(photo), *frames] if not p.exists()]

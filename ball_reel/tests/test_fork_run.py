@@ -22,16 +22,16 @@ class MissingInputsAreCaughtFirstAndCheaply(unittest.TestCase):
     def test_a_missing_photo_fails_the_first_step_and_stops(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = fork_run.run(Path(tmp) / "нет.png", [], tmp)
-        self.assertEqual(got["steps"][0]["step"], "входы")
-        self.assertEqual(got["steps"][0]["outcome"], FAIL)
-        self.assertEqual(len(got["steps"]), 1,
+        self.assertEqual(got["steps"][1]["step"], "входы")
+        self.assertEqual(got["steps"][1]["outcome"], FAIL)
+        self.assertEqual(len(got["steps"]), 2,
                          "путь пошёл дальше по отсутствующему входу — значит "
                          "дорогие шаги оплачиваются до дешёвой проверки")
 
     def test_the_failing_step_names_the_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = fork_run.run(Path(tmp) / "нет.png", [], tmp)
-        self.assertIn("нет.png", got["steps"][0]["note"])
+        self.assertIn("нет.png", got["steps"][1]["note"])
 
     def test_every_step_reports_its_duration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,8 +75,13 @@ class TheReportIsNumbersNotAFlag(unittest.TestCase):
 
 class TheStepOrderPutsCheapBeforeExpensive(unittest.TestCase):
 
-    def test_inputs_come_first(self):
-        self.assertEqual(fork_run.STEPS[0], "входы")
+    def test_the_preflight_comes_first_of_all(self):
+        """Самая дешёвая проверка и та, что решает, поедет ли вообще что-то."""
+        self.assertEqual(fork_run.STEPS[0], "предполёт")
+
+    def test_inputs_come_before_any_real_work(self):
+        order = list(fork_run.STEPS)
+        self.assertLess(order.index("входы"), order.index("условия"))
 
     def test_conditions_and_masks_come_before_the_graph(self):
         order = list(fork_run.STEPS)
@@ -115,7 +120,7 @@ class TheModulesAreActuallyWiredIn(unittest.TestCase):
                 called.add(node.value.id)
         for module in ("fork_build_route", "fork_channels", "fork_comfy",
                        "fork_leak", "fork_lora_dataset", "fork_mask",
-                       "fork_seam"):
+                       "fork_preflight", "fork_seam"):
             with self.subTest(module=module):
                 self.assertIn(module, called,
                               f"{module} импортирован, но не вызван — импорт "
