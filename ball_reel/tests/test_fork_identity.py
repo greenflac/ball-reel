@@ -1,0 +1,346 @@
+"""Поток A: якорь — сырая фотография, медоид запрещён КОДОМ.
+
+Тесты делятся надвое, и деление намеренное.
+
+ОФЛАЙН — арифметика вердикта, три исхода и запрет медоида. Весов не требует,
+краснеет всегда, когда сломали.
+
+ЖИВЬЁ — воспроизведение снятых чисел на `demo/lora_dataset`. Требует
+`buffalo_l`; без весов ПРОПУСКАЕТСЯ, и пропуск здесь честнее зелени: он значит
+«не смогли проверить», а не «прошло» (Р1).
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from ball_reel import fork_identity as fi
+
+ROOT = Path(__file__).resolve().parents[2]
+DATASET = ROOT / "demo" / "lora_dataset"
+MANIFEST = DATASET / "manifest.json"
+
+
+def _weights_ready() -> bool:
+    try:
+        from ball_reel.identity_arcface import face_detail
+
+        return face_detail(DATASET / "img" / "real_0000.png") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _FakeInstrument:
+    """Прибор-заглушка: расстояние задаётся таблицей, весов не нужно.
+
+    Нужен, чтобы арифметику вердикта можно было проверить БЕЗ 300 МБ весов.
+    Без него ветки «покрытия не хватило» и «контроль провалился» проверялись бы
+    только там, где есть живой прибор, то есть почти никогда.
+    """
+
+    def __init__(self, table: dict, sizes: dict | None = None):
+        self.table = table
+        self.sizes = sizes or {}
+
+    def face_detail(self, path):
+        name = Path(path).name
+        if name not in self.table:
+            return None
+        return {"embedding": (self.table[name],),
+                "face_px": self.sizes.get(name, 200)}
+
+    @staticmethod
+    def cosine_distance(a, b):
+        return round(abs(a[0] - b[0]), 4)
+
+    @staticmethod
+    def _quantile(vals, q):
+        from ball_reel.identity_arcface import _quantile
+
+        return _quantile(vals, q)
+
+
+def _with_instrument(inst):
+    """Подменить прибор на время вызова. Возвращает восстановитель."""
+    original = fi._instrument
+    fi._instrument = lambda name: inst
+    return lambda: setattr(fi, "_instrument", original)
+
+
+class TheMedoidIsBannedByCodeNotByAgreement(unittest.TestCase):
+    """Соглашение уже было и продержалось до первого удобного случая."""
+
+    def test_an_anchor_from_the_judged_list_is_refused(self):
+        frames = ["/x/a.png", "/x/b.png"]
+        with self.assertRaises(fi.DerivedAnchor) as caught:
+            fi.refuse_derived_anchor("/x/a.png", frames)
+        self.assertIn("a.png", str(caught.exception))
+
+    def test_an_anchor_listed_in_the_manifest_is_refused_even_if_not_judged(self):
+        """Ровно живой случай: медоид в наборе, судятся 21 порождённый."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "img").mkdir()
+            (root / "manifest.json").write_text(json.dumps(
+                {"samples": [{"path": "img/real_0000.png"},
+                             {"path": "img/gen_0000.png"}]}), encoding="utf-8")
+            with self.assertRaises(fi.DerivedAnchor) as caught:
+                fi.refuse_derived_anchor(root / "img" / "real_0000.png",
+                                         [root / "img" / "gen_0000.png"],
+                                         manifest=root / "manifest.json")
+            self.assertIn("samples", str(caught.exception))
+
+    def test_a_manifest_that_calls_the_anchor_a_medoid_is_enough(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manifest.json").write_text(json.dumps(
+                {"samples": [{"path": "img/gen_0000.png"}],
+                 "identity_reference": "outside.png — МЕДОИД порождённых"},
+                ensure_ascii=False), encoding="utf-8")
+            with self.assertRaises(fi.DerivedAnchor):
+                fi.refuse_derived_anchor(root / "outside.png",
+                                         [root / "img" / "gen_0000.png"],
+                                         manifest=root / "manifest.json")
+
+    def test_an_honest_uploaded_photo_passes(self):
+        """Негативный контроль к запрету (И5): сторож обязан кого-то пропускать."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manifest.json").write_text(json.dumps(
+                {"samples": [{"path": "img/gen_0000.png"}]}), encoding="utf-8")
+            fi.refuse_derived_anchor(root / "upload.jpg",
+                                     [root / "img" / "gen_0000.png"],
+                                     manifest=root / "manifest.json")
+
+    def test_the_ban_reaches_axis_and_is_not_only_a_helper(self):
+        """Т5: развилка, до которой не доходит вызов, деградирует молча."""
+        with self.assertRaises(fi.DerivedAnchor):
+            fi.axis(["/x/a.png"], raw_photo="/x/a.png")
+
+    def test_the_reference_anchor_is_banned_too(self):
+        with self.assertRaises(fi.DerivedAnchor):
+            fi.axis(["/x/a.png"], raw_photo="/x/raw.png", reference="/x/a.png")
+
+
+class TheVerdictRestsOnTheRawPhotoAndNothingElse(unittest.TestCase):
+
+    def setUp(self):
+        # Кадры далеко от сырого фото (0.5) и близко к референсу (0.05).
+        self.table = {"raw.png": 0.0, "ref.png": 0.45, "alien.png": 5.0,
+                      "f1.png": 0.5, "f2.png": 0.52, "f3.png": 0.48}
+        self.restore = _with_instrument(_FakeInstrument(self.table))
+        self.frames = ["/x/f1.png", "/x/f2.png", "/x/f3.png"]
+
+    def tearDown(self):
+        self.restore()
+
+    def test_a_good_reference_does_not_rescue_a_failing_raw(self):
+        got = fi.axis(self.frames, raw_photo="/x/raw.png",
+                      reference="/x/ref.png")
+        self.assertEqual(got["d_ref"]["outcome"], fi.PASS,
+                         "фикстура задумана так, что до референса близко")
+        self.assertEqual(got["verdict"], fi.FAIL,
+                         "вердикт поехал за референсом — вернулся дефект медоида")
+
+    def test_the_note_marks_the_reference_as_not_the_verdict(self):
+        got = fi.axis(self.frames, raw_photo="/x/raw.png",
+                      reference="/x/ref.png")
+        self.assertIn("НЕ ВЕРДИКТ", got["note"])
+
+    def test_a_close_raw_photo_passes(self):
+        """Негативный контроль: ось умеет не только заваливать."""
+        self.table.update({"f1.png": 0.05, "f2.png": 0.1, "f3.png": 0.2})
+        got = fi.axis(self.frames, raw_photo="/x/raw.png")
+        self.assertEqual(got["verdict"], fi.PASS)
+
+    def test_the_bar_is_the_projects_own_and_not_a_local_copy(self):
+        from ball_reel.identity_arcface import SAME_PERSON_MAX
+
+        self.assertEqual(fi.axis(self.frames, raw_photo="/x/raw.png")["bar"],
+                         SAME_PERSON_MAX)
+
+
+class ThereAreThreeOutcomesNotTwo(unittest.TestCase):
+    """Р1/Р2: «не смогли проверить» не сворачивается ни в одну сторону."""
+
+    def tearDown(self):
+        if hasattr(self, "restore"):
+            self.restore()
+
+    def test_no_faces_at_all_is_unmeasured_not_a_different_person(self):
+        self.restore = _with_instrument(_FakeInstrument({"raw.png": 0.0}))
+        got = fi.axis(["/x/f1.png", "/x/f2.png"], raw_photo="/x/raw.png")
+        self.assertEqual(got["verdict"], fi.UNMEASURED)
+        self.assertNotEqual(got["verdict"], fi.FAIL)
+        self.assertIn("НЕ «другой человек»", got["d_raw"]["note"])
+
+    def test_a_missing_face_on_the_anchor_is_unmeasured(self):
+        self.restore = _with_instrument(_FakeInstrument({"f1.png": 0.1}))
+        got = fi.axis(["/x/f1.png"], raw_photo="/x/raw.png")
+        self.assertEqual(got["verdict"], fi.UNMEASURED)
+
+    def test_thin_coverage_is_unmeasured_even_when_the_judged_ones_pass(self):
+        """Ноль нарушений при одной отработавшей проверке — не успех (Р2)."""
+        self.restore = _with_instrument(
+            _FakeInstrument({"raw.png": 0.0, "f1.png": 0.05}))
+        got = fi.axis(["/x/f1.png", "/x/f2.png", "/x/f3.png", "/x/f4.png"],
+                      raw_photo="/x/raw.png")
+        self.assertEqual(got["d_raw"]["inside"], 1)
+        self.assertEqual(got["verdict"], fi.UNMEASURED,
+                         "покрытие 25% выдано за успех")
+
+    def test_the_note_prints_checked_inside_and_unmeasured_as_numbers(self):
+        self.restore = _with_instrument(
+            _FakeInstrument({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.9}))
+        got = fi.axis(["/x/f1.png", "/x/f2.png"], raw_photo="/x/raw.png")
+        for piece in ("медиана", "в баре", "не смогли"):
+            self.assertIn(piece, got["note"])
+
+
+class TheNegativeControlIsPartOfTheMeasurement(unittest.TestCase):
+    """И5: без входа, где прибор обязан сказать «нет», число ничего не значит."""
+
+    def tearDown(self):
+        self.restore()
+
+    def _axis(self, table, **kw):
+        self.restore = _with_instrument(_FakeInstrument(table))
+        return fi.axis(["/x/f1.png", "/x/f2.png"], raw_photo="/x/raw.png", **kw)
+
+    def test_a_run_without_a_control_says_so_and_does_not_claim_success(self):
+        got = self._axis({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06})
+        self.assertEqual(got["control"], "НЕ СТАВИЛСЯ")
+        self.assertIn("НЕ СТАВИЛСЯ", got["note"])
+
+    def test_a_control_the_instrument_mistakes_for_the_subject_voids_the_run(self):
+        got = self._axis({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06,
+                          "alien.png": 0.1}, foreign="/x/alien.png")
+        self.assertIn(fi.FAIL, got["control"])
+        self.assertIn("недействительны", got["control"])
+
+    def test_a_weak_control_is_unmeasured_not_a_pass(self):
+        """0.70 — «другой человек», но не полоса «заведомо чужой»."""
+        got = self._axis({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06,
+                          "alien.png": 0.5}, foreign="/x/alien.png")
+        self.assertIn(fi.UNMEASURED, got["control"])
+
+    def test_a_proper_control_passes(self):
+        got = self._axis({"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06,
+                          "alien.png": 1.0}, foreign="/x/alien.png")
+        self.assertIn(fi.PASS, got["control"])
+
+
+class TheInstrumentIsAParameterAndItsLicenceIsSpoken(unittest.TestCase):
+
+    def test_an_unknown_instrument_is_refused_rather_than_stubbed(self):
+        with self.assertRaises(ValueError) as caught:
+            fi._instrument("auraface")
+        self.assertIn("обнуляет", str(caught.exception))
+
+    def test_the_non_commercial_licence_reaches_the_report(self):
+        restore = _with_instrument(_FakeInstrument(
+            {"raw.png": 0.0, "f1.png": 0.05}))
+        try:
+            got = fi.axis(["/x/f1.png"], raw_photo="/x/raw.png")
+        finally:
+            restore()
+        self.assertIn("NON-COMMERCIAL", got["note"])
+        self.assertIn("пересчёт всех порогов", got["note"].lower())
+
+
+class TheSizeFilterChangesTheNumberAndSaysSo(unittest.TestCase):
+    """Оба числа верны, и это РАЗНЫЕ числа. Режим обязан стоять рядом."""
+
+    def tearDown(self):
+        self.restore()
+
+    def test_filtering_drops_frames_and_the_note_names_the_mode(self):
+        table = {"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06}
+        self.restore = _with_instrument(
+            _FakeInstrument(table, sizes={"f1.png": 200, "f2.png": 40}))
+        off = fi.distances(["/x/f1.png", "/x/f2.png"], "/x/raw.png")
+        on = fi.distances(["/x/f1.png", "/x/f2.png"], "/x/raw.png",
+                          min_face_px=100)
+        self.assertEqual((off["judged"], on["judged"]), (2, 1))
+        self.assertIn("выключен", off["note"])
+        self.assertIn("100px", on["note"])
+
+    def test_a_dropped_frame_is_counted_as_unmeasured_not_as_drift(self):
+        table = {"raw.png": 0.0, "f1.png": 0.05, "f2.png": 0.06}
+        self.restore = _with_instrument(
+            _FakeInstrument(table, sizes={"f1.png": 200, "f2.png": 40}))
+        on = fi.distances(["/x/f1.png", "/x/f2.png"], "/x/raw.png",
+                          min_face_px=100)
+        self.assertEqual(on["too_small"], ["f2.png"])
+        self.assertEqual(on["inside"], 1)
+
+
+@unittest.skipUnless(MANIFEST.exists() and _weights_ready(),
+                     "нет весов buffalo_l или demo/lora_dataset — "
+                     "числа воспроизвести нечем")
+class TheMeasuredRowsAreReproduced(unittest.TestCase):
+    """Приёмка потока. Воспроизводит то, что ВОСПРОИЗВОДИМО, и только это.
+
+    Строка «против сырой фотографии» здесь ОТСУТСТВУЕТ, и это не пропуск: сырой
+    фотографии нет в репозитории — владелец исключил её намеренно. Тест ниже
+    сторожит именно это: если фотография появится, он покраснеет и потребует
+    дописать строку.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        cls.generated = [DATASET / s["path"] for s in data["samples"]
+                         if s["origin"] == "generated"]
+        cls.medoid = DATASET / "img" / "real_0000.png"
+
+    def test_there_are_twenty_one_generated_frames(self):
+        self.assertEqual(len(self.generated), 21)
+
+    def test_the_medoid_row_reproduces_to_the_fourth_decimal(self):
+        got = fi.distances(self.generated, self.medoid)
+        self.assertEqual(got["median"], 0.2579)
+        self.assertEqual((got["inside"], got["judged"]), (19, 21))
+
+    def test_the_medoid_anchor_is_refused_by_the_ban_when_asked_for_a_verdict(self):
+        """То же измерение через `axis` обязано УПАСТЬ, а не выдать успех."""
+        with self.assertRaises(fi.DerivedAnchor):
+            fi.axis(self.generated, raw_photo=self.medoid, manifest=MANIFEST)
+
+    def test_the_raw_photo_is_genuinely_absent_and_this_test_will_notice(self):
+        text = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("МЕДОИД порождённых", text,
+                      "манифест перестал называть якорь медоидом — проверить, "
+                      "не появилась ли настоящая сырая фотография, и если да "
+                      "— дописать строку d_raw в приёмку потока A")
+
+    def test_the_negative_control_says_different_person(self):
+        alien = ROOT / "veoprobe" / "f_1080p" / "0009.png"
+        if not alien.exists():
+            self.skipTest("контрольного кадра нет в дереве")
+        got = fi.distances(self.generated, alien)
+        self.assertEqual(got["inside"], 0,
+                         "чужого человека приняли за своего — числа прогона "
+                         "недействительны")
+        self.assertGreater(got["median"], fi.HARD_DRIFT_MAX)
+
+    def test_the_control_does_not_reach_the_band_it_was_recorded_at(self):
+        """И6: отрицательный результат записывается числом, а не сглаживается.
+
+        В задании контроль стоит на 0.96–1.05. Самое далёкое, что нашлось в
+        дереве, — около 0.70. Тест закрепляет РАЗРЫВ, чтобы его не забыли.
+        """
+        alien = ROOT / "veoprobe" / "f_1080p" / "0009.png"
+        if not alien.exists():
+            self.skipTest("контрольного кадра нет в дереве")
+        got = fi.distances(self.generated, alien)
+        self.assertLess(got["median"], 0.96,
+                        "контроль дотянул до записанной полосы — обновить "
+                        "docs/FORK_NUMBERS.md и снять эту оговорку")
+
+
+if __name__ == "__main__":
+    unittest.main()
