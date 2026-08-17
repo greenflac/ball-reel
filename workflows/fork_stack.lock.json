@@ -1,0 +1,227 @@
+{
+  "_why": [
+    "Лок-файл потока E. Что именно скачивать на арендованной машине и на каком",
+    "основании стоит каждое утверждение о контракте ноды.",
+    "",
+    "ПОЧЕМУ ФАЙЛОМ, А НЕ АБЗАЦЕМ В ДОКУМЕНТЕ. Вторая смена идёт на машине без",
+    "этого репозитория и без хэндофа. Там из контекста будет только то, что",
+    "уехало файлами. Абзац туда не уедет, а этот файл уедет и читается кодом:",
+    "`ball_reel.fork_comfy.audit_lock()`.",
+    "",
+    "ПОЧЕМУ У КАЖДОГО ЧИСЛА СТОИТ КОМАНДА. Размеры весов в §3 хэндофа взяты не",
+    "оттуда, откуда кажется: они совпали с замером, но проверить это можно было",
+    "только замерив. Здесь каждое число сопровождается запросом, которым оно",
+    "получено, и датой — чтобы следующая смена повторила, а не поверила.",
+    "На этом проекте уже писали код против несуществующего репозитория с весами."
+  ],
+
+  "schema": "fork-stack-lock/1",
+  "generated_at": "2026-08-17",
+  "generated_by": "поток E, ветка fork/template-mvp",
+
+  "workflow": {
+    "upstream": "workflows/upstream/video_wan2_2_14B_animate.json",
+    "upstream_sha256": "06ad8b95e64215328a2a3d2f90495b5bab3e251175e4258d01b977f6dcdecb69",
+    "upstream_license": "MIT, Comfy Org",
+    "upstream_verified_by": "hashlib.sha256 в ball_reel.fork_comfy.load_upstream, роняет загрузку при расхождении",
+    "derived": "производится ball_reel.fork_comfy.derive(), на диск кладёт fork_comfy.write()",
+    "derived_note": "НЕПРОВЕРЕНО: произведённый граф не исполнялся. Проверка структурная — типы нод, связи, обязательные входы.",
+    "removed_packs": [
+      "comfyui_controlnet_aux",
+      "comfyui-kjnodes",
+      "comfyui-segment-anything-2"
+    ],
+    "removed_reason": "лицензионная цепочка плюс PointsEditor, который ждёт человека с мышью"
+  },
+
+  "measurement_method": {
+    "endpoint": "POST https://huggingface.co/api/models/<owner>/<repo>/paths-info/main",
+    "body": "{\"paths\": [\"<путь в репозитории>\"]}",
+    "fields": "lfs.size — размер в байтах, lfs.oid — sha256 содержимого",
+    "date": "2026-08-17",
+    "cross_check": "те же размеры получены вторым запросом GET /api/models/<repo>/tree/main?recursive=1 — два независимых эндпоинта дали совпадающие байты",
+    "note": "huggingface.co открыт прокси. github.com HTML и api.github.com/repos дают 403 — для этой задачи не понадобились."
+  },
+
+  "weights": [
+    {
+      "role": "diffusion",
+      "what": "Wan2.2-Animate-14B, ступень Q3_K_M (§3.1: Q4_K_M впритык, ECC забирает неизмеренную часть 16 ГБ)",
+      "repo": "QuantStack/Wan2.2-Animate-14B-GGUF",
+      "path": "Wan2.2-Animate-14B-Q3_K_M.gguf",
+      "url": "https://huggingface.co/QuantStack/Wan2.2-Animate-14B-GGUF/resolve/main/Wan2.2-Animate-14B-Q3_K_M.gguf",
+      "bytes": 8630769472,
+      "gib": 8.038,
+      "sha256": "62cd6067c96599ade5bdde54a49a5ef1a7fd4de449eaae56ff4fd61ccbb16678",
+      "license": "apache-2.0",
+      "loader": "UnetLoaderGGUF (city96/ComfyUI-GGUF)",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/QuantStack/Wan2.2-Animate-14B-GGUF/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"Wan2.2-Animate-14B-Q3_K_M.gguf\"]}'",
+      "provenance": "ЗАМЕРЕНО. Совпало с 8.04 ГБ из §3.1 — но совпадение установлено замером, а не принято на веру. Соседние ступени из того же ответа: Q4_K_M 11496331072 (10.707 GiB), Q2_K 6457431872 (6.014 GiB) — рычаг из §3.1 подтверждён числами."
+    },
+    {
+      "role": "text_encoder",
+      "what": "umt5-xxl-encoder, Q5_K_M GGUF",
+      "repo": "city96/umt5-xxl-encoder-gguf",
+      "path": "umt5-xxl-encoder-Q5_K_M.gguf",
+      "url": "https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q5_K_M.gguf",
+      "bytes": 4145878880,
+      "gib": 3.8612,
+      "sha256": "eaea358bb438c5d211721a4feecc162000e3636e9cb96f51e216f1f44ebd12ce",
+      "license": "apache-2.0",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/city96/umt5-xxl-encoder-gguf/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"umt5-xxl-encoder-Q5_K_M.gguf\"]}'",
+      "provenance": "ЗАМЕРЕНО. §3 называл 3.86 ГБ — сошлось. РАСХОЖДЕНИЕ С ТЕМПЛЕЙТОМ, и оно намеренное: официальный граф грузит umt5_xxl_fp8_e4m3fn_scaled.safetensors, стек §3 берёт GGUF-квант. Значит узел загрузчика энкодера в произведённом графе придётся менять вместе с файлом; здесь это записано, чтобы там не оказалось неожиданностью."
+    },
+    {
+      "role": "vae",
+      "what": "wan_2.1_vae, декод тайлами",
+      "repo": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+      "path": "split_files/vae/wan_2.1_vae.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+      "bytes": 253815318,
+      "gib": 0.2364,
+      "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+      "license": "apache-2.0",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"split_files/vae/wan_2.1_vae.safetensors\"]}'",
+      "provenance": "ЗАМЕРЕНО. URL взят дословно из официального темплейта, а не подобран по имени. Байт в байт тот же файл лежит и в Wan_2.1_ComfyUI_repackaged (253815318) — сверено вторым запросом, так что репозиторий здесь не единственная точка отказа.",
+      "used_by": "§1a поток B: VAE-круг vae.decode(vae.encode(драйвинг)) — нижний из двух полов оси протечки. Это единственный вес, который можно поднять без всего Comfy, и 0.24 ГБ — причина, по которой этот замер стоит делать первым."
+    },
+    {
+      "role": "clip_vision",
+      "what": "clip_vision_h",
+      "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+      "path": "split_files/clip_vision/clip_vision_h.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors",
+      "bytes": 1264219396,
+      "gib": 1.1774,
+      "sha256": "64a7ef761bfccbadbaa3da77366aac4185a6c58fa5de5f589b42a65bcc21f161",
+      "license": "apache-2.0",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/Comfy-Org/Wan_2.1_ComfyUI_repackaged/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"split_files/clip_vision/clip_vision_h.safetensors\"]}'",
+      "provenance": "ЗАМЕРЕНО. §3 называл 1.18 ГБ — сошлось. URL дословно из темплейта."
+    },
+    {
+      "role": "lora_1",
+      "what": "lightx2v step-distill, вес 1.0",
+      "repo": "Kijai/WanVideo_comfy",
+      "path": "Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "url": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "bytes": 738005744,
+      "gib": 0.6873,
+      "sha256": "85c4a61c30e0497aa44b91d93a893b624708461a56fe5485183b28fa07e2dfb3",
+      "license": "НЕ ОБЪЯВЛЕНА",
+      "license_note": "cardData.license у Kijai/WanVideo_comfy отсутствует. Это известно и в блокеры не возвращается (§10): строка в учёт к отгрузке.",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/Kijai/WanVideo_comfy/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors\"]}'",
+      "provenance": "ЗАМЕРЕНО. Точный путь взят из темплейта (там стоит полный resolve-URL), а не из поиска по имени: у автора несколько похожих файлов, и подобранный по имени легко оказался бы не тем. README темплейта называл 0.69 ГБ — сошлось."
+    },
+    {
+      "role": "lora_2",
+      "what": "WanAnimate_relight, вес 1.0",
+      "repo": "Kijai/WanVideo_comfy",
+      "path": "LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors",
+      "url": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors",
+      "bytes": 1436672440,
+      "gib": 1.338,
+      "sha256": "fc646c74c73f4b251f5fd9bc440ef21b03b27305f499966c68b2b3aa31498561",
+      "license": "НЕ ОБЪЯВЛЕНА",
+      "license_note": "тот же репозиторий, та же оговорка. Учёт к отгрузке, не блокер.",
+      "measured": true,
+      "measured_at": "2026-08-17",
+      "measured_by": "curl -X POST https://huggingface.co/api/models/Kijai/WanVideo_comfy/paths-info/main -H 'Content-Type: application/json' -d '{\"paths\":[\"LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors\"]}'",
+      "provenance": "ЗАМЕРЕНО. README темплейта называл 1.34 ГБ — сошлось."
+    }
+  ],
+
+  "totals": {
+    "bytes": 16469361250,
+    "gib": 15.3383,
+    "note": "Сумма шести замеренных файлов. §3 говорит «диск: 40 ГБ достаточно» — с запасом больше двукратного, и это теперь замер, а не оценка. Сумма LoRA 0.6873 + 1.338 = 2.025 GiB против 2.03 из §3.1 — бюджет VRAM оттуда замером подтверждён.",
+    "not_a_vram_budget": "Это ДИСК. Бюджет VRAM §3.1 (13.30 из 16) считается иначе: там веса плюс активации плюс резерв Comfy, и он не замерен ничем — карты нет."
+  },
+
+  "contract_claims": [
+    {
+      "claim": "обязательных входов WanAnimateToVideo пять: reference_image, face_video, pose_video, background_video, character_mask",
+      "source": "workflows/upstream/video_wan2_2_14B_animate.json (sha256 06ad8b95...), разбор связей; продублировано в workflows/upstream/WanAnimateToVideo.doc.md",
+      "checked": "2026-08-17",
+      "how": "ball_reel.fork_comfy.contract() обходит определения сабграфов — на верхнем уровне узла нет, там UUID сабграфа",
+      "outcome": "PASS, 5 из 5 на месте"
+    },
+    {
+      "claim": "у ноды НЕТ noise_mask и НЕТ композитинга: весь кадр сэмплируется",
+      "source": "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/comfy_extras/nodes_wan.py, sha256 тела dcd8b81d1225d84e8b0c6743675d59772449899018e9f50bb27267dbb8962002",
+      "checked": "2026-08-17",
+      "how": "grep по всему файлу: единственный noise_mask на строке 1454. Границы классов взяты awk-ом по '^class ': WanAnimateToVideo 1113..1252, Wan22ImageToVideoLatent 1414..1458 — значит 1454 принадлежит другой ноде. Слова composite в файле нет ни разу.",
+      "evidence": "1166 image = torch.ones((length,h,w,3))*0.5; 1219 image[ref:] = background_video[ref:]; 1240 concat_latent_image = cat(..., vae.encode(image)); 1245/1246 conditioning_set_values(concat_latent_image, concat_mask); 1248 latent = torch.zeros(...)",
+      "refutes": "workflows/upstream/WanAnimateToVideo.doc.md:27 — «Background video to composite with generated content». Записка вендора ошибается. Править её нельзя: она первоисточник и лежит как скачана; опровержение живёт в ball_reel/fork_comfy.py, константа NO_COMPOSITE.",
+      "consequence": "background_video — обусловливание, а не подложка. Обещание «реквизит и другие люди целы по построению» снято (§1a). Ни одна строка модуля не смеет обещать сохранность пикселей вне маски."
+    },
+    {
+      "claim": "face_video безусловно масштабируется в 512x512 внутри самой ноды",
+      "source": "nodes_wan.py:1207 (то же тело, sha256 dcd8b81d...)",
+      "checked": "2026-08-17",
+      "evidence": "face_video = common_upscale(face_video[:length].movedim(-1,1), 512, 512, 'area', 'center') * 2.0 - 1.0",
+      "consequence": "подать не 512 не ошибка Comfy, но тогда неизвестно, что доехало до модели. check_inputs требует ровно 512x512."
+    },
+    {
+      "claim": "length — шаг 4 от 1, а НЕ кратность 4",
+      "source": "workflows/upstream/WanAnimateToVideo.doc.md:20 — «default: 77, step: 4», минимум 1",
+      "checked": "2026-08-17",
+      "conflict": "§3.2 хэндофа говорит «length кратна 4», §3 задаёт 77 кадров, 77 на 4 не делится. Верх за первоисточником: буквальное чтение прозы забраковало бы штатную геометрию стека.",
+      "consequence": "check_inputs проверяет (length-1) % 4 == 0. 77 годится, 76 нет."
+    },
+    {
+      "claim": "width и height кратны 16",
+      "source": "workflows/upstream/WanAnimateToVideo.doc.md; геометрия §3 — 480x848",
+      "checked": "2026-08-17",
+      "consequence": "480 % 16 == 0 и 848 % 16 == 0 — штатная геометрия проверку проходит."
+    },
+    {
+      "claim": "нода ImageToMask существует, принимает IMAGE и комбо channel со значением red, отдаёт MASK",
+      "source": "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/comfy_extras/nodes_mask.py:131, sha256 тела f235d52703229b0bb7840cc48f0fffe6b00bf9398e119aa7d7f2fc9f3bdaba12",
+      "checked": "2026-08-17",
+      "was": "НЕПРОВЕРЕНО до 17.08.2026 — единственное недоказанное имя в произведённом графе. Пометка снята замером, а не решением: ComfyUI ставить по-прежнему нельзя, но исходник читается без установки.",
+      "consequence": "введённых недоказанных типов в произведённом графе теперь ноль. Реестр — PROVEN_BY_SOURCE в ball_reel/fork_comfy.py."
+    },
+    {
+      "claim": "LoadVideo и GetVideoComponents существуют",
+      "source": "доказаны ДВАЖДЫ: темплейтом (оба типа в нём есть) и https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/comfy_extras/nodes_video.py:220 и :194",
+      "checked": "2026-08-17",
+      "consequence": "загрузчики наших последовательностей стоят на доказанных именах"
+    },
+    {
+      "claim": "ДВА загрузчика произведённого графа расходятся со стеком §3: диффузия и текстовый энкодер",
+      "source": "прогон 2026-08-17: python3 -c \"from ball_reel import fork_comfy as fk; [print(n['id'],n['type'],n.get('widgets_values')) for n in fk.derive(fk.load_upstream())['graph']['nodes'] if n['type'] in ('UNETLoader','CLIPLoader','VAELoader')]\"",
+      "checked": "2026-08-17",
+      "status": "РАСХОЖДЕНИЕ, НЕ ЗАКРЫТО, И ЭТО НАХОДКА ПРОГОНА, А НЕ ЧТЕНИЯ.",
+      "evidence": "node 20 UNETLoader ['Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors','default'] — а §3 предписывает Wan2.2-Animate-14B Q3_K_M GGUF через UnetLoaderGGUF. node 2 CLIPLoader ['umt5_xxl_fp8_e4m3fn_scaled.safetensors','wan','default'] — а §3 предписывает umt5-xxl-encoder Q5_K_M GGUF. node 3 VAELoader ['wan_2.1_vae.safetensors'] — единственный, который сходится.",
+      "why_not_fixed": "оба узла из comfy-core, под вырезание кастомных наборов не попадают, и derive() их не трогает. Подменить их — не переименование файла: UnetLoaderGGUF это тип из ComfyUI-GGUF, то есть ЧЕТВЁРТЫЙ кастомный набор, который мы сознательно заводим взамен трёх вырезанных, и его лицензионная цепочка проверяется отдельно. Решение не мной и не молча.",
+      "consequence": "произведённый граф в нынешнем виде грузит fp8-модель 14B, а не Q3_K_M, — то есть бюджет VRAM §3.1 (13.30 из 16) к НЕМУ не относится. На карте это всплыло бы как OOM и было бы объяснено чем угодно другим. Записано здесь, чтобы всплыло раньше.",
+      "counted_as": "весы Q3_K_M и Q5_K_M выше замерены и в лок-файле стоят — потому что лок-файл описывает СТЕК §3, а не нынешнее состояние графа. Их расхождение и есть это утверждение."
+    }
+  ],
+
+  "unverified": [
+    "НЕПРОВЕРЕНО: произведённый граф не исполнялся ни разу. Проверка структурная.",
+    "НЕПРОВЕРЕНО: ни один из шести файлов не скачан — замерены только их размеры и sha256 по API. Что sha256 сойдётся после загрузки, здесь не показано.",
+    "НЕПРОВЕРЕНО: ветка render(source=RAN) испытана только подставным бэкендом. Настоящего ComfyUI в этой среде нет и ставить его запрещено (§10).",
+    "НЕПРОВЕРЕНО: номера строк nodes_wan.py и nodes_mask.py взяты с ветки master, которая движется. Привязка — sha256 тела, а не тег: api.github.com/repos закрыт прокси (403), поэтому коммит, на котором снято, назвать нечем."
+  ],
+
+  "shipping_ledger": [
+    "Kijai/WanVideo_comfy — лицензия НЕ ОБЪЯВЛЕНА, два файла (обе LoRA вендора). Известно, в блокеры не возвращать (§10).",
+    "QuantStack/Wan2.2-Animate-14B-GGUF — apache-2.0.",
+    "city96/umt5-xxl-encoder-gguf — apache-2.0.",
+    "Comfy-Org/Wan_2.1_ComfyUI_repackaged и Wan_2.2_ComfyUI_Repackaged — apache-2.0.",
+    "workflows/upstream — MIT, Comfy Org.",
+    "Лицензии получены полем cardData.license из GET https://huggingface.co/api/models/<repo>, 2026-08-17. Отсутствие поля прочитано как «не объявлена», а не как «свободна»."
+  ]
+}
