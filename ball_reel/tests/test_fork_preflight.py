@@ -396,6 +396,55 @@ class TheWeightsAreCheckedByHash(unittest.TestCase):
         self.assertEqual(got["lock"], str(elsewhere))
 
 
+class TheRegistryOfStreamEIsActuallyReadable(unittest.TestCase):
+    """Реестр — ВХОД, и вход надо проверять на настоящем файле, не только на своём.
+
+    Подделанный реестр проверяет наш разбор, а не договорённость с потоком E.
+    ХЭНДОФ обещал `workflows/fork_*.lock`, поток E положил
+    `fork_stack.lock.json` — расхождение поймано именно этим тестом.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def test_the_mask_finds_the_registry_that_actually_lies_in_the_tree(self):
+        """Т1 работает и здесь: сузив маску до обещанного `fork_*.lock`,
+        обязаны получить красное — файл в дереве называется иначе.
+
+        Без этого теста маска, разошедшаяся с именем, дала бы тихое «не
+        смогли»: худший ответ из трёх, потому что он выглядит законным.
+        """
+        d = self.ROOT / "workflows"
+        lying = sorted(p.name for p in d.iterdir()
+                       if p.is_file() and "lock" in p.name)
+        seen = sorted(p.name for p in d.glob(fp.LOCK_GLOB))
+        self.assertEqual(
+            lying, seen,
+            f"в {d} лежит {lying}, а маска {fp.LOCK_GLOB} видит {seen}. "
+            f"Разошедшаяся маска отвечает «реестра нет» вместо сверки.")
+
+    def test_either_we_read_it_or_we_say_we_could_not(self):
+        found = sorted((self.ROOT / "workflows").glob(fp.LOCK_GLOB))
+        got = fp.weights(str(self.ROOT))
+        if not found:
+            self.assertEqual(got["outcome"], UNMEASURED,
+                             "реестра нет, а предполёт не сказал «не смогли»")
+            self.assertIn("поток E", got["note"])
+            return
+        lock = fp.read_lock(found[0])
+        self.assertEqual(lock["outcome"], PASS,
+                         f"реестр {found[0].name} потока E нашей стороной не "
+                         f"разбирается: {lock['note']}")
+        self.assertTrue(lock["entries"], "в реестре нет ни одной записи с путём")
+        self.assertTrue(all(e["sha256"] for e in lock["entries"]),
+                        "в реестре есть запись без хэша — сверять нечем")
+
+    def test_the_weights_are_not_on_this_disk_and_that_is_said_out_loud(self):
+        """Веса стека сюда не качались: 40 ГБ. Значит «нет файла», не «ok»."""
+        got = fp.weights(str(self.ROOT))
+        self.assertNotEqual(got["outcome"], PASS)
+        self.assertEqual(got["ok"], 0)
+
+
 class _Answer:
     """Подделанный ответ HTTP. Тест в сеть не ходит (Т4)."""
 
@@ -525,14 +574,20 @@ class TheReportCountsThreeOutcomes(unittest.TestCase):
             self.assertIn(name, checks)
 
     def test_the_weights_and_comfy_checks_do_not_pass_by_default_here(self):
-        """В этой среде нет ни лок-файла, ни Comfy — обязано быть «не смогли».
+        """Ни весов, ни Comfy здесь нет — PASS не имеет права появиться.
 
         Негативный контроль (И5) на весь отчёт: если бы эти две проверки
-        отдавали PASS без реестра и без сервера, отчёт врал бы ровно там, где
+        отдавали PASS без файлов и без сервера, отчёт врал бы ровно там, где
         его читают перед арендой машины.
+
+        Состояние «весов» в этой среде за одну смену уже переехало: пока
+        реестра потока E не было — «не смогли», как только он лёг — «не годно,
+        нет файла ×6». Оба ответа верны, и оба не PASS; поэтому тест
+        сторожит именно это, а не одно из двух.
         """
         checks = fp.report()["checks"]
-        self.assertEqual(checks["веса"]["outcome"], UNMEASURED)
+        self.assertIn(checks["веса"]["outcome"], (UNMEASURED, FAIL))
+        self.assertEqual(checks["веса"]["ok"], 0)
         self.assertEqual(checks["comfy"]["outcome"], UNMEASURED)
 
 
