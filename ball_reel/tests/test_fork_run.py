@@ -128,5 +128,66 @@ class TheModulesAreActuallyWiredIn(unittest.TestCase):
                               f"мёртвым")
 
 
+class EveryForkFunctionTheSweepCallsActuallyExists(unittest.TestCase):
+    """Дыра, найденная потоком B, а не мной, и закрытая здесь.
+
+    `fork_run` звал `fork_leak.noise_floor`, которую поток B удалил по §1a.
+    Все три теста выше падают на отсутствующем фото и ДО этой строки не
+    доходят — то есть сводящий проход мог звать несуществующую функцию, а
+    сьют оставался зелёным. Это ровно тот дефект, ради которого в проекте
+    заведено правило про мёртвый код: он есть в отчёте, а в конвейере его нет.
+
+    Сквозной прогон закрыл бы дыру честнее, но он требует весов DWPose,
+    сегментации и десятков секунд на кадр. Разбор дерева стоит миллисекунды и
+    ловит ТОТ ЖЕ класс: имя, которого больше нет. Меньше, чем прогон, но не
+    ноль — а ноль здесь и был.
+    """
+
+    def _called_attributes(self) -> dict:
+        import ast
+        from collections import defaultdict
+
+        src = Path(fork_run.__file__).read_text(encoding="utf-8")
+        out = defaultdict(set)
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Attribute) and isinstance(node.value,
+                                                              ast.Name):
+                if node.value.id.startswith("fork_"):
+                    out[node.value.id].add(node.attr)
+        return out
+
+    def test_no_call_points_at_a_name_that_was_removed(self):
+        import importlib
+
+        missing = []
+        for module_name, attrs in self._called_attributes().items():
+            module = importlib.import_module(f"ball_reel.{module_name}")
+            for attr in sorted(attrs):
+                if not hasattr(module, attr):
+                    missing.append(f"{module_name}.{attr}")
+        self.assertEqual(
+            missing, [],
+            f"сводящий проход зовёт то, чего в модуле нет: {missing}. "
+            f"Так уже было с fork_leak.noise_floor после того, как §1a снял "
+            f"кодековую планку — и сьют этого не заметил.")
+
+    def test_the_check_would_have_caught_the_defect_it_was_written_for(self):
+        """Сторож, который не умеет краснеть, — украшение."""
+        import importlib
+
+        module = importlib.import_module("ball_reel.fork_leak")
+        self.assertFalse(hasattr(module, "noise_floor"),
+                         "кодековая планка вернулась в fork_leak — тогда этот "
+                         "тест больше не про тот дефект")
+        self.assertTrue(hasattr(module, "FLOOR_FULL_LOOP"),
+                        "имя, которым сводящий проход теперь пользуется, "
+                        "исчезло — проверка ищет не то")
+
+    def test_it_looks_at_more_than_one_module(self):
+        """Иначе проверка зеленела бы, найдя один модуль и пропустив восемь."""
+        seen = set(self._called_attributes())
+        self.assertGreaterEqual(len(seen), 6, f"разобрано слишком мало: {seen}")
+
+
 if __name__ == "__main__":
     unittest.main()
