@@ -123,7 +123,49 @@ PROVEN_BY_SOURCE = {
         "note": ("вход `image`, комбо `channel` со значением `red` в списке, "
                  "выход MASK — ровно то, как мы его ставим"),
     },
+    # ЧЕТВЁРТЫЙ СТОРОННИЙ ПАК, и он единственный, который форк впускает
+    # обратно, — только потому, что владелец платит за него сознательно, а не
+    # потому, что он приехал с темплейтом. Оба имени доказаны исходником, а не
+    # памятью: у моделей примерно пятая часть предлагаемых имён не существует
+    # (Ц10), и `CLIPLoaderGGUF` — ровно тот случай, где догадка «наверное, есть
+    # парный загрузчик» была бы правдоподобной и непроверенной.
+    "UnetLoaderGGUF": {
+        "url": ("https://raw.githubusercontent.com/city96/ComfyUI-GGUF/"
+                "main/nodes.py"),
+        "body_sha256": ("16be3b08b13de6279fc432addc628320019fcb24963cbc6b5"
+                        "2b248de8f06316e"),
+        "line": 135,
+        "checked": "2026-08-17",
+        "quote": ('class UnetLoaderGGUF: INPUT_TYPES -> {"required": '
+                  '{"unet_name": (unet_names,)}}, RETURN_TYPES = ("MODEL",); '
+                  'в NODE_CLASS_MAPPINGS строка 322'),
+        "note": ("единственный виджет — имя файла, выход MODEL: подставляется "
+                 "туда же, где стоял UNETLoader"),
+    },
+    "CLIPLoaderGGUF": {
+        "url": ("https://raw.githubusercontent.com/city96/ComfyUI-GGUF/"
+                "main/nodes.py"),
+        "body_sha256": ("16be3b08b13de6279fc432addc628320019fcb24963cbc6b5"
+                        "2b248de8f06316e"),
+        "line": 200,
+        "checked": "2026-08-17",
+        "quote": ('class CLIPLoaderGGUF: {"required": {"clip_name": '
+                  '(s.get_filename_list(),), "type": '
+                  'base["required"]["type"]}}; в NODE_CLASS_MAPPINGS 323'),
+        "note": ("виджетов ДВА, а не три: имя файла и тип энкодера. Штатный "
+                 "CLIPLoader несёт третьим `device`, и перенести его виджеты "
+                 "как есть значило бы отдать ноде лишнее значение. Значение "
+                 "`wan` берётся из списка штатного CLIPLoader (nodes.py, "
+                 "тело sha256 38f918673c5300bc..., в списке есть)"),
+    },
 }
+
+#: Пак, из которого приезжают загрузчики GGUF. Лицензия проверена ДО встраивания
+#: (Ц5): `curl .../ComfyUI-GGUF/main/LICENSE` -> «Apache License Version 2.0»,
+#: `pyproject.toml` -> `name = "comfyui-gguf"`, `version = "2.0.0"`, зависимости
+#: `gguf>=0.13.0`, `sentencepiece`, `protobuf`. Ни `non-commercial`, ни
+#: `research-only` в заголовке нет.
+GGUF_PACK = "comfyui-gguf"
 
 #: ---------------------------------------------------------------------------
 #: §1a. СНЯТО: «вне маски пиксели копируются». Проверено мной независимо.
@@ -298,14 +340,32 @@ def unfed_inputs(graph: dict) -> list:
 
 def derive(graph: dict | None = None, *,
            face_dir: str = "fork/face", pose_dir: str = "fork/body",
-           mask_dir: str = "fork/mask") -> dict:
+           mask_dir: str = "fork/mask",
+           quant: str | None = None) -> dict:
     """Произвести наш граф: вырезать ветку препроцессинга, подставить свою.
 
     Возвращает `{"graph": ..., "removed": [...], "introduced": [...]}` — и
     список введённых типов возвращается ВСЕГДА, даже пустой. Отчёт, в котором
     поле появляется только когда есть что сказать, читается как «всё чисто»
     ровно тогда, когда сломался сбор.
+
+    `quant` — РАЗВИЛКА §1, И ОНА НАРОЧНО НЕ РЕШЕНА ЗДЕСЬ. Умолчание оставляет
+    ступень такой, какая приехала с темплейтом (fp8, 17.138 ГиБ), и в этом
+    состоянии `audit_weights` КРАСНЫЙ: лок объявляет Q3_K_M. Красное здесь —
+    не недоделка, а единственный честный способ показать нерешённое: развилку
+    выбирает владелец, а модуль, который выбрал бы за него молча, спрятал бы
+    решение в умолчание. `quant=QUANT_GGUF` переводит граф на то, что в локе, и
+    та же проверка становится зелёной — то есть решение стоит одного слова, а
+    не переписывания графа.
     """
+    # Умолчание разрешается ЗДЕСЬ, а не в сигнатуре: значение по умолчанию
+    # связывается на импорте, и подмена константы модуля до него не доходит —
+    # то есть мутация `QUANT_TEMPLATE` не покраснела бы ни в одном тесте. Эту
+    # форму на проекте уже выгребали в семи местах (И7), и вносить её обратно
+    # ради одной строки нельзя.
+    quant = QUANT_TEMPLATE if quant is None else quant
+    if quant not in QUANTS:
+        raise ValueError(f"ступень {quant!r} неизвестна, есть {QUANTS}")
     src = load_upstream() if graph is None else graph
     proven = known_types(src)
     out = copy.deepcopy(src)
@@ -411,6 +471,9 @@ def derive(graph: dict | None = None, *,
         if bg_slot is not None and driving is not None:
             link(driving, 0, subgraph, bg_slot, "IMAGE")
 
+    if quant == QUANT_GGUF:
+        introduced.extend(_retarget_to_gguf(out, proven))
+
     out["last_node_id"] = next_id - 1
     out["last_link_id"] = next_link - 1
 
@@ -418,6 +481,7 @@ def derive(graph: dict | None = None, *,
     out["extra"]["fork"] = {
         "derived_from": UPSTREAM,
         "derived_from_sha256": UPSTREAM_SHA256,
+        "quant": quant,
         "removed": len(removed),
         "our_sources": OUR_SOURCES,
         "unrun": ("НЕПРОВЕРЕНО: граф не исполнялся, проверка структурная — "
@@ -464,6 +528,14 @@ def audit(derived: dict, *, upstream: dict | None = None) -> dict:
         problems.append(f"входов без питания {len(starving)}: "
                         + ", ".join(starving))
 
+    # ЧТО НАДО ПОСТАВИТЬ НА МАШИНЕ, кроме самого Comfy. Не нарушение и не
+    # проблема — расход, и он обязан быть НАЗВАН. `custom_left` мерит другое:
+    # осталось ли что-то из ТРЁХ ВЫРЕЗАННЫХ паков. После перевода на GGUF он
+    # честно печатает «кастомных осталось 0», а в графе при этом стоят две ноды
+    # четвёртого пака — и строка отчёта читалась бы как «сторонних наборов нет»
+    # ровно тогда, когда их снова один. Поэтому число рядом.
+    packs = sorted({pack_of(n) for n in graph.get("nodes", [])
+                    if pack_of(n) and pack_of(n).lower() != CORE_PACK})
     before = len(src.get("nodes", []))
     after = len(graph.get("nodes", []))
     return {
@@ -471,13 +543,16 @@ def audit(derived: dict, *, upstream: dict | None = None) -> dict:
         "nodes_before": before, "nodes_after": after,
         "custom_left": left, "dangling": dangling, "unfed": starving,
         "unproven_types": unproven,
+        "packs_required": packs,
         "problems": problems,
         "note": (f"нод было {before}, стало {after}; кастомных осталось "
                  f"{len(left)}, оборванных связей {len(dangling)}, входов без "
                  f"питания {len(starving)}, введённых недоказанных типов "
                  f"{len(unproven)}"
                  + (f" ({', '.join(i['type'] for i in unproven)})"
-                    if unproven else "") + ". "
+                    if unproven else "")
+                 + f", сторонних паков к установке {len(packs)}"
+                 + (f" ({', '.join(packs)})" if packs else "") + ". "
                  f"{'ЧИСТО' if not problems else '; '.join(problems)}. "
                  f"НЕПРОВЕРЕНО: граф не исполнялся."),
     }
@@ -817,6 +892,199 @@ def audit_lock(lock: dict | None = None) -> dict:
         "note": (f"проверено весов {len(weights)} (замерено {len(measured)}), "
                  f"утверждений {len(claims)}, нарушений {len(bad)}"
                  + ("" if not bad else ": " + "; ".join(bad))),
+    }
+
+
+#: Загрузчики весов: тип узла -> (имя виджета по документации, его индекс в
+#: `widgets_values`). Индекс нужен потому, что граф в UI-формате хранит виджеты
+#: СПИСКОМ без имён, и «первый виджет загрузчика — имя файла» — утверждение,
+#: которое надо было проверить, а не предположить. Проверено по шаблону:
+#: `CLIPLoader` там несёт `['umt5_xxl_fp8_e4m3fn_scaled.safetensors', 'wan',
+#: 'default']`, то есть имя файла действительно нулевое, а `wan` и `default` —
+#: тип энкодера и устройство.
+WEIGHT_WIDGET = {
+    "UNETLoader": ("unet_name", 0),
+    "CLIPLoader": ("clip_name", 0),
+    "VAELoader": ("vae_name", 0),
+    "CLIPVisionLoader": ("clip_name", 0),
+    "LoraLoaderModelOnly": ("lora_name", 0),
+    "UnetLoaderGGUF": ("unet_name", 0),
+    "CLIPLoaderGGUF": ("clip_name", 0),
+}
+
+#: Ступени, которыми граф может грузить диффузию. Значение — как в лок-файле,
+#: чтобы сравнение шло по одному слову, а не по двум похожим (Е1).
+QUANT_TEMPLATE = "как в шаблоне"
+QUANT_GGUF = "gguf"
+QUANTS = (QUANT_TEMPLATE, QUANT_GGUF)
+
+
+#: Чем оканчивается имя файла весов. ВЫБРАНО мной из наблюдаемого: оба
+#: расширения встречаются и в шаблоне, и в лок-файле, и ничего третьего стек не
+#: грузит. Нужно затем, чтобы виджет, оказавшийся НЕ именем файла, был находкой,
+#: а не тихо принятой строкой.
+WEIGHT_SUFFIXES = (".safetensors", ".gguf")
+
+
+def graph_weights(graph: dict) -> list:
+    """Какие ФАЙЛЫ ВЕСОВ граф реально подаёт в загрузчики.
+
+    Не «какие веса упомянуты в графе» — упомянуты они и в записках-заметках
+    темплейта, там лежат ссылки на bf16 и на fp8 сразу, и разбор по тексту
+    вернул бы оба. Здесь берутся только виджеты узлов-загрузчиков, то есть то,
+    что Comfy пойдёт открывать на диске.
+    """
+    out = []
+    for node in graph.get("nodes", []):
+        spec = WEIGHT_WIDGET.get(str(node.get("type")))
+        if spec is None:
+            continue
+        widget, index = spec
+        values = node.get("widgets_values") or []
+        if index >= len(values) or not isinstance(values[index], str):
+            continue
+        if not values[index].endswith(WEIGHT_SUFFIXES):
+            continue
+        out.append({"id": node.get("id"), "type": node["type"],
+                    "widget": widget, "file": values[index]})
+    return sorted(out, key=lambda r: (r["type"], r["file"]))
+
+
+def unparsed_loaders(graph: dict) -> list:
+    """Загрузчики, у которых объявленный виджет НЕ похож на имя файла весов.
+
+    НАЙДЕНО МУТАЦИЕЙ, А НЕ ЧТЕНИЕМ, и это единственная причина, по которой
+    функция существует. Подмена индекса `WEIGHT_WIDGET["CLIPLoader"]` с 0 на 1
+    выжила: разбор брал второй виджет, находил там `wan` — тип энкодера — и
+    объявлял его ИМЕНЕМ ФАЙЛА ВЕСОВ. Расхождений по-прежнему выходило 4,
+    разобранных по-прежнему 6, вердикт не менялся ни в одну сторону. То есть
+    прибор мерил не то, а отчёт выглядел ровно как раньше.
+
+    Тихо пропустить такой виджет — не лучше: это молчаливое «в графе нет
+    загрузчика», хотя загрузчик есть и реестр указывает не туда. Поэтому третий
+    список, который `audit_weights` обязан назвать.
+    """
+    out = []
+    for node in graph.get("nodes", []):
+        spec = WEIGHT_WIDGET.get(str(node.get("type")))
+        if spec is None:
+            continue
+        widget, index = spec
+        values = node.get("widgets_values") or []
+        got = values[index] if index < len(values) else None
+        if isinstance(got, str) and got.endswith(WEIGHT_SUFFIXES):
+            continue
+        out.append({"id": node.get("id"), "type": node["type"],
+                    "widget": widget, "index": index, "got": got})
+    return out
+
+
+def _retarget_to_gguf(out: dict, proven: set) -> list:
+    """Перевести диффузию и текстовый энкодер на то, что объявлено в локе.
+
+    ИМЯ ФАЙЛА БЕРЁТСЯ ИЗ ЛОКА, А НЕ ПИШЕТСЯ ЗДЕСЬ СТРОКОЙ, и это существенно:
+    строка, скопированная в код, — второй способ узнать известное, то есть
+    ровно тот дефект (Е1), который эта функция и закрывает. Разъедься лок с
+    кодом — и мы получили бы третье расхождение вместо снятого второго.
+
+    Возвращает список введённых типов — с происхождением, как и всё остальное,
+    что вводит `derive`. Пустой список означал бы, что в графе не нашлось того,
+    что надо было переводить, и это НЕ успех: `audit_weights` останется
+    красным, потому что лок по-прежнему не сойдётся с графом.
+    """
+    lock = load_lock()
+    by_role = {w.get("role"): Path(w["path"]).name
+               for w in lock.get("weights", []) if w.get("path")}
+    plan = {
+        "UNETLoader": ("UnetLoaderGGUF", "diffusion", 1),
+        "CLIPLoader": ("CLIPLoaderGGUF", "text_encoder", 2),
+    }
+    introduced = []
+    for node in out.get("nodes", []):
+        spec = plan.get(str(node.get("type")))
+        if spec is None:
+            continue
+        new_type, role, keep = spec
+        name = by_role.get(role)
+        if name is None:
+            continue
+        values = list(node.get("widgets_values") or [])
+        # `keep` — сколько виджетов у НОВОЙ ноды, проверено по её INPUT_TYPES
+        # (реестр PROVEN_BY_SOURCE). Штатный CLIPLoader несёт третьим `device`,
+        # которого у GGUF-варианта нет: перенести виджеты как есть значило бы
+        # отдать ноде лишнее значение, и Comfy прочёл бы его как тип.
+        node["widgets_values"] = [name] + values[1:keep]
+        node["type"] = new_type
+        props = dict(node.get("properties") or {})
+        props["Node name for S&R"] = new_type
+        props[PACK_KEY] = GGUF_PACK
+        node["properties"] = props
+        node["title"] = f"{new_type}: {name}"
+        introduced.append({"type": new_type, "id": node.get("id"),
+                           "provenance": provenance_of(new_type, proven),
+                           "pack": GGUF_PACK})
+    return introduced
+
+
+def audit_weights(derived: dict, *, lock: dict | None = None) -> dict:
+    """Сходится ли граф с лок-файлом ПО ФАЙЛАМ. Дефект, ради которого написано.
+
+    НАЙДЕНО ЗАМЕРОМ, А НЕ ЧТЕНИЕМ. `audit` проверял структуру, `audit_lock` —
+    полноту лока, и оба возвращали «годно» на состоянии, где граф грузит
+    `Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors` (17.138 ГиБ), а лок
+    объявляет `Wan2.2-Animate-14B-Q3_K_M.gguf` (8.038 ГиБ). Ни одного файла
+    общего по диффузии и энкодеру — и ни одной красной проверки. Это ровно
+    дефект Е1: одно знание («какие веса нужны прогону») в двух местах, и они
+    разъехались молча. Смена, приехавшая на карту, скачала бы по локу 15.338
+    ГиБ и запустила граф, который просит другие файлы.
+
+    Три исхода (Р1), и «граф без загрузчиков» — третий, а не первый: пустой
+    разбор дал бы «расхождений 0», то есть ложное «годно» (Р2). Поэтому рядом
+    с числом расхождений всегда стоит число разобранных загрузчиков.
+    """
+    graph = derived["graph"] if "graph" in derived else derived
+    lock = load_lock() if lock is None else lock
+
+    in_graph = graph_weights(graph)
+    unparsed = unparsed_loaders(graph)
+    declared = {Path(w["path"]).name: w.get("role", "?")
+                for w in lock.get("weights", [])}
+
+    if not in_graph or not declared:
+        return {"outcome": UNMEASURED, "problems": [],
+                "loaders_checked": len(in_graph),
+                "unparsed": unparsed,
+                "declared": len(declared),
+                "note": (f"разбирать нечего: загрузчиков {len(in_graph)}, "
+                         f"неразобранных {len(unparsed)}, записей в локе "
+                         f"{len(declared)}. Ноль расхождений при нуле "
+                         f"разобранного — не успех (Р2)")}
+
+    bad: list[str] = []
+    for row in unparsed:
+        bad.append(f"у {row['type']}#{row['id']} виджет №{row['index']} несёт "
+                   f"{row['got']!r}, а не имя файла весов — реестр "
+                   f"WEIGHT_WIDGET указывает не туда, и прибор мерит не то")
+    for row in in_graph:
+        if row["file"] not in declared:
+            bad.append(f"граф грузит {row['file']} узлом {row['id']} "
+                       f"({row['type']}), а в локе такого файла нет")
+    fed = {r["file"] for r in in_graph}
+    for name, role in sorted(declared.items()):
+        if name not in fed:
+            bad.append(f"лок объявляет {name} (роль {role}), но ни один "
+                       f"загрузчик графа его не просит")
+
+    return {
+        "outcome": FAIL if bad else PASS,
+        "problems": bad,
+        "loaders_checked": len(in_graph),
+        "unparsed": unparsed,
+        "declared": len(declared),
+        "note": (f"разобрано загрузчиков {len(in_graph)}, неразобранных "
+                 f"{len(unparsed)}, объявлено в локе "
+                 f"{len(declared)}, расхождений {len(bad)}"
+                 + ("" if not bad else ". " + "; ".join(bad))),
     }
 
 

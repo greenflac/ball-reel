@@ -188,6 +188,45 @@ class EveryForkFunctionTheSweepCallsActuallyExists(unittest.TestCase):
         seen = set(self._called_attributes())
         self.assertGreaterEqual(len(seen), 6, f"разобрано слишком мало: {seen}")
 
+    def test_the_weight_audit_is_actually_called_by_the_sweep(self):
+        """Проверка, не подключённая к пути, — мёртвый код в отчёте.
+
+        `audit_weights` написана после того, как расхождение графа с локом
+        прошло ОБА прежних аудита и полный прогон с мутациями. Если она снова
+        окажется вне сводящего прохода, дефект вернётся тем же способом.
+        """
+        self.assertIn("audit_weights",
+                      self._called_attributes().get("fork_comfy", set()))
+
+
+class TheGraphStepJudgesWeightsAndStructureTogether(unittest.TestCase):
+    """Структурно чистый граф с разъехавшимися весами — не «граф готов»."""
+
+    def _graph_step(self, quant):
+        import numpy as np
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            photo = Path(tmp) / "p.png"
+            Image.fromarray(
+                (np.random.rand(64, 64, 3) * 255).astype("uint8")).save(photo)
+            got = fork_run.run(photo, [], Path(tmp) / "out", quant=quant)
+        return next(s for s in got["steps"] if s["step"] == "граф")
+
+    def test_the_open_fork_makes_the_graph_step_fail(self):
+        self.assertEqual(self._graph_step(None)["outcome"], FAIL,
+                         "шаг «граф» зелен при графе, который просит не те "
+                         "файлы, что качает лок")
+
+    def test_the_decided_fork_makes_it_pass(self):
+        self.assertEqual(self._graph_step("gguf")["outcome"], PASS)
+
+    def test_both_notes_reach_the_report(self):
+        note = self._graph_step("gguf")["note"]
+        self.assertIn("ЧИСТО", note, "потерян отчёт структурной проверки")
+        self.assertIn("ВЕСА:", note, "потерян отчёт проверки весов")
+        self.assertIn("разобрано загрузчиков", note)
+
 
 if __name__ == "__main__":
     unittest.main()

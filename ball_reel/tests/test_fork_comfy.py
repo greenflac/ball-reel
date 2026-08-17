@@ -861,5 +861,204 @@ class TheLockFileIsCompleteAndEveryNumberHasACommand(unittest.TestCase):
         self.assertIn("нет-такого.json", str(caught.exception))
 
 
+class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
+    """Дефект, который прошёл ОБА аудита и целый прогон с мутациями.
+
+    `audit` мерил структуру, `audit_lock` — полноту лока, и на состоянии, где
+    граф грузит fp8 (17.138 ГиБ), а лок объявляет Q3_K_M (8.038 ГиБ), оба
+    печатали «годно». Смена на арендованной машине скачала бы по локу 15.338
+    ГиБ и запустила граф, просящий другие файлы. Здесь это сторожится.
+    """
+
+    def test_the_template_stage_is_red_because_the_fork_is_open(self):
+        got = fk.audit_weights(fk.derive())
+        self.assertEqual(got["outcome"], fk.FAIL,
+                         "расхождение графа с локом объявлено годным — тот же "
+                         "дефект, что прошёл полный аудит")
+
+    def test_it_names_both_directions_not_just_one(self):
+        problems = " ".join(fk.audit_weights(fk.derive())["problems"])
+        self.assertIn("а в локе такого файла нет", problems,
+                      "не назван файл, который граф грузит помимо лока")
+        self.assertIn("ни один загрузчик графа его не просит", problems,
+                      "не назван файл, который лок объявил зря — а именно его "
+                      "и качают на машину")
+
+    def test_the_gguf_stage_makes_the_same_check_green(self):
+        got = fk.audit_weights(fk.derive(quant=fk.QUANT_GGUF))
+        self.assertEqual(got["outcome"], fk.PASS, got["note"])
+        self.assertEqual(got["problems"], [])
+
+    def test_the_numbers_stand_next_to_the_verdict(self):
+        got = fk.audit_weights(fk.derive())
+        self.assertEqual(got["loaders_checked"], 6)
+        self.assertEqual(got["declared"], 6)
+        self.assertIn("разобрано загрузчиков 6", got["note"])
+
+    def test_a_graph_without_loaders_is_unmeasured_not_clean(self):
+        """Р2: ноль расхождений при нуле разобранного — не успех."""
+        got = fk.audit_weights({"graph": {"nodes": []}})
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+        self.assertEqual(got["loaders_checked"], 0)
+
+    def test_an_empty_lock_is_unmeasured_too(self):
+        got = fk.audit_weights(fk.derive(), lock={"weights": []})
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+
+    def test_only_loader_widgets_count_not_text_mentioned_in_notes(self):
+        """Разбор по тексту вернул бы и bf16, и fp8 сразу: ссылки на оба лежат
+        в записке темплейта. Мерить надо то, что Comfy пойдёт открывать."""
+        files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+        self.assertNotIn("wan2.2_animate_14B_bf16.safetensors", files,
+                         "в веса графа попало имя из записки — разбор идёт по "
+                         "тексту, а не по виджетам загрузчиков")
+        self.assertIn("Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                      files)
+
+    def test_breaking_the_widget_index_is_caught(self):
+        """Т1, мутация в обе стороны: «имя файла — нулевой виджет» проверено по
+        шаблону, а не предположено, и подмена индекса обязана краснеть.
+
+        Эта мутация ВЫЖИЛА на первом прогоне и стоила правки кода, а не теста:
+        разбор брал второй виджет `CLIPLoader`, находил там `wan` — тип
+        энкодера — и объявлял его именем файла весов. Расхождений выходило те же
+        4, разобранных те же 6, вердикт не двигался.
+        """
+        saved = dict(fk.WEIGHT_WIDGET)
+        try:
+            fk.WEIGHT_WIDGET["CLIPLoader"] = ("clip_name", 1)
+            got = fk.audit_weights(fk.derive())
+            self.assertEqual(len(got["unparsed"]), 1, got["note"])
+            self.assertIn("реестр WEIGHT_WIDGET указывает не туда",
+                          " ".join(got["problems"]))
+            files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+            self.assertNotIn("wan", files,
+                             "тип энкодера принят за имя файла весов")
+        finally:
+            fk.WEIGHT_WIDGET.clear()
+            fk.WEIGHT_WIDGET.update(saved)
+
+    def test_with_the_registry_right_nothing_is_unparsed(self):
+        """Негативный контроль к предыдущему (И5): вход, где список обязан быть
+        пустым. Без него проверка «нашлось неразобранное» зеленела бы всегда."""
+        for quant in (None, fk.QUANT_GGUF):
+            with self.subTest(quant=quant):
+                got = fk.audit_weights(fk.derive(quant=quant))
+                self.assertEqual(got["unparsed"], [], got["note"])
+                self.assertIn("неразобранных 0", got["note"])
+
+    def test_a_loader_carrying_no_file_name_is_named_not_skipped(self):
+        """Тихо пропустить такой загрузчик — молчаливое «его в графе нет»."""
+        graph = {"nodes": [{"id": 7, "type": "VAELoader",
+                            "widgets_values": ["не файл"]}]}
+        got = fk.unparsed_loaders(graph)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["got"], "не файл")
+
+
+class TheQuantStageIsAFlagNotARewrite(unittest.TestCase):
+    """Развилка §1 стоит одного слова — иначе решение владельца стоит правки
+    графа, а правка под сроком делается на арендованной машине наспех."""
+
+    def test_an_unknown_stage_falls_over_and_names_the_options(self):
+        with self.assertRaises(ValueError) as caught:
+            fk.derive(quant="q8")
+        self.assertIn("q8", str(caught.exception))
+        self.assertIn(fk.QUANT_GGUF, str(caught.exception))
+
+    def test_the_stage_is_recorded_inside_the_produced_file(self):
+        """Файл уедет на машину без этого репозитория: чем он грузится, должно
+        быть видно из него самого."""
+        for quant in (None, fk.QUANT_GGUF):
+            with self.subTest(quant=quant):
+                graph = fk.derive(quant=quant)["graph"]
+                self.assertEqual(graph["extra"]["fork"]["quant"],
+                                 fk.QUANT_TEMPLATE if quant is None else quant)
+
+    def test_the_default_is_not_bound_in_the_signature(self):
+        """И7: умолчание-константа в сигнатуре связывается на импорте, и
+        мутация константы модуля до неё не доходит. Форму уже выгребали в семи
+        местах — проверяется, что она не вернулась."""
+        import inspect
+
+        default = inspect.signature(fk.derive).parameters["quant"].default
+        self.assertIsNone(default,
+                          "умолчание снова стоит в сигнатуре — подмена "
+                          "QUANT_TEMPLATE перестанет доходить до вызова")
+
+    def test_mutating_the_default_stage_reaches_the_call(self):
+        """Продолжение предыдущего: сторож проверяет не форму, а следствие."""
+        saved = fk.QUANT_TEMPLATE
+        try:
+            fk.QUANT_TEMPLATE = fk.QUANT_GGUF
+            files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+            self.assertIn("Wan2.2-Animate-14B-Q3_K_M.gguf", files,
+                          "подмена константы умолчания не доехала до вызова")
+        finally:
+            fk.QUANT_TEMPLATE = saved
+
+    def test_the_gguf_loaders_are_proven_by_downloaded_source(self):
+        """Ц10: ~20% предлагаемых моделью имён не существует. Оба имени взяты
+        из NODE_CLASS_MAPPINGS скачанного файла, а не из памяти."""
+        for node_type, line in (("UnetLoaderGGUF", 135),
+                                ("CLIPLoaderGGUF", 200)):
+            with self.subTest(node_type=node_type):
+                src = fk.PROVEN_BY_SOURCE[node_type]
+                self.assertIn("ComfyUI-GGUF", src["url"])
+                self.assertEqual(src["line"], line)
+                self.assertEqual(len(src["body_sha256"]), 64)
+
+    def test_nothing_introduced_by_the_gguf_stage_is_unproven(self):
+        derived = fk.derive(quant=fk.QUANT_GGUF)
+        got = fk.audit(derived)
+        self.assertEqual(got["unproven_types"], [], got["note"])
+        self.assertEqual(got["outcome"], fk.PASS)
+
+    def test_the_clip_loader_gets_two_widgets_not_three(self):
+        """У GGUF-варианта виджетов два: имя и тип. Перенести третий `device`
+        значило бы отдать ноде лишнее значение, и Comfy прочёл бы его как тип."""
+        graph = fk.derive(quant=fk.QUANT_GGUF)["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "CLIPLoaderGGUF")
+        self.assertEqual(len(node["widgets_values"]), 2, node["widgets_values"])
+        self.assertEqual(node["widgets_values"][1], "wan",
+                         "тип энкодера потерян при переносе виджетов")
+
+    def test_the_unet_loader_gets_exactly_one_widget(self):
+        graph = fk.derive(quant=fk.QUANT_GGUF)["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "UnetLoaderGGUF")
+        self.assertEqual(len(node["widgets_values"]), 1, node["widgets_values"])
+
+    def test_the_file_names_come_from_the_lock_not_from_source_strings(self):
+        """Е1: строка, скопированная в код, — второй способ узнать известное,
+        то есть тот самый дефект, который эта развилка и закрывает."""
+        src = Path(fk.__file__).read_text(encoding="utf-8")
+        for name in ("Wan2.2-Animate-14B-Q3_K_M.gguf",
+                     "umt5-xxl-encoder-Q5_K_M.gguf"):
+            with self.subTest(name=name):
+                self.assertNotIn(f'"{name}"', src,
+                                 "имя файла весов вписано в модуль строкой — "
+                                 "оно обязано читаться из лок-файла")
+
+    def test_the_gguf_stage_still_feeds_every_required_input(self):
+        """Перевод загрузчиков не смеет уронить проводку: узел меняет тип, а
+        связи у него остаются те же."""
+        derived = fk.derive(quant=fk.QUANT_GGUF)
+        self.assertEqual(fk.unfed_inputs(derived["graph"]), [])
+
+    def test_the_fourth_pack_is_named_out_loud_in_the_audit(self):
+        """`custom_left` мерит другое — осталось ли что-то из трёх вырезанных.
+        После перевода он честно печатает 0, а сторонний пак снова один."""
+        got = fk.audit(fk.derive(quant=fk.QUANT_GGUF))
+        self.assertEqual(got["custom_left"], [])
+        self.assertIn(fk.GGUF_PACK, got["packs_required"])
+        self.assertIn("сторонних паков к установке 1", got["note"])
+
+    def test_the_template_stage_requires_no_third_party_pack(self):
+        """Негативный контроль (И5): вход, где та же проверка обязана молчать."""
+        got = fk.audit(fk.derive())
+        self.assertEqual(got["packs_required"], [])
+        self.assertIn("сторонних паков к установке 0", got["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

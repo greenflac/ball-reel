@@ -40,6 +40,7 @@ def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
 
 def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         grow_px: int = fork_mask.BLOCK,
+        quant: str | None = None,
         mask_model=None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
@@ -111,10 +112,23 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
 
     t = time.perf_counter()
     try:
-        derived = fork_comfy.derive()
+        derived = fork_comfy.derive(quant=quant)
         audit = fork_comfy.audit(derived)
+        # ВТОРАЯ ПРОВЕРКА ГРАФА, И ОНА НУЖНА ОТДЕЛЬНО ОТ ПЕРВОЙ. `audit` мерит
+        # структуру — ноды, связи, питание входов, — и на состоянии, где граф
+        # грузит fp8, а лок объявляет Q3_K_M, он честно печатает «ЧИСТО»:
+        # структурно там всё в порядке. Расхождение по ФАЙЛАМ ловит только
+        # `audit_weights`, и без него смена скачала бы по локу 15.338 ГиБ и
+        # запустила граф, просящий другие 26.849. Худший из двух исходов идёт в
+        # шаг: зелёная структура при разъехавшихся весах — это не «граф готов».
+        weights = fork_comfy.audit_weights(derived)
         fork_comfy.write(derived, out / "fork_graph.json")
-        steps.append(_step("граф", audit["outcome"], audit["note"],
+        worst = (FAIL if FAIL in (audit["outcome"], weights["outcome"])
+                 else UNMEASURED if UNMEASURED in (audit["outcome"],
+                                                   weights["outcome"])
+                 else PASS)
+        steps.append(_step("граф", worst,
+                           f"{audit['note']} ВЕСА: {weights['note']}",
                            time.perf_counter() - t))
     except (OSError, ValueError) as exc:
         steps.append(_step("граф", UNMEASURED, str(exc)[:200],
