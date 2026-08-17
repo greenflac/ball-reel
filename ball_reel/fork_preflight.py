@@ -25,11 +25,47 @@ brief про плотность VDI, и TFLOPS там не напечатан в
 
 ---
 
+ЧТО ЗАКРЫТО НЕ БЫЛО И ЗАКРЫТО ТЕПЕРЬ (ХЭНДОФ §6 H перечисляет четыре проверки):
+
+* **наличие файлов по хэшу** — `weights()`. Реестр эталонов принимается ВХОДОМ
+  (лок-файл потока E, `workflows/fork_*.lock`), а не зашивается: хэши весов
+  здесь взять неоткуда, а зашитый «эталон», придуманный этим модулем, был бы
+  ровно тем припоминанием, которое §9 запрещает. Нет лок-файла — исход «не
+  смогли», а не «всё хорошо»;
+* **живость Comfy по HTTP** — `comfy_alive()`. Comfy в среде нет и ставить его
+  запрещено (§10), поэтому проверка обязана честно возвращать «не смогли», а не
+  падать и не считаться пройденной.
+
+---
+
+ПРО ПАСПОРТНЫЕ TFLOPS. ЗАКРЫТЫЙ ДОМЕН НАЗЫВАЕТСЯ, А НЕ ОБХОДИТСЯ (Ц3).
+
+ХЭНДОФ §3.1a говорит: «по моим сведениям (**НЕ из даташита**) полный GA107 —
+20 SM… около 18 TFLOPS». Это ПРИПОМИНАНИЕ. Проверить его нужно было бы по
+`nvidia.com` (страница спецификаций GA107 / A16) — домен **закрыт прокси, и он
+не обходится**: ни зеркалом, ни сторонним прокси, ни снятием проверки TLS.
+Открыты `huggingface.co` и `raw.githubusercontent.com`, но числа SM у GA107
+там нет.
+
+Следствие в коде: числа 18, 20 SM и 256 FMA/SM здесь НЕТ ни в одной константе.
+Эффективная полоса — только параметр `measured_tflops`, и без него `throughput`
+отвечает «не смогли». `SPEC_TFLOPS` ниже намеренно `None` и сторожится тестом:
+подстановка туда любого числа не обязана менять ответ.
+
+---
+
 НЕПРОВЕРЕНО (Ц4), наверх:
 
 * **на карте не исполнялось.** В этой среде GPU нет: `nvidia-smi`
   отсутствует, и все ветки, которые его читают, шли только на подставленном
   выводе. Разбор строки CSV проверен тестами, живой прогон — нет;
+* **лок-файла `workflows/fork_*.lock` на день написания в дереве нет** — поток E
+  пишет его параллельно. Значит `weights()` в этой среде отвечает «не смогли», и
+  проверен он на подставленном лок-файле, а не на настоящем;
+* **живой Comfy не поднимался ни разу.** `comfy_alive()` проверен на подделанном
+  ответе и на закрытом порту, а не на работающем сервере;
+* **«около 18 TFLOPS» у GA107 — припоминание автора хэндофа**, не даташит и не
+  замер; проверить нечем, см. абзац про `nvidia.com` выше;
 * **бюджеты памяти — АРИФМЕТИКА, а не замер.** Числа ступеней взяты из
   ХЭНДОФ §3.1 и здесь только складываются. Сколько именно откусывает ECC,
   не замерено — `nvidia-smi` покажет на месте;
@@ -40,8 +76,13 @@ brief про плотность VDI, и TFLOPS там не напечатан в
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 from .fork_identity import FAIL, PASS, UNMEASURED
 
@@ -78,6 +119,41 @@ BF16_MIN_CAPABILITY = 8.6
 
 #: Сколько диска нужно под веса стека, ГБ. ХЭНДОФ §3: «40 ГБ достаточно».
 DISK_NEEDED_GB = 40
+
+#: Паспортная пиковая полоса карты. НАМЕРЕННО `None` и намеренно не заполняется.
+#:
+#: У A16 TFLOPS в даташите нет вообще (ХЭНДОФ §3.1), а «около 18 TFLOPS» из
+#: §3.1a — припоминание автора хэндофа, выведенное из числа SM, которого в
+#: product brief тоже нет. Проверять его нужно было бы по `nvidia.com`, и этот
+#: домен закрыт прокси; обходить запрещено (Ц3), поэтому число остаётся
+#: непроверяемым и в расчёт не входит.
+#:
+#: Константа существует только затем, чтобы у следующей смены был очевидный
+#: ответ на вопрос «а куда вписать паспорт»: никуда. Тест
+#: `test_a_spec_number_does_not_leak_into_the_answer` подставляет сюда 18.0 и
+#: требует, чтобы ответ НЕ ИЗМЕНИЛСЯ.
+SPEC_TFLOPS: float | None = None
+
+#: Куда смотрит предполёт за реестром эталонных хэшей. Пишет его поток E, и
+#: имя ищется маской: точное имя файла на день написания неизвестно, а зашивать
+#: угаданное имя значит получить «файла нет» вместо «хэш не сошёлся».
+LOCK_GLOB = "fork_*.lock"
+LOCK_DIR = "workflows"
+
+#: Читаем крупными кусками: веса стека — гигабайты, и построчное чтение здесь
+#: было бы медленнее без всякой пользы. ВЫБРАНО 1 МиБ как обычный компромисс.
+HASH_CHUNK_BYTES = 1 << 20
+
+#: Где искать живой Comfy. АДРЕС — ПАРАМЕТР, умолчание отсюда. 8188 — штатный
+#: порт ComfyUI; `/system_stats` выбран потому, что отвечает без задания и его
+#: тело содержит `system`, то есть по нему можно отличить Comfy от чего угодно
+#: другого, что оказалось на этом порту.
+COMFY_URL = "http://127.0.0.1:8188"
+COMFY_PROBE_PATH = "/system_stats"
+
+#: Секунды на попытку. ВЫБРАНО 2.0: живой Comfy на loopback отвечает за
+#: миллисекунды, а предполёт не имеет права висеть — он идёт первым (П2).
+COMFY_TIMEOUT_S = 2.0
 
 
 def gpus() -> dict:
@@ -241,8 +317,239 @@ def disk(path: str = ".") -> dict:
                      + ("" if free >= DISK_NEEDED_GB else " — не хватает"))}
 
 
+def find_lock(root: str = ".") -> dict:
+    """Найти реестр эталонов. Он ВХОД, а не знание этого модуля.
+
+    Хэши весов взять здесь неоткуда: файлы качает и записывает поток E. Зашитый
+    «эталон», сочинённый предполётом, был бы припоминанием, поданным как факт —
+    ровно то, что §9 запрещает, и ровно та ошибка, из-за которой в этом проекте
+    один раз писался код против несуществующего API.
+
+    Три исхода, и «лок-файла нет» — это НЕ «всё хорошо»: непроверенные веса
+    выглядят как проверенные ровно до первого запуска на арендованной машине.
+    """
+    d = Path(root) / LOCK_DIR
+    found = sorted(d.glob(LOCK_GLOB)) if d.is_dir() else []
+    if not found:
+        return {"outcome": UNMEASURED, "path": None, "entries": [],
+                "note": (f"реестра эталонов нет: {d}/{LOCK_GLOB} не найден. Его "
+                         f"пишет поток E; пока его нет, «веса на месте» СКАЗАТЬ "
+                         f"НЕЧЕМ — это не то же самое, что «веса на месте».")}
+    if len(found) > 1:
+        return {"outcome": UNMEASURED, "path": None, "entries": [],
+                "note": (f"реестров сразу {len(found)}: "
+                         + ", ".join(p.name for p in found)
+                         + ". Какой из них эталон — решает поток E, а угадывать "
+                           "здесь значит сверяться неизвестно с чем.")}
+    return read_lock(found[0])
+
+
+def read_lock(path: str | Path) -> dict:
+    """Разбор лок-файла. Вынесен наружу, чтобы проверяться без потока E (Т5).
+
+    Форма записи потоку H неизвестна заранее, поэтому принимаются обе
+    очевидные: список записей под ключом `weights`/`files` и отображение
+    «путь → хэш». Чего НЕ делается — не принимается запись без хэша как
+    годная: это `UNMEASURED` по каждой такой строке.
+    """
+    p = Path(path)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": f"реестр {p.name} не прочитан: {str(exc)[:100]}"}
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": (f"реестр {p.name} не разобран как JSON: "
+                         f"{str(exc)[:100]}. Это НАХОДКА, а не «весов нет».")}
+
+    raw_entries = None
+    if isinstance(doc, list):
+        raw_entries = doc
+    elif isinstance(doc, dict):
+        for key in ("weights", "files", "artifacts"):
+            if isinstance(doc.get(key), list):
+                raw_entries = doc[key]
+                break
+            if isinstance(doc.get(key), dict):
+                raw_entries = [{"path": k, "sha256": v}
+                               for k, v in doc[key].items()]
+                break
+    if raw_entries is None:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": (f"в реестре {p.name} не найдено ни одного списка весов "
+                         f"(ждём ключ weights/files/artifacts или список). "
+                         f"Пустой разбор — «не смогли», не «нечего проверять».")}
+
+    entries = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        rel = item.get("path") or item.get("file") or item.get("name")
+        if not rel:
+            continue
+        digest = item.get("sha256") or item.get("hash")
+        entries.append({"path": str(rel),
+                        "sha256": (str(digest).lower() if digest else None)})
+    if not entries:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": f"реестр {p.name} разобран, но ни одной записи с путём"}
+    return {"outcome": PASS, "path": str(p), "entries": entries,
+            "note": f"реестр {p.name}: записей {len(entries)}"}
+
+
+def sha256_of(path: str | Path) -> str:
+    """Хэш файла кусками: веса — гигабайты, целиком в память они не берутся."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(HASH_CHUNK_BYTES), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def weights(root: str = ".", *, lock_path: str | Path | None = None,
+            models_dir: str | Path | None = None) -> dict:
+    """Лежат ли веса стека на диске и ТЕ ЛИ ЭТО ФАЙЛЫ.
+
+    По каждому файлу три состояния, и они не сливаются:
+
+        ok        файл есть, хэш сошёлся
+        mismatch  файл есть, хэш НЕ сошёлся — это НАХОДКА, а не «файла нет»:
+                  докачка оборвалась, вендор подменил файл, или скачано другое
+                  квантование. Лечится по-разному, поэтому и состояние своё
+        missing   файла нет — качать
+        no_hash   файл найден, но эталона в реестре нет — проверить нечем
+
+    `mismatch` отдельно от `missing` именно потому, что «нет файла» человек
+    чинит одной командой, а «файл не тот» требует понять, чей он.
+    """
+    lock = read_lock(lock_path) if lock_path is not None else find_lock(root)
+    if lock["outcome"] != PASS:
+        return {"outcome": UNMEASURED, "lock": lock["path"], "files": [],
+                "ok": 0, "mismatch": 0, "missing": 0, "no_hash": 0,
+                "note": lock["note"]}
+
+    base = Path(models_dir) if models_dir is not None else Path(root)
+    files = []
+    for e in lock["entries"]:
+        target = Path(e["path"])
+        if not target.is_absolute():
+            target = base / target
+        if not target.exists():
+            files.append({"path": str(target), "state": "missing",
+                          "expected": e["sha256"], "got": None})
+            continue
+        if not e["sha256"]:
+            files.append({"path": str(target), "state": "no_hash",
+                          "expected": None, "got": None})
+            continue
+        try:
+            got = sha256_of(target)
+        except OSError as exc:
+            files.append({"path": str(target), "state": "no_hash",
+                          "expected": e["sha256"], "got": None,
+                          "why": str(exc)[:80]})
+            continue
+        files.append({"path": str(target),
+                      "state": "ok" if got == e["sha256"] else "mismatch",
+                      "expected": e["sha256"], "got": got})
+
+    counts = {s: sum(1 for f in files if f["state"] == s)
+              for s in ("ok", "mismatch", "missing", "no_hash")}
+    # Р2: ноль нарушений при нуле отработавших проверок — не успех. Если
+    # сверить не удалось ни одного файла, исход «не смогли», а не PASS.
+    if counts["mismatch"] or counts["missing"]:
+        outcome = FAIL
+    elif counts["ok"] and not counts["no_hash"]:
+        outcome = PASS
+    else:
+        outcome = UNMEASURED
+    bad = [f"{Path(f['path']).name} ({f['state']})" for f in files
+           if f["state"] != "ok"]
+    return {
+        "outcome": outcome, "lock": lock["path"], "files": files, **counts,
+        "note": (f"весов в реестре {len(files)}: сошлось {counts['ok']}, "
+                 f"хэш не сошёлся {counts['mismatch']}, нет файла "
+                 f"{counts['missing']}, проверить нечем {counts['no_hash']}"
+                 + (". Не сошлось: " + ", ".join(bad[:8]) if bad else "")),
+    }
+
+
+def _urlopen(url: str, timeout: float):
+    """Запрос БЕЗ прокси: Comfy стоит на loopback.
+
+    Ц3 здесь ни при чём — закрытый домен не обходится, а localhost через
+    внешний прокси просто не адресуется, и без этого обработчика ответ пришёл
+    бы от прокси, а не от Comfy.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(url, timeout=timeout)
+
+
+def comfy_alive(url: str = COMFY_URL, *, timeout_s: float = COMFY_TIMEOUT_S,
+                opener=None) -> dict:
+    """Жив ли Comfy по HTTP. Адрес и порт — параметр, умолчание `COMFY_URL`.
+
+    Comfy в этой среде НЕТ и ставить его запрещено (§10). Значит нормальный
+    исход здесь — «не смогли проверить», и он обязан быть именно им: ни
+    падением (предполёт нужен как раз на машине, где ещё ничего не поднято), ни
+    молчаливым PASS.
+
+    Исходы:
+        PASS        ответил и ответ похож на Comfy
+        FAIL        на порту КТО-ТО ЕСТЬ, но это не Comfy — находка: порт занят
+                    чужим сервисом, и «подниму Comfy сюда» не сработает
+        UNMEASURED  порт закрыт, таймаут, имя не разрешилось — Comfy просто нет
+
+    `opener` подменяется тестом (Т4): в сеть тест не ходит, а все ветки обязаны
+    проверяться, поэтому подделываются и ответ, и отказ.
+    """
+    target = url.rstrip("/") + COMFY_PROBE_PATH
+    call = opener or _urlopen
+    try:
+        resp = call(target, timeout_s)
+    except urllib.error.HTTPError as exc:
+        return {"outcome": FAIL, "url": target, "status": exc.code,
+                "note": (f"на {target} кто-то ответил HTTP {exc.code} — порт "
+                         f"занят, но это не рабочий Comfy. Это находка: "
+                         f"поднять Comfy на занятый порт не выйдет.")}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"outcome": UNMEASURED, "url": target, "status": None,
+                "note": (f"{target} не ответил ({str(exc)[:80]}). Это «не "
+                         f"смогли проверить», а не «Comfy сломан»: в этой среде "
+                         f"его нет и ставить запрещено (ХЭНДОФ §10).")}
+    try:
+        body = resp.read()
+    finally:
+        close = getattr(resp, "close", None)
+        if close:
+            close()
+    status = getattr(resp, "status", None) or getattr(resp, "code", 200)
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return {"outcome": FAIL, "url": target, "status": status,
+                "note": (f"{target} ответил {status}, но тело не JSON — на порту "
+                         f"не Comfy: {text[:60]!r}")}
+    if not isinstance(doc, dict) or "system" not in doc:
+        return {"outcome": FAIL, "url": target, "status": status,
+                "note": (f"{target} ответил {status} JSON без ключа `system` — "
+                         f"это не /system_stats Comfy, а чужой сервис")}
+    system = doc.get("system") or {}
+    version = system.get("comfyui_version") or system.get("python_version") or "?"
+    return {"outcome": PASS, "url": target, "status": status,
+            "version": version, "devices": len(doc.get("devices") or []),
+            "note": (f"Comfy отвечает на {target}: версия {version}, устройств "
+                     f"{len(doc.get('devices') or [])}. НЕ ПРОВЕРЯЛОСЬ на живом "
+                     f"сервере — только на подделанном ответе.")}
+
+
 def report(*, length: int = 77, measured_tflops: float | None = None,
-           path: str = ".") -> dict:
+           path: str = ".", lock_path: str | Path | None = None,
+           comfy_url: str = COMFY_URL) -> dict:
     """Весь предполёт. Числами (Р2): проверено N, провалено M, не смогли K.
 
     Порядок — дешёвое раньше дорогого (П2): диск опрашивается за миллисекунды,
@@ -254,6 +561,10 @@ def report(*, length: int = 77, measured_tflops: float | None = None,
 
     first = (cards.get("gpus") or [{}])[0]
     checks["память"] = budget(first.get("memory_gb"), length=length)
+    # Хэширование гигабайтов дороже опроса карты, но дешевле замера полосы, и
+    # идёт между ними (П2). Без лок-файла оно вообще не начинается.
+    checks["веса"] = weights(path, lock_path=lock_path)
+    checks["comfy"] = comfy_alive(comfy_url)
     checks["полоса"] = throughput(steps=6, measured_tflops=measured_tflops)
 
     passed = sum(1 for c in checks.values() if c["outcome"] == PASS)

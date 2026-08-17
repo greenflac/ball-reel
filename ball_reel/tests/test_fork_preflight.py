@@ -4,11 +4,24 @@
 её подделать. Второе, важнее: **пропускная способность без замера не
 подставляется из паспорта**. У A16 TFLOPS в даташите нет вообще, и функция,
 которая всё-таки выдала бы минуты на ролик, выдала бы их из воздуха.
+
+Третье и четвёртое добавлены позже, по ХЭНДОФ §6 H:
+
+* **веса по хэшу** — три состояния на файл, и «хэш не сошёлся» не сваливается в
+  «файла нет»; реестр эталонов приходит ВХОДОМ, а без него исход «не смогли»;
+* **живость Comfy** — в сеть тест не ходит (Т4): подделан и ответ, и отказ, а
+  закрытый порт берётся на loopback, где отказ приходит сразу и без сети.
 """
 
 from __future__ import annotations
 
+import inspect
+import json
+import socket
+import tempfile
 import unittest
+import urllib.error
+from pathlib import Path
 
 from ball_reel import fork_preflight as fp
 from ball_reel.fork_identity import FAIL, PASS, UNMEASURED
@@ -190,6 +203,301 @@ class ThroughputRefusesToGuessFromASpecSheet(unittest.TestCase):
                                  UNMEASURED)
 
 
+class TheSpecSheetNumberNeverLeaksIntoTheAnswer(unittest.TestCase):
+    """ХЭНДОФ §3.1a: «около 18 TFLOPS» — припоминание, а не даташит.
+
+    Проверить его было бы нечем: страница спецификаций лежит на `nvidia.com`,
+    домен закрыт прокси, обходить запрещено (Ц3). Значит единственный
+    допустимый источник эффективной полосы — замер, и это сторожится тестом, а
+    не обещанием в комментарии.
+    """
+
+    def test_there_is_no_spec_number_in_the_module(self):
+        self.assertIsNone(fp.SPEC_TFLOPS)
+
+    def test_the_throughput_default_is_no_measurement_at_all(self):
+        default = inspect.signature(fp.throughput).parameters[
+            "measured_tflops"].default
+        self.assertIsNone(default)
+
+    def test_a_spec_number_does_not_leak_into_the_answer(self):
+        """Т1 в обе стороны: подстановка паспорта не обязана менять ответ.
+
+        Первая сторона — вписав 18.0 в `SPEC_TFLOPS`, обязаны по-прежнему
+        получить «не смогли»: паспорт не считается замером. Вторая — тот же
+        18.0, поданный ЗАМЕРОМ, обязан дать минуты: функция не сломана, она
+        разборчива к источнику.
+        """
+        original = fp.SPEC_TFLOPS
+        try:
+            fp.SPEC_TFLOPS = 18.0
+            self.assertEqual(fp.throughput()["outcome"], UNMEASURED,
+                             "паспортное число подставилось вместо замера")
+            self.assertIsNone(fp.throughput()["minutes"])
+            self.assertEqual(fp.throughput(measured_tflops=18.0)["outcome"],
+                             PASS)
+        finally:
+            fp.SPEC_TFLOPS = original
+
+
+def _lock_doc(entries):
+    return json.dumps({"weights": entries}, ensure_ascii=False)
+
+
+class TheWeightsAreCheckedByHash(unittest.TestCase):
+    """Три состояния на файл. «Не тот файл» — находка, а не «файла нет»."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "workflows").mkdir()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _weight(self, name="model.gguf", body=b"weights-here"):
+        p = self.root / name
+        p.write_bytes(body)
+        return p
+
+    def _lock(self, entries, name="fork_stack.lock"):
+        p = self.root / "workflows" / name
+        p.write_text(_lock_doc(entries), encoding="utf-8")
+        return p
+
+    def test_a_hash_of_a_known_input_is_the_known_literal(self):
+        """Т2: ожидаемое — литерал, а не то же самое hashlib из модуля."""
+        empty = self.root / "empty.bin"
+        empty.write_bytes(b"")
+        self.assertEqual(
+            fp.sha256_of(empty),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    def test_the_chunk_size_does_not_change_the_hash(self):
+        """Размер куска — ручка скорости, а не решения: хэш обязан совпасть."""
+        p = self._weight(body=b"x" * 5000)
+        original = fp.HASH_CHUNK_BYTES
+        try:
+            fp.HASH_CHUNK_BYTES = 7
+            small = fp.sha256_of(p)
+        finally:
+            fp.HASH_CHUNK_BYTES = original
+        self.assertEqual(small, fp.sha256_of(p))
+
+    def test_a_matching_file_is_ok(self):
+        p = self._weight()
+        self._lock([{"path": "model.gguf", "sha256": fp.sha256_of(p)}])
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["ok"], 1)
+        self.assertEqual(got["files"][0]["state"], "ok")
+
+    def test_a_present_file_with_a_wrong_hash_is_a_finding_not_a_missing_file(self):
+        """Главное различие потока: две беды чинятся разными командами."""
+        self._weight()
+        self._lock([{"path": "model.gguf", "sha256": "00" * 32}])
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(got["mismatch"], 1)
+        self.assertEqual(got["missing"], 0)
+        self.assertEqual(got["files"][0]["state"], "mismatch")
+        self.assertIn("хэш не сошёлся", got["note"])
+
+    def test_one_changed_byte_turns_ok_into_mismatch(self):
+        """Тест, который умеет краснеть: сверка обязана ловить подмену."""
+        p = self._weight(body=b"weights-here")
+        self._lock([{"path": "model.gguf", "sha256": fp.sha256_of(p)}])
+        self.assertEqual(fp.weights(str(self.root))["outcome"], PASS)
+        p.write_bytes(b"weights-herf")
+        after = fp.weights(str(self.root))
+        self.assertEqual(after["outcome"], FAIL)
+        self.assertEqual(after["mismatch"], 1)
+
+    def test_an_absent_file_is_missing_not_mismatch(self):
+        self._lock([{"path": "model.gguf", "sha256": "00" * 32}])
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(got["missing"], 1)
+        self.assertEqual(got["mismatch"], 0)
+
+    def test_a_present_file_without_a_reference_hash_is_unmeasured(self):
+        """Р2: ноль нарушений при нуле сверок — не успех."""
+        self._weight()
+        self._lock([{"path": "model.gguf"}])
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["no_hash"], 1)
+        self.assertEqual(got["ok"], 0)
+
+    def test_one_good_file_does_not_hide_one_bad_one(self):
+        good = self._weight("good.gguf", b"good")
+        self._weight("bad.gguf", b"bad")
+        self._lock([{"path": "good.gguf", "sha256": fp.sha256_of(good)},
+                    {"path": "bad.gguf", "sha256": "11" * 32}])
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual((got["ok"], got["mismatch"]), (1, 1))
+        self.assertIn("bad.gguf", got["note"])
+
+    def test_without_a_lock_file_the_answer_is_unmeasured_not_fine(self):
+        self._weight()
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["ok"], 0)
+        self.assertIn("поток E", got["note"])
+
+    def test_two_lock_files_are_ambiguous_rather_than_guessed(self):
+        self._lock([{"path": "model.gguf", "sha256": "00" * 32}],
+                   name="fork_stack.lock")
+        self._lock([{"path": "model.gguf", "sha256": "11" * 32}],
+                   name="fork_other.lock")
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("fork_other.lock", got["note"])
+
+    def test_the_lock_mask_is_guarded_in_both_directions(self):
+        """Т1: разойдись маска с именем — обязаны получить «не смогли»."""
+        p = self._weight()
+        self._lock([{"path": "model.gguf", "sha256": fp.sha256_of(p)}])
+        original = fp.LOCK_GLOB
+        try:
+            self.assertEqual(fp.weights(str(self.root))["outcome"], PASS)
+            fp.LOCK_GLOB = "nothing_*.lock"
+            self.assertEqual(fp.weights(str(self.root))["outcome"], UNMEASURED)
+        finally:
+            fp.LOCK_GLOB = original
+
+    def test_a_broken_registry_is_a_finding_not_an_empty_result(self):
+        (self.root / "workflows" / "fork_stack.lock").write_text(
+            "{не json", encoding="utf-8")
+        got = fp.weights(str(self.root))
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("НАХОДКА", got["note"])
+
+    def test_a_registry_without_any_weights_list_is_unmeasured(self):
+        (self.root / "workflows" / "fork_stack.lock").write_text(
+            json.dumps({"workflow": {"sha256": "00" * 32}}), encoding="utf-8")
+        self.assertEqual(fp.weights(str(self.root))["outcome"], UNMEASURED)
+
+    def test_a_path_to_hash_mapping_is_accepted_too(self):
+        """Форма записи потока E заранее неизвестна — обе очевидные приняты."""
+        p = self._weight()
+        (self.root / "workflows" / "fork_stack.lock").write_text(
+            json.dumps({"weights": {"model.gguf": fp.sha256_of(p)}}),
+            encoding="utf-8")
+        self.assertEqual(fp.weights(str(self.root))["outcome"], PASS)
+
+    def test_the_registry_is_an_input_and_can_be_pointed_at_directly(self):
+        p = self._weight()
+        elsewhere = self.root / "elsewhere.lock"
+        elsewhere.write_text(
+            _lock_doc([{"path": "model.gguf", "sha256": fp.sha256_of(p)}]),
+            encoding="utf-8")
+        got = fp.weights(str(self.root), lock_path=elsewhere)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["lock"], str(elsewhere))
+
+
+class _Answer:
+    """Подделанный ответ HTTP. Тест в сеть не ходит (Т4)."""
+
+    def __init__(self, body, status=200):
+        self._body = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.status = status
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        pass
+
+
+GOOD_BODY = json.dumps({
+    "system": {"comfyui_version": "0.3.40", "python_version": "3.12.0"},
+    "devices": [{"name": "cuda:0"}],
+})
+
+
+class TheComfyProbeSaysCouldNotRatherThanCrashing(unittest.TestCase):
+    """Comfy в среде нет и ставить его запрещено (§10) — значит «не смогли»."""
+
+    def test_a_believable_answer_reads_as_alive(self):
+        got = fp.comfy_alive(opener=lambda url, timeout: _Answer(GOOD_BODY))
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["version"], "0.3.40")
+        self.assertEqual(got["devices"], 1)
+
+    def test_a_closed_port_is_unmeasured_not_failed(self):
+        """Настоящий loopback: свободный порт берётся и сразу отпускается.
+
+        Ветка по умолчанию (`urllib` без прокси) обязана проверяться живьём,
+        иначе подделан весь путь целиком. Сети здесь нет — только 127.0.0.1.
+        """
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        got = fp.comfy_alive(f"http://127.0.0.1:{port}")
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("§10", got["note"])
+
+    def test_a_timeout_is_unmeasured_too(self):
+        def slow(url, timeout):
+            raise TimeoutError("timed out")
+
+        got = fp.comfy_alive(opener=slow)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["status"])
+
+    def test_somebody_elses_service_on_the_port_is_a_failure_not_absence(self):
+        """Третий исход: порт занят чужим — «поднять Comfy сюда» не выйдет."""
+        got = fp.comfy_alive(
+            opener=lambda url, timeout: _Answer("<html>nginx</html>"))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("не Comfy", got["note"])
+
+    def test_valid_json_that_is_not_comfy_is_also_a_failure(self):
+        got = fp.comfy_alive(
+            opener=lambda url, timeout: _Answer(json.dumps({"ok": True})))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("system", got["note"])
+
+    def test_an_http_error_names_the_code(self):
+        def refuse(url, timeout):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+        got = fp.comfy_alive(opener=refuse)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(got["status"], 403)
+
+    def test_the_address_is_a_parameter_with_a_default(self):
+        seen = []
+
+        def spy(url, timeout):
+            seen.append((url, timeout))
+            return _Answer(GOOD_BODY)
+
+        fp.comfy_alive(opener=spy)
+        fp.comfy_alive("http://10.0.0.5:9000/", opener=spy)
+        self.assertEqual(seen[0][0], "http://127.0.0.1:8188/system_stats")
+        self.assertEqual(seen[1][0], "http://10.0.0.5:9000/system_stats")
+        self.assertEqual(seen[0][1], 2.0)
+
+    def test_the_probe_path_is_guarded(self):
+        """Т1: сменив ручку, обязаны увидеть другой запрос."""
+        seen = []
+
+        def spy(url, timeout):
+            seen.append(url)
+            return _Answer(GOOD_BODY)
+
+        original = fp.COMFY_PROBE_PATH
+        try:
+            fp.COMFY_PROBE_PATH = "/prompt"
+            fp.comfy_alive(opener=spy)
+        finally:
+            fp.COMFY_PROBE_PATH = original
+        self.assertEqual(seen[0], "http://127.0.0.1:8188/prompt")
+
+
 class TheReportCountsThreeOutcomes(unittest.TestCase):
 
     def test_it_runs_without_a_card_and_says_what_it_could_not_do(self):
@@ -209,6 +517,23 @@ class TheReportCountsThreeOutcomes(unittest.TestCase):
         got = fp.disk()
         self.assertIn(got["outcome"], (PASS, FAIL, UNMEASURED))
         self.assertEqual(got["needed_gb"], 40)
+
+    def test_all_four_checks_of_the_handoff_are_present(self):
+        """ХЭНДОФ §6 H: карты, диск, веса по хэшу, живость Comfy."""
+        checks = fp.report()["checks"]
+        for name in ("карты", "диск", "веса", "comfy"):
+            self.assertIn(name, checks)
+
+    def test_the_weights_and_comfy_checks_do_not_pass_by_default_here(self):
+        """В этой среде нет ни лок-файла, ни Comfy — обязано быть «не смогли».
+
+        Негативный контроль (И5) на весь отчёт: если бы эти две проверки
+        отдавали PASS без реестра и без сервера, отчёт врал бы ровно там, где
+        его читают перед арендой машины.
+        """
+        checks = fp.report()["checks"]
+        self.assertEqual(checks["веса"]["outcome"], UNMEASURED)
+        self.assertEqual(checks["comfy"]["outcome"], UNMEASURED)
 
 
 if __name__ == "__main__":
