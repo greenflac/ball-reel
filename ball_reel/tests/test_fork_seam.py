@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -29,6 +31,24 @@ def _mask(h=200, w=200, box=(50, 50, 150, 150)):
 def _textured(h=200, w=200, amp=0.25, seed=3):
     rng = np.random.default_rng(seed)
     return np.clip(0.5 + rng.normal(0, amp, (h, w, 3)), 0, 1)
+
+
+def _almost_flat_outside(h=200, w=200):
+    """Снаружи фактура НЕНУЛЕВАЯ, но ниже одного кода яркости; внутри — обычная.
+
+    Именно этот случай ловил старый гвард `d_out == 0` и не поймал на настоящем
+    кадре: ноль был не строгим нулём, а 0.000022.
+    """
+    # Пологий пандус, а не чередование: у чередования период 2, и центральная
+    # разность даёт РОВНО ноль — первая редакция фикстуры так и была написана и
+    # проверяла не то (поймано прогоном). Наклон 1.5e-5 на пиксель — ниже
+    # кванта 0.00196, то есть «плоско до предела представления».
+    img = np.full((h, w, 3), 0.5)
+    img += np.arange(w)[None, :, None] * 1.5e-5
+    m = _mask(h, w)
+    rng = np.random.default_rng(7)
+    img[m] = np.clip(0.5 + rng.normal(0, 0.25, (int(m.sum()), 3)), 0, 1)
+    return img
 
 
 class TheAxisSeesAFakedTextureInsideTheMask(unittest.TestCase):
@@ -107,6 +127,35 @@ class ThereAreThreeOutcomesNotTwo(unittest.TestCase):
         self.assertEqual(got["outcome"], UNMEASURED)
         self.assertIn("НЕ «шва нет»", got["note"])
 
+    def test_a_near_flat_background_is_unmeasured_rather_than_a_huge_ratio(self):
+        """Поймано ГЛАЗАМИ на настоящем кадре, а не рассуждением.
+
+        chain_frames/0049.png: внешнее кольцо легло на выбитую в белое штору,
+        d_out = 0.000022, и ось выдала 27.1818 на кадре, где шва нет по
+        построению. Строгий ноль такое не ловит — нужен пол.
+        """
+        img = _almost_flat_outside()
+        got = fs.seam(img, _mask())
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("пола", got["note"])
+
+    def test_the_detail_floor_is_guarded_in_both_directions(self):
+        """Т1: константа подменяется строже и слабее, оба раза видно."""
+        near_flat, plain = _almost_flat_outside(), _textured()
+        m = _mask()
+        with mock.patch.object(fs, "DETAIL_FLOOR", 0.0):    # слабее
+            loosened = fs.seam(near_flat, m)
+        with mock.patch.object(fs, "DETAIL_FLOOR", 1.0):    # строже
+            tightened = fs.seam(plain, m)
+        self.assertIsNotNone(loosened["ratio"],
+                             "ослабленный пол ничего не пропустил — значит не он решает")
+        self.assertGreater(loosened["ratio"], 10.0)
+        self.assertEqual(tightened["outcome"], UNMEASURED,
+                         "ужесточённый пол не отверг обычный кадр — "
+                         "константу никто не сторожит")
+        self.assertIsNotNone(fs.seam(plain, m)["ratio"],
+                             "при настоящем поле обычный кадр обязан меряться")
+
     def test_a_flat_background_is_unmeasured_rather_than_infinite(self):
         img = np.full((200, 200, 3), 0.5)
         m = _mask()
@@ -125,8 +174,8 @@ class TheBarComesFromAMeasuredGapOrNotAtAll(unittest.TestCase):
         seamed = [0.55, 1.60, 0.40]
         got = fs.bar_from_clouds(seamless, seamed)
         self.assertEqual(got["outcome"], PASS, got["note"])
-        self.assertGreater(got["bar"], got["seamless_max"])
-        self.assertLess(got["bar"], got["seamed_min"])
+        self.assertGreater(got["bar"].value, got["seamless_max"])
+        self.assertLess(got["bar"].value, got["seamed_min"])
         self.assertIn("ВНУТРЬ разрыва", got["note"])
 
     def test_overlapping_clouds_are_refused_rather_than_split_down_the_middle(self):
@@ -167,8 +216,116 @@ class TheVerdictRefusesToJudgeWithoutCalibration(unittest.TestCase):
         self.assertIn("само по себе ничего не значит", got["note"])
 
     def test_no_measurement_means_unmeasured(self):
-        got = fs.verdict({"ratio": None, "note": "мало пикселей"}, {"bar": 0.2})
+        real = fs.bar_from_clouds([1.0, 1.01, 0.99], [0.5, 1.5, 0.45])
+        got = fs.verdict({"ratio": None, "note": "мало пикселей"}, real)
         self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("ось не измерена", got["note"])
+
+
+class TheBarCannotBeSetAroundTheCalibration(unittest.TestCase):
+    """Правило «порог только внутрь разрыва» обязан держать код, а не привычка.
+
+    До этой правки `verdict` принимал любой словарь, и `{"bar": 0.2}`, набранный
+    руками, судил кадры наравне с калиброванным — то есть главное решение модуля
+    держалось соглашением.
+    """
+
+    def test_a_hand_written_bar_dict_is_refused(self):
+        got = fs.verdict({"ratio": 0.5}, {"bar": 0.2})
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("В ОБХОД", got["note"])
+
+    def test_a_bare_number_is_not_a_bar_either(self):
+        self.assertEqual(fs.verdict({"ratio": 0.5}, 0.2)["outcome"], UNMEASURED)
+
+    def test_the_bar_class_refuses_to_be_built_by_hand(self):
+        with self.assertRaises(TypeError) as e:
+            fs.Bar("не тот ключ", 0.2, 0.1, 0.05, 0.3, "из головы")
+        self.assertIn("bar_from_clouds", str(e.exception))
+
+    def test_a_minted_bar_does_judge(self):
+        """Негативный контроль И5: сторож обязан кого-то и пропускать."""
+        bar = fs.bar_from_clouds([1.0, 1.01, 0.99], [0.5, 1.5, 0.45])["bar"]
+        self.assertIsInstance(bar, fs.Bar)
+        self.assertEqual(fs.verdict({"ratio": 0.5}, bar)["outcome"], FAIL)
+        self.assertEqual(fs.verdict({"ratio": 1.0}, bar)["outcome"], PASS)
+
+
+class TheCloudCountsRefusalsSeparately(unittest.TestCase):
+    """Р2: «облако из N значений» без числа отказов — ноль нарушений при нуле проверок."""
+
+    def test_measured_and_unmeasured_are_two_numbers(self):
+        img, m = _textured(), _mask()
+        flat = np.full((200, 200, 3), 0.5)      # снаружи пусто -> отказ
+        rng = np.random.default_rng(1)
+        flat[m] = np.clip(0.5 + rng.normal(0, 0.3, (int(m.sum()), 3)), 0, 1)
+        got = fs.cloud([(img, m), (flat, m), (img, _mask(100, 100))])
+        self.assertEqual(got["measured"], 1)
+        self.assertEqual(got["unmeasured"], 2)
+        self.assertEqual(len(got["ratios"]), 1)
+
+
+class TheAxisOnRealRepositoryFrames(unittest.TestCase):
+    """Облако «бесшовных» снимается на настоящих кадрах, а не на синтетике.
+
+    Числа — литералы (Т2): импортируй ожидаемое из прибора, и оно поедет вместе
+    с ним. Получены прогоном `python3 -m ball_reel.fork_seam` 2026-08-17.
+    """
+
+    FRAME = Path(fs.__file__).resolve().parents[1] / "demo/kit/driving/0000.jpg"
+
+    def test_a_real_frame_reproduces_the_measured_ratio(self):
+        self.assertTrue(self.FRAME.exists(), f"кадр пропал: {self.FRAME}")
+        g = fs._gray(self.FRAME)
+        m = fs.arbitrary_masks(*g.shape)["ellipse"]
+        self.assertAlmostEqual(fs.seam(self.FRAME, m)["ratio"], 1.1509, places=4)
+
+    def test_the_seamless_cloud_on_one_real_frame_is_wide_not_tight(self):
+        """Отрицательный результат И6: на бесшовном кадре ось далека от 1.0.
+
+        Три произвольные маски на одном настоящем кадре дают отношения, которые
+        расходятся больше, чем хотелось бы от «шума». Это измеренная граница
+        применимости, и она записана числом, а не забыта.
+        """
+        g = fs._gray(self.FRAME)
+        got = fs.seamless_cloud([self.FRAME])
+        self.assertEqual(got["measured"], 3, got["note"])
+        self.assertGreater(got["off_max"], 0.4,
+                           "разброс вдруг стал маленьким — либо кадр подменён, "
+                           "либо ось перестала мерить положение маски")
+        self.assertEqual(g.shape, (1278, 720))
+
+
+class TheModuleReadsTheRatioTheWayParagraph1aRequires(unittest.TestCase):
+    """§1a: снаружи маски НЕ копия драйвинга, а такая же реконструкция.
+
+    Проверено самостоятельно 2026-08-17 по исходнику ноды: у `WanAnimateToVideo`
+    (строка 1113) нет `noise_mask` — единственный в файле принадлежит
+    `Wan22ImageToVideoLatent` (строка 1414), — и слова `composite` в файле нет.
+    Значит отношение 1.0 означает «две области реконструированы одинаково», а
+    НЕ «шва нет, потому что снаружи оригинал». Тест сторожит именно смысл: он
+    краснеет, если прежняя формулировка вернётся не перечёркнутой.
+    """
+
+    def test_the_old_copy_paste_reading_survives_only_struck_through(self):
+        import re
+
+        alive = re.sub(r"~~.*?~~", "", fs.__doc__, flags=re.S)
+        for dead in ("скопирован", "копия драйвинга"):
+            self.assertNotIn(dead, alive,
+                             f"«{dead}» вернулось в живой текст: §1a снял это "
+                             f"утверждение, перечёркивать, а не стирать")
+        self.assertIn("реконструкц", alive)
+        self.assertIn("~~", fs.__doc__, "старое стёрли вместо того чтобы зачеркнуть")
+
+    def test_the_verdict_note_does_not_promise_anything_about_the_background(self):
+        bar = fs.bar_from_clouds([1.0, 1.01, 0.99], [0.5, 1.5, 0.45])
+        note = fs.verdict({"ratio": 1.0}, bar)["note"]
+        self.assertIn("шва по этой оси не видно", note)
+        for overclaim in ("фон", "оригинал", "цел"):
+            self.assertNotIn(overclaim, note,
+                             "вердикт обещает больше, чем меряет: целость фона "
+                             "мерит ось протечки, а не эта")
 
 
 class TheModuleDoesNotTouchStyle(unittest.TestCase):
