@@ -591,5 +591,110 @@ class TheReportCountsThreeOutcomes(unittest.TestCase):
         self.assertEqual(checks["comfy"]["outcome"], UNMEASURED)
 
 
+class TheTrainingBudgetIsCountedNotRecalled(unittest.TestCase):
+    """Бюджет обучения: расход считается, а не пересказывается.
+
+    Нужда возникла из того, что комментарий в чужом скрипте («1*80G cannot
+    train») чуть не стал нашим бюджетом. Владелец оспорил, и оказалось, что 80
+    — артефакт ИХ конфигурации: база bf16, видео 81 кадр, без квантизации.
+    """
+
+    def test_four_bit_base_on_frames_fits_sixteen_gigabytes(self):
+        got = fp.training_budget(16.0, base="uint4", mode="кадры 512")
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertGreater(got["headroom_gb"], 0)
+
+    def test_fp8_base_does_not_fit_sixteen(self):
+        """Негативный контроль: если влезает ВСЁ, функция ничего не меряет."""
+        got = fp.training_budget(16.0, base="fp8", mode="кадры 512")
+        self.assertEqual(got["outcome"], FAIL, got["note"])
+
+    def test_video_mode_does_not_fit_sixteen_even_at_four_bits(self):
+        got = fp.training_budget(16.0, base="uint4", mode="видео 81 кадр")
+        self.assertEqual(got["outcome"], FAIL)
+
+    def test_the_tight_band_is_its_own_outcome_not_a_failure(self):
+        """Р1, и эта мутация ПЕРЕЖИЛА первый прогон: свёртывание «впритык» в
+        провал не краснело нигде, потому что полосу 0 <= запас < 1 не проверял
+        ни один тест.
+
+        Состояние отдельное именно потому, что ECC забирает неизмеренную часть
+        памяти, и остаток в 0.7 ГБ от неё не защищает: это не «влезло» и не
+        «не влезло», это «мы не знаем».
+        """
+        total = fp.training_budget(16.0)["total_gb"]
+        tight = fp.training_budget(total + 0.7)
+        self.assertEqual(tight["outcome"], UNMEASURED, tight["note"])
+        self.assertIn("ВПРИТЫК", tight["note"])
+        self.assertGreaterEqual(tight["headroom_gb"], 0)
+
+    def test_the_three_bands_are_all_reachable(self):
+        """Негативный контроль к предыдущему: если достижимы не все три,
+        третий исход существует только на бумаге."""
+        total = fp.training_budget(16.0)["total_gb"]
+        outcomes = [fp.training_budget(total + d)["outcome"]
+                    for d in (-1.0, 0.5, 5.0)]
+        self.assertEqual(outcomes, [FAIL, UNMEASURED, PASS])
+
+    def test_an_unknown_card_size_gives_the_cost_but_no_verdict(self):
+        """Р1: расход посчитан, вердикта нет — это третий исход, не провал."""
+        got = fp.training_budget(None)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNotNone(got["total_gb"])
+        self.assertIn("вердикт — нет", got["note"])
+
+    def test_an_unknown_mode_refuses_to_extrapolate(self):
+        got = fp.training_budget(16.0, mode="видео 300 кадров")
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("выдуманный расход", got["note"])
+
+    def test_the_parts_are_printed_not_just_the_total(self):
+        """Человек, которому сказали «10.3 ГБ», следующим спросит «из чего»."""
+        got = fp.training_budget(16.0)
+        for part in ("база", "LoRA с оптимизатором", "активации", "контекст CUDA"):
+            self.assertIn(part, got["parts"])
+        self.assertIn("РАСЧЁТ, НЕ ЗАМЕР", got["note"])
+
+    def test_the_rank_moves_the_trainable_parameters_linearly(self):
+        a = fp.training_budget(16.0, rank=32)["trainable_params"]
+        b = fp.training_budget(16.0, rank=64)["trainable_params"]
+        self.assertEqual(b, a * 2)
+
+    def test_a_high_rank_can_break_the_budget(self):
+        """Т1 в обе стороны: ранг обязан двигать вердикт, иначе он декорация."""
+        self.assertEqual(fp.training_budget(16.0, rank=32)["outcome"], PASS)
+        self.assertEqual(fp.training_budget(16.0, rank=2048)["outcome"], FAIL)
+
+    def test_moving_the_base_table_moves_the_verdict(self):
+        saved = dict(fp.TRAIN_BASE_GB)
+        try:
+            fp.TRAIN_BASE_GB["uint4"] = 100.0
+            self.assertEqual(fp.training_budget(16.0)["outcome"], FAIL,
+                             "подмена таблицы базы не доехала до вердикта")
+        finally:
+            fp.TRAIN_BASE_GB.clear()
+            fp.TRAIN_BASE_GB.update(saved)
+
+    def test_the_model_records_that_it_fails_its_own_control(self):
+        """И6: отрицательный результат записан числом и условиями.
+
+        Наш расчёт вендорской конфигурации даёт 54.3 ГБ, а они пишут, что 80 не
+        хватает. Модель НЕ воспроизводит известный контрольный вход, и это её
+        свойство, а не их ошибка."""
+        d = fp.TRAIN_MODEL_DISAGREES_WITH_VENDOR
+        self.assertEqual(d["наш расчёт, ГБ"], 54.3)
+        self.assertIn("8x80G", d["их утверждение"])
+        self.assertIn("занижает", d["вывод"])
+
+    def test_the_recorded_disagreement_matches_what_the_function_computes(self):
+        """Записанное число обязано СЛЕДОВАТЬ из функции, иначе это надпись."""
+        got = fp.training_budget(80.0, base="bf16", mode="видео 81 кадр")
+        self.assertAlmostEqual(
+            got["total_gb"],
+            fp.TRAIN_MODEL_DISAGREES_WITH_VENDOR["наш расчёт, ГБ"],
+            places=1,
+            msg="в реестре расхождения лежит число, которого функция не даёт")
+
+
 if __name__ == "__main__":
     unittest.main()
