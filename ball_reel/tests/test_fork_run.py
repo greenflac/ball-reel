@@ -466,6 +466,83 @@ class TheRenderStepClosesTheGapToTheServer(unittest.TestCase):
         self.assertIn("ждали", note)
 
 
+class TheLengthIsCountedByTheDrivingsOwnRate(unittest.TestCase):
+    """Дефект, найденный на стыке с раскодировщиком 18.08.
+
+    Wan Animate потребляет кадры позы ОДИН К ОДНОМУ с выходными: сколько
+    подано, столько родится. Значит длина сцены во времени задаётся тем, с
+    какой частотой драйвинг СНЯТ, а не тем, какую частоту мы объявляем на
+    выходе. Делили на нашу — и драйвинг 24 к/с длиной 10 с (240 кадров)
+    объявлялся восьмисекундным роликом, то есть движение шло на четверть
+    быстрее. Заметил бы это клиент глазами, а не отчёт.
+    """
+
+    def test_the_rate_of_the_source_sets_the_length(self):
+        # Литералы (Т2): 240 кадров при 24 к/с — это ровно 10 секунд.
+        self.assertEqual(fork_run.seconds_for(240, fps=24), 10.0)
+        self.assertEqual(fork_run.seconds_for(240, fps=30), 8.0)
+
+    def test_the_default_is_our_output_rate_and_that_is_deliberate(self):
+        """Кадры без метаданных — законный случай (каталог PNG)."""
+        self.assertEqual(fork_run.seconds_for(240), 8.0)
+
+    def test_a_rate_of_zero_is_refused_rather_than_divided_by(self):
+        """Ноль здесь означает «метаданные не прочитаны», а не «мгновенно»."""
+        with self.assertRaises(ValueError):
+            fork_run.seconds_for(240, fps=0)
+
+    def test_a_negative_rate_is_refused_too(self):
+        with self.assertRaises(ValueError):
+            fork_run.seconds_for(240, fps=-30)
+
+
+class TheDrivingVideoIsBroughtToOurRate(unittest.TestCase):
+    """Второй конец того же стыка: раскодировщик умеет приводить и без просьбы
+    не приводит, а весь остальной путь считает кадры идущими по 30 в секунду.
+
+    Взяв 60 к/с как есть, мы получили бы вдвое больше кадров, чем окон.
+    """
+
+    def _decode(self, rate, seconds=2):
+        import subprocess
+
+        tmp = Path(tempfile.mkdtemp())
+        src = tmp / "d.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+             f"testsrc=size=480x832:rate={rate}:duration={seconds}",
+             "-pix_fmt", "yuv420p", str(src)], check=True)
+        from ball_reel import fork_comfy, fork_video
+
+        return fork_video.frames(src, tmp / "out", fps=fork_comfy.WRAP_FPS)
+
+    def setUp(self):
+        import shutil
+
+        if shutil.which("ffmpeg") is None:
+            self.fail("ffmpeg нет — проверка приведения частоты НЕ ОТРАБОТАЛА. "
+                      "Это не повод её пропустить: раскодировщик без ffmpeg "
+                      "бесполезен, и молчаливый skip прятал бы это (Т6)")
+
+    def test_a_faster_source_is_thinned_to_our_rate(self):
+        got = self._decode(60)
+        self.assertEqual(got["outcome"], PASS)
+        # 2 секунды при 30 к/с — 60 кадров, сколько бы ни было в исходнике.
+        self.assertEqual(got["written"], 60)
+
+    def test_our_own_rate_passes_through_unchanged(self):
+        got = self._decode(30)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["written"], 60)
+
+    def test_a_slower_source_is_refused_because_frames_cannot_be_invented(self):
+        """Негативный контроль (И5), и он совпадает с осью проверки карточки."""
+        got = self._decode(24)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(got["written"], 0)
+        self.assertIn("ВВЕРХ НЕ ПРИВОДИМ", got["note"])
+
+
 class TheOperatorEntryPoint(unittest.TestCase):
     """Ради чего писался слой оператора: новый драйвинг без входа в код."""
 
@@ -503,9 +580,26 @@ class TheOperatorEntryPoint(unittest.TestCase):
 
     def test_the_description_step_comes_before_everything(self):
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.from_template(self._bench(tmp), Path(tmp) / "out")
+            got = fork_run.from_template(
+                self._bench_with_a_real_photo(tmp), Path(tmp) / "out")
         self.assertEqual([s["step"] for s in got["steps"]][:2],
                          ["описание", "плечо"])
+
+    def test_a_stub_driving_file_stops_the_path_instead_of_giving_no_frames(self):
+        """Стенд кладёт `SYNTHETIC-NOT-A-VIDEO` под именем `driving.mp4`.
+
+        До 18.08 сбор кадров шёл `glob`-ом по каталогу, файл давал пустой
+        список МОЛЧА, и путь ехал дальше собирать граф на 150 кадров при нуле
+        поданных. Теперь драйвинг-файл раскодируется, и заглушка — провал с
+        названной причиной, а не тишина.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fork_run.from_template(self._bench(tmp), Path(tmp) / "out")
+        self.assertEqual(got["steps"][0]["step"], "описание")
+        self.assertEqual(got["steps"][0]["outcome"], FAIL)
+        self.assertIn("не раскодирован", got["steps"][0]["note"])
+        self.assertEqual(len(got["steps"]), 1,
+                         "путь поехал дальше по нераскодированному драйвингу")
 
     def test_the_arm_named_in_the_card_is_the_one_used(self):
         """Иначе в карточке стоит одно, а маску расширяет роутер по-своему."""
@@ -533,7 +627,7 @@ class TheOperatorEntryPoint(unittest.TestCase):
         self.assertEqual(len(got["steps"]), 1,
                          "боевой прогон поехал по испытательному описанию")
 
-    def test_the_check_verdict_is_the_one_the_step_prints(self):
+    def test_the_check_verdict_is_the_one_the_step_prints(self):  # noqa: D401
         """Исход берётся у проверяльщика описания, а не пишется литералом.
 
         Прежде здесь стоял `PASS`, и вердикт `_check` до отчёта не доезжал:
@@ -545,7 +639,7 @@ class TheOperatorEntryPoint(unittest.TestCase):
         from ball_reel import fork_template
 
         with tempfile.TemporaryDirectory() as tmp:
-            card = self._bench(tmp)
+            card = self._bench_with_a_real_photo(tmp)
             desc = fork_template.load(card)
             got = fork_run.from_template(card, Path(tmp) / "out")
         self.assertEqual(got["steps"][0]["outcome"],

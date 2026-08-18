@@ -24,7 +24,8 @@ from pathlib import Path
 
 from . import (fork_backend, fork_build_route, fork_channels, fork_comfy,
                fork_leak, fork_lora_attach, fork_lora_dataset, fork_mask,
-               fork_preflight, fork_props, fork_seam, fork_template)
+               fork_preflight, fork_props, fork_seam, fork_template,
+               fork_video)
 from .fork_comfy import SECONDS_MAX, SECONDS_MIN
 from .fork_identity import FAIL, PASS, UNMEASURED
 
@@ -35,13 +36,25 @@ STEPS = ("предполёт", "входы", "корзина", "условия",
          "граф", "адаптер", "рендер", "протечка", "шов")
 
 
-def seconds_for(frame_count: int, *, fps: int | None = None) -> float:
+def seconds_for(frame_count: int, *, fps: float | None = None) -> float:
     """Длина ролика по числу кадров драйвинга, прижатая к границам продукта.
 
-    ВЫНЕСЕНО ИЗ `run` НАРОЧНО (Т5). Внутри точки входа эта развилка достижима
-    только настоящим прогоном по сотням кадров с детектором позы, то есть на
-    практике не проверяется вовсе: мутация частоты 30 -> 24 пережила полный
-    сьют, потому что все прогоны шли на пустом списке кадров.
+    `fps` — ЧАСТОТА ДРАЙВИНГА, А НЕ НАША ВЫХОДНАЯ. Это исправление дефекта,
+    найденного 18.08 на стыке с раскодировщиком, и разница не словесная.
+    Wan Animate потребляет кадры позы ОДИН К ОДНОМУ с выходными: сколько
+    кадров драйвинга подано, столько кадров и родится. Значит длина сцены во
+    времени определяется тем, с какой частотой драйвинг СНЯТ.
+
+    ЧТО БЫЛО: делили на `WRAP_FPS = 30` независимо от источника. Драйвинг
+    24 к/с длиной 10 с — это 240 кадров; 240/30 = 8, и путь молча объявлял
+    восьмисекундный ролик. Движение при этом проигрывалось бы на четверть
+    быстрее реального, и заметил бы это глазами клиент, а не отчёт.
+
+    УМОЛЧАНИЕ ОСТАЛОСЬ `WRAP_FPS` НАРОЧНО: подавать кадры без указания их
+    частоты — законный случай (каталог PNG без метаданных), и тогда считать
+    их нашими 30 к/с — единственное, что вообще можно сделать. Но вызывающий,
+    у которого частота ЕСТЬ, обязан её назвать, и `from_template` теперь
+    называет.
 
     Границы 5..10 с — промышленный стандарт, названный владельцем; частота 30
     выбрана им же после того, как 24 были забракованы за реализм.
@@ -49,6 +62,11 @@ def seconds_for(frame_count: int, *, fps: int | None = None) -> float:
     fps = fork_comfy.WRAP_FPS if fps is None else fps
     if not frame_count:
         return SECONDS_MIN
+    if fps <= 0:
+        raise ValueError(
+            f"частота драйвинга {fps!r} — делить на это нельзя. Ноль или "
+            f"отрицательное здесь означает, что метаданные не прочитаны, а "
+            f"не что ролик мгновенный")
     return min(max(frame_count / fps, SECONDS_MIN), SECONDS_MAX)
 
 
@@ -86,6 +104,7 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         adapter: str | Path | None = None,
         mask_model=None,
         seconds: float | None = None,
+        driving_fps: float | None = None,
         lock: dict | None = None,
         wrap: dict | None = None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
@@ -276,7 +295,8 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         # МОЛЧА ВЫБРАСЫВАЛСЯ: карточка с «10 секунд» давала граф на 5, шаг
         # печатал «годно», и расхождение вдвое не называлось нигде. Оператор
         # платил за прогон и получал ролик вдвое короче заказанного.
-        want = seconds_for(len(frames)) if seconds is None else float(seconds)
+        want = (seconds_for(len(frames), fps=driving_fps)
+                if seconds is None else float(seconds))
         derived = fork_comfy.derive_wrapper(seconds=want, lock=lock, **wrap)
         # Один аудит вместо трёх ПОТОМУ, ЧТО он их в себя включает: внутри
         # `audit_wrapper` зовёт и `audit_weights` (имена файлов против лока), и
@@ -438,11 +458,49 @@ def from_template(path: str | Path, out_dir: str | Path, *,
 
     root = Path(desc.get("_root") or Path(path).parent)
     photo = root / desc["photo"]
+    # ДРАЙВИНГ-ВИДЕОФАЙЛ РАСКОДИРУЕТСЯ ЗДЕСЬ, а не считается пустым списком.
+    # Поле карточки называется «драйвинг», и оператор кладёт в него `.mp4` —
+    # так и задумано. До 18.08 сбор шёл `glob`-ом ТОЛЬКО по каталогу, файл
+    # давал ноль кадров молча, и путь собирал граф на 150 кадров при нуле
+    # поданных. Раскодировщик закрывает это, и заодно приносит НАСТОЯЩУЮ
+    # частоту драйвинга — без неё длина ролика считалась по нашей выходной
+    # частоте, и драйвинг 24 к/с проигрывался бы на четверть быстрее.
     frames = kw.pop("driving_frames", None)
+    driving_fps = None
+    decoded_note = ""
     if frames is None:
         driving = root / desc["driving"]
-        frames = (sorted(driving.glob("*.png")) + sorted(driving.glob("*.jpg"))
-                  if driving.is_dir() else [])
+        if driving.is_dir():
+            frames = (sorted(driving.glob("*.png"))
+                      + sorted(driving.glob("*.jpg")))
+            decoded_note = f"кадры взяты из каталога {driving.name}"
+        elif driving.is_file():
+            meta = fork_video.probe(driving)
+            # ПРИВОДИМ К НАШЕЙ ВЫХОДНОЙ ЧАСТОТЕ, а не берём как есть.
+            # Раскодировщик это умеет и без просьбы не делает — а весь
+            # остальной путь считает, что кадры драйвинга идут по 30 в
+            # секунду: `seconds_for` делит на неё, `frames_for` умножает на
+            # неё. Взяв 60 к/с как есть, мы получили бы вдвое больше кадров,
+            # чем окон, и ролик в половину заказанной скорости. Драйвинг ниже
+            # 30 отказывается ЗДЕСЬ же — вверх не приводим, интерполяции нет,
+            # и то же самое требование уже стоит осью в проверке карточки.
+            got = fork_video.frames(driving, out / "driving",
+                                    fps=fork_comfy.WRAP_FPS)
+            if got["outcome"] == FAIL:
+                return _report([_step("описание", FAIL,
+                                      f"драйвинг не раскодирован: {got['note']}",
+                                      time.perf_counter() - t)], out)
+            frames = sorted((out / "driving").glob("*.png"))
+            # После приведения кадры идут по нашей частоте — значит и длину
+            # надо считать по ней. Частота исходника остаётся в отчёте, но
+            # арифметику больше не задаёт.
+            driving_fps = fork_comfy.WRAP_FPS
+            source_fps = meta.get("fps") if meta["outcome"] == PASS else None
+            decoded_note = (f"драйвинг {source_fps or '?'} к/с -> "
+                            f"{fork_comfy.WRAP_FPS} к/с: {got['note'][:140]}")
+        else:
+            frames = []
+            decoded_note = f"драйвинг {desc['driving']!r} не найден"
     # ИСХОД БЕРЁТСЯ У САМОГО ПРОВЕРЯЛЬЩИКА, а не пишется литералом. Прежде
     # здесь стоял `PASS`, и вердикт `_check` — вместе с его числами
     # «проверено / нарушений / не смогли» — до отчёта не доезжал вовсе: ось,
@@ -451,6 +509,7 @@ def from_template(path: str | Path, out_dir: str | Path, *,
     steps = [_step("описание", check.get("outcome", UNMEASURED),
                    f"{Path(path).name}: {desc.get('name')!r}, драйвинг "
                    f"{desc['driving']}, кадров подано {len(frames)}. "
+                   f"{decoded_note}. "
                    f"{check.get('note', 'проверяльщик описания не отчитался')}",
                    time.perf_counter() - t)]
     # ПЛЕЧО БЕРЁТСЯ ИЗ КАРТОЧКИ, если оператор его назвал. Иначе получилось
@@ -467,7 +526,8 @@ def from_template(path: str | Path, out_dir: str | Path, *,
                                  "fps") if k in desc}
     inner = run(photo, frames, out,
                 grow_px=armed["grow_px"] if desc.get("arm") != "auto" else None,
-                seconds=desc.get("seconds"), wrap=wrap,
+                seconds=desc.get("seconds"), driving_fps=driving_fps,
+                wrap=wrap,
                 props=(root / desc["props"]) if "props" in desc else None,
                 **kw)
     return _report(steps + inner["steps"], out)
