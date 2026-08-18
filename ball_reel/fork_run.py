@@ -24,7 +24,8 @@ from pathlib import Path
 
 from . import (fork_build_route, fork_channels, fork_comfy, fork_leak,
                fork_lora_attach, fork_lora_dataset, fork_mask, fork_preflight,
-               fork_props, fork_seam)
+               fork_props, fork_seam, fork_template)
+from .fork_comfy import SECONDS_MAX, SECONDS_MIN
 from .fork_identity import FAIL, PASS, UNMEASURED
 
 #: Порядок шагов. Дешёвое раньше дорогого (П2): отсутствующий вход ловится за
@@ -34,17 +35,57 @@ STEPS = ("предполёт", "входы", "корзина", "условия",
          "граф", "адаптер", "протечка", "шов")
 
 
+def seconds_for(frame_count: int, *, fps: int | None = None) -> float:
+    """Длина ролика по числу кадров драйвинга, прижатая к границам продукта.
+
+    ВЫНЕСЕНО ИЗ `run` НАРОЧНО (Т5). Внутри точки входа эта развилка достижима
+    только настоящим прогоном по сотням кадров с детектором позы, то есть на
+    практике не проверяется вовсе: мутация частоты 30 -> 24 пережила полный
+    сьют, потому что все прогоны шли на пустом списке кадров.
+
+    Границы 5..10 с — промышленный стандарт, названный владельцем; частота 30
+    выбрана им же после того, как 24 были забракованы за реализм.
+    """
+    fps = fork_comfy.WRAP_FPS if fps is None else fps
+    if not frame_count:
+        return SECONDS_MIN
+    return min(max(frame_count / fps, SECONDS_MIN), SECONDS_MAX)
+
+
+def conditions_verdict(cond: dict) -> str:
+    """Исход шага условий. Три, а не два, и ноль из нуля — не успех.
+
+    ВЫНЕСЕНО ИЗ `run` (Т5) по той же причине: чтобы шаг сказал «годно», нужен
+    настоящий детектор на настоящих кадрах, и потому обратная сторона правила
+    Р2 не проверялась ничем. `rendered == total` на пустом списке даёт истину,
+    и шаг печатал «годно» под текстом «снято 0 из 0».
+    """
+    if not cond["total"]:
+        return UNMEASURED
+    if cond["rendered"] > cond["total"]:
+        # Снято больше, чем подано, — состояние, которого быть не может.
+        # Пока здесь стояло `>=`, мутация `==` -> `>=` переживала весь сьют:
+        # на достижимых входах они неразличимы. Но неразличимость и есть
+        # ответ: несходящийся отчёт нельзя читать как успех, его надо читать
+        # как «не смогли» — считалка сломана, и вердикт по ней недействителен.
+        return UNMEASURED
+    if cond["rendered"] == cond["total"]:
+        return PASS
+    return UNMEASURED if cond["rendered"] else FAIL
+
+
 def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
     return {"step": name, "outcome": outcome, "note": note,
             "seconds": round(seconds, 3)}
 
 
 def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
-        grow_px: int = fork_mask.BLOCK,
-        quant: str | None = None,
+        grow_px: int | None = None,
         props: str | Path | None = None,
         adapter: str | Path | None = None,
-        mask_model=None) -> dict:
+        mask_model=None,
+        seconds: float | None = None,
+        lock: dict | None = None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
     `photo` — ЗАГРУЖЕННАЯ фотография, она же якорь оси личности. Медоид сюда
@@ -67,12 +108,29 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
 
     t = time.perf_counter()
     missing = [str(p) for p in [Path(photo), *frames] if not p.exists()]
+    # СУЩЕСТВОВАНИЯ МАЛО, и это найдено прогоном: испытательное описание
+    # кладёт заглушку `SYNTHETIC-NOT-A-PHOTO` с расширением .png, файл
+    # существует, и путь падал трассировкой уже на шаге корзины — то есть
+    # дорогой шаг оплачивался ради ошибки, читаемой за миллисекунду (П2).
+    # Открытие картинки стоит микросекунды и отвечает на настоящий вопрос:
+    # можно ли с этим работать.
+    unreadable = []
+    if not missing:
+        from PIL import Image, UnidentifiedImageError
+        for f in [Path(photo), *frames]:
+            try:
+                with Image.open(f) as im:
+                    im.verify()
+            except (UnidentifiedImageError, OSError, ValueError) as exc:
+                unreadable.append(f"{f.name}: {type(exc).__name__}")
     steps.append(_step(
-        "входы", FAIL if missing else PASS,
+        "входы", FAIL if (missing or unreadable) else PASS,
         f"нет файлов: {missing}" if missing else
-        f"фотография и {len(frames)} кадров драйвинга на месте",
+        f"файлы есть, но не читаются как изображения: {unreadable}"
+        if unreadable else
+        f"фотография и {len(frames)} кадров драйвинга на месте, все читаются",
         time.perf_counter() - t))
-    if missing:
+    if missing or unreadable:
         return _report(steps, out)
 
     # Корзина — сразу после входов и до всего дорогого: она решает, КАКОЙ
@@ -80,19 +138,27 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     # сотне кадров значит снять их, возможно, зря.
     t = time.perf_counter()
     routed = fork_build_route.route(photo)
+    # ПЛЕЧО МАСКИ ВЫБИРАЕТСЯ ЗДЕСЬ ЖЕ, а не в шаге масок, и это существенно:
+    # корзина роутера и ширина маски — одно решение, снятое с одной
+    # фотографии. Разложенные по разным шагам, они разъехались бы (Е1), и
+    # разъезд был бы не виден: обе величины выглядят самостоятельными.
+    # Отображение живёт в `fork_template.resolve_arm` — второй копии здесь
+    # нет нарочно.
+    armed = fork_template.resolve_arm({"arm": fork_template.AUTO_ARM,
+                                       "photo": str(photo), "_root": None},
+                                      router=lambda _p: routed)
+    arm_name = armed["arm"] if grow_px is None else None
     steps.append(_step(
         "корзина",
-        PASS if routed["bucket"] != fork_build_route.UNSURE else UNMEASURED,
-        routed["note"], time.perf_counter() - t))
+        PASS if (routed["bucket"] != fork_build_route.UNSURE
+                 and armed["outcome"] == PASS) else UNMEASURED,
+        f"{routed['note']} ПЛЕЧО: {armed['note']}", time.perf_counter() - t))
 
     t = time.perf_counter()
     if fork_channels.dwpose.available():
         cond = fork_channels.render_sequence(frames, out / "cond")
-        steps.append(_step(
-            "условия",
-            PASS if cond["rendered"] == cond["total"] else
-            UNMEASURED if cond["rendered"] else FAIL,
-            cond["note"], time.perf_counter() - t))
+        steps.append(_step("условия", conditions_verdict(cond), cond["note"],
+                           time.perf_counter() - t))
     else:
         cond = None
         steps.append(_step("условия", UNMEASURED,
@@ -104,7 +170,7 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
 
     if bodyparts.available():
         masks = fork_mask.sequence(frames, out / "mask", grow_px=grow_px,
-                                   model=mask_model)
+                                   arm_name=arm_name, model=mask_model)
         steps.append(_step("маски", masks["outcome"], masks["note"],
                            time.perf_counter() - t))
     else:
@@ -137,7 +203,20 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
             # ничто не мешало отработать.
             written = sorted(Path(masks["dir"]).glob("*.png"))
             marked = fork_props.sequence(props, written)
-            steps.append(_step("предметы", marked["outcome"], marked["note"],
+            # ПРОТАГОНИСТ И ПРАВИЛО ПОСТАНОВКИ — отдельными числами в тот же
+            # шаг. `sequence` отдаёт только `note` и `outcome`, и записанным
+            # долгом (DEBT 18.08) было ровно это: разметка второго человека
+            # снималась, а до отчёта не доезжала. Оператор увидел бы «предметы
+            # годно» и не узнал бы, что протагонист не выбран, — то есть
+            # заменён будет тот, кого сегментатор взял первым.
+            loaded = fork_props.load_marking(props)
+            rule = fork_props.directing_rule(loaded, len(written))
+            worst = (FAIL if FAIL in (marked["outcome"], rule["outcome"])
+                     else UNMEASURED if UNMEASURED in (marked["outcome"],
+                                                       rule["outcome"])
+                     else PASS)
+            steps.append(_step("предметы", worst,
+                               f"{marked['note']} ПОСТАНОВКА: {rule['note']}",
                                time.perf_counter() - t))
         except (OSError, ValueError, KeyError) as exc:
             steps.append(_step("предметы", FAIL, str(exc)[:200],
@@ -145,25 +224,34 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
 
     t = time.perf_counter()
     try:
-        derived = fork_comfy.derive(quant=quant)
-        audit = fork_comfy.audit(derived)
-        # ВТОРАЯ ПРОВЕРКА ГРАФА, И ОНА НУЖНА ОТДЕЛЬНО ОТ ПЕРВОЙ. `audit` мерит
-        # структуру — ноды, связи, питание входов, — и на состоянии, где граф
-        # грузит fp8, а лок объявляет Q3_K_M, он честно печатает «ЧИСТО»:
-        # структурно там всё в порядке. Расхождение по ФАЙЛАМ ловит только
-        # `audit_weights`, и без него смена скачала бы по локу 15.338 ГиБ и
-        # запустила граф, просящий другие 26.849. Худший из двух исходов идёт в
-        # шаг: зелёная структура при разъехавшихся весах — это не «граф готов».
-        weights = fork_comfy.audit_weights(derived)
+        # ГРАФ СОБИРАЕТСЯ ОБЁРТКОЙ, А НЕ ШТАТНЫМИ НОДАМИ, и это не смена вкуса.
+        # Цикл по окнам у обёртки живёт ВНУТРИ сэмплера — длина ролика
+        # задаётся числом `num_frames`. На штатных нодах его надо строить в
+        # графе руками, и у нас его не было: всё, что длиннее 77 кадров,
+        # конвейером не выражалось вовсе. Пять секунд при 30 к/с — это 150
+        # кадров, то есть КАЖДЫЙ наш ролик длиннее одного окна.
+        #
+        # ПРОТИВОРЕЧИЕ, КОТОРОЕ ЗДЕСЬ ЗАКРЫВАЕТСЯ ВСЛУХ. В модуле два
+        # производителя графа — `derive` (штатные ноды) и `derive_wrapper`.
+        # Пока сводящий проход звал первый, решение владельца про обёртку
+        # лежало в документах, а конвейер ехал по старому. Два способа узнать
+        # одно и то же — дефект (Е1); здесь остаётся один, и это тот, который
+        # поедет на карте.
+        want = seconds_for(len(frames))
+        derived = fork_comfy.derive_wrapper(seconds=want, lock=lock)
+        # Один аудит вместо трёх ПОТОМУ, ЧТО он их в себя включает: внутри
+        # `audit_wrapper` зовёт и `audit_weights` (имена файлов против лока), и
+        # `audit_loader_formats` (прочитает ли загрузчик поданный ему формат).
+        # Структурно чистый граф с разъехавшимися весами — не «граф готов», и
+        # худший из вложенных исходов доезжает до шага.
+        audit = fork_comfy.audit_wrapper(derived, lock=lock)
         fork_comfy.write(derived, out / "fork_graph.json")
-        worst = (FAIL if FAIL in (audit["outcome"], weights["outcome"])
-                 else UNMEASURED if UNMEASURED in (audit["outcome"],
-                                                   weights["outcome"])
-                 else PASS)
-        steps.append(_step("граф", worst,
-                           f"{audit['note']} ВЕСА: {weights['note']}",
-                           time.perf_counter() - t))
-    except (OSError, ValueError) as exc:
+        steps.append(_step(
+            "граф", audit["outcome"],
+            f"{want:.1f} с: {derived['params']['length']['note']}; "
+            f"{derived['params']['windows']['note']}. {audit['note']}",
+            time.perf_counter() - t))
+    except (OSError, ValueError, KeyError) as exc:
         steps.append(_step("граф", UNMEASURED, str(exc)[:200],
                            time.perf_counter() - t))
 
@@ -234,6 +322,64 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         time.perf_counter() - t))
 
     return _report(steps, out)
+
+
+def from_template(path: str | Path, out_dir: str | Path, *,
+                  production: bool | None = None, **kw) -> dict:
+    """Сквозной путь ОТ ОПИСАНИЯ ТЕМПЛЕЙТА — точка входа оператора.
+
+    Это то, ради чего писался операторский слой: завести новый драйвинг,
+    фотореференс и промт, не трогая ни строки кода и не входя в сессию
+    разработки. Описание читается `fork_template.load`, и он же его судит —
+    второй проверки здесь нет нарочно (Е1).
+
+    ОПИСАНИЕ, НЕ ПРОШЕДШЕЕ ПРОВЕРКУ, ДО ПРОГОНА НЕ ДОПУСКАЕТСЯ, и это не
+    вежливость. Дорогие шаги стоят минут на карте; негодный путь к драйвингу
+    ловится за миллисекунду (П2). Поэтому провал описания возвращается ОТЧЁТОМ
+    ИЗ ОДНОГО ШАГА, а не исключением: оператор должен увидеть тот же формат
+    «пройдено N, провалено M, не смогли K», а не трассировку.
+
+    `production=True` дополнительно требует, чтобы описание не было стендовым.
+    Прогнать боевого клиента по испытательному описанию — ошибка, которую
+    видно только по готовому ролику.
+    """
+    import time
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    t = time.perf_counter()
+    try:
+        desc = fork_template.load(path)
+        if production:
+            fork_template.assert_production(desc)
+    except (OSError, ValueError, KeyError, fork_template.RetargetForbidden) as exc:
+        return _report([_step("описание", FAIL, str(exc)[:400],
+                              time.perf_counter() - t)], out)
+
+    root = Path(desc.get("_root") or Path(path).parent)
+    photo = root / desc["photo"]
+    frames = kw.pop("driving_frames", None)
+    if frames is None:
+        driving = root / desc["driving"]
+        frames = (sorted(driving.glob("*.png")) + sorted(driving.glob("*.jpg"))
+                  if driving.is_dir() else [])
+    steps = [_step("описание", PASS,
+                   f"{Path(path).name}: {desc.get('name')!r}, драйвинг "
+                   f"{desc['driving']}, кадров подано {len(frames)}",
+                   time.perf_counter() - t)]
+    # ПЛЕЧО БЕРЁТСЯ ИЗ КАРТОЧКИ, если оператор его назвал. Иначе получилось
+    # бы, что в описании стоит `narrow`, а маску расширяет роутер по своему
+    # разумению, — и оператор об этом узнал бы по ролику. `auto` в карточке
+    # означает «спроси роутера», и тогда `grow_px` остаётся None, а решает
+    # шаг «корзина» внутри `run`.
+    armed = fork_template.resolve_arm(desc, root=root)
+    steps.append(_step("плечо", armed["outcome"], armed["note"], 0.0))
+    inner = run(photo, frames, out,
+                grow_px=armed["grow_px"] if desc.get("arm") != "auto" else None,
+                seconds=desc.get("seconds"),
+                props=(root / desc["props"]) if "props" in desc else None,
+                **kw)
+    return _report(steps + inner["steps"], out)
 
 
 def build_template(frame_paths, out_dir: str | Path, *, domain: str,
