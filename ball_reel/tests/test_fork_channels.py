@@ -171,7 +171,7 @@ class TheRenderingPutsInkOnlyWhereItsChannelAllows(unittest.TestCase):
                     fc.render(self.pts, fc.FACE_CHANNEL, w, h)
 
     def test_render_pair_returns_both_and_only_both(self):
-        pair = fc.render_pair(self.pts, self.w, self.h)
+        pair = fc.render_pair(self.pts, _solid(self.w, self.h), self.w, self.h)
         self.assertEqual(set(pair), set(fc.CHANNELS))
 
 
@@ -562,13 +562,13 @@ class TheFaceBoxSaysNoRatherThanGuessing(unittest.TestCase):
                             for y in range(0, 512, 7) for x in range(0, 512, 7)))
 
     def test_the_pair_keeps_two_different_canvases(self):
-        pair = fc.render_pair(_face_cluster(), 480, 848)
+        pair = fc.render_pair(_face_cluster(), _solid(480, 848), 480, 848)
         self.assertEqual(pair[fc.FACE_CHANNEL].size, (512, 512))
         self.assertEqual(pair[fc.BODY_CHANNEL].size, (480, 848),
                          "тело ушло в 512 — нода ждёт его в геометрии кадра")
 
     def test_the_pair_survives_an_unreadable_face_with_a_black_frame(self):
-        pair = fc.render_pair(_face_cluster(seen=0), 480, 848)
+        pair = fc.render_pair(_face_cluster(seen=0), _solid(480, 848), 480, 848)
         self.assertEqual(pair[fc.FACE_CHANNEL].size, (512, 512))
 
 
@@ -640,6 +640,7 @@ class TheSequenceKeepsFramesAligned(unittest.TestCase):
                                  f"разъедутся на всём остатке ролика")
         self.assertEqual((got["total"], got["rendered"]), (3, 2))
         self.assertEqual(got["no_person"], ["in1.png"])
+        self.assertEqual(got["face_missing"], [])
 
     def test_the_face_frames_are_five_twelve_and_the_body_frames_are_not(self):
         from PIL import Image
@@ -694,6 +695,609 @@ class TheSequenceReportsThreeOutcomes(unittest.TestCase):
             fork_sequence_empty(tmp)
             for c in fc.CHANNELS:
                 self.assertTrue((Path(tmp) / c).is_dir())
+
+
+# --------------------------------------------------------------------------
+# ПОПРАВКА 2026-08-18: КАНАЛ ЛИЦА — НАСТОЯЩИЙ КРОП, А НЕ ТОЧКИ.
+#
+# Всё, что ниже, написано против одного дефекта: в `face_video` уходили
+# нарисованные точки, а вендор кладёт туда пиксели кадра. Классы выше по файлу
+# оставлены и продолжают краснеть — но сторожат они СНЯТЫЙ путь
+# (`face_box`/`render_face`/`union_box`), и это единственная причина, по
+# которой они там: доказательство того, что прежнее поведение было именно
+# таким, каким записано в докстрингах.
+#
+# ЧЕГО ЭТИ ТЕСТЫ НЕ ДОКАЗЫВАЮТ (Ц4, наверх): что нарисованные точки давали
+# энкодеру движения мёртвый сигнал. Здесь проверяется соответствие
+# первоисточнику, а не цена прежней ошибки; её меряют на карте.
+# --------------------------------------------------------------------------
+
+
+def _solid(w: int = 832, h: int = 480, colour=(200, 30, 40)):
+    """Кадр одного цвета. Билинейный ресайз константы — та же константа.
+
+    Ровный цвет выбран не для простоты: любой пиксель кропа обязан быть РАВЕН
+    исходному, без «примерно», поэтому проверка не зависит ни от фильтра
+    ресайза, ни от округления рамки.
+    """
+    from PIL import Image
+
+    return Image.new("RGB", (w, h), colour)
+
+
+def _halves(w: int = 832, h: int = 480,
+            left=(255, 0, 0), right=(0, 0, 255)):
+    """Кадр из двух половин. Показывает, что взят нужный УЧАСТОК, а не «какой-то».
+
+    Ровный кадр доказывает происхождение пикселей, но не место: кроп мимо лица
+    отдал бы тот же цвет. Две половины — негативный контроль к этому (И5).
+    """
+    from PIL import Image
+
+    img = Image.new("RGB", (w, h), left)
+    for y in range(h):
+        for x in range(w // 2, w):
+            img.putpixel((x, y), right)
+    return img
+
+
+def _face_at(x0: float, x1: float, y0: float, y1: float,
+             score: float = 0.9, seen: int = 68) -> list:
+    """133 точки, где 68 лицевых заполняют прямоугольник ровно по углам.
+
+    Углы задаются явно, потому что вся вендорская формула — это арифметика над
+    габаритом; фикстура, у которой габарит «примерно такой», проверяла бы
+    примерно формулу.
+    """
+    out = [(0.0, 0.0, 0.0)] * fc.WHOLEBODY_JOINTS
+    face = list(fc.group_indices("face"))
+    corners = [(x0, y0), (x1, y1), (x0, y1), (x1, y0)]
+    for k, i in enumerate(face):
+        x, y = corners[k] if k < 4 else ((x0 + x1) / 2, (y0 + y1) / 2)
+        out[i] = (x, y, score if k < seen else fc.MIN_SCORE - 0.01)
+    return out
+
+
+class TheFaceBoxIsTheVendorsFormulaAndNotOurs(unittest.TestCase):
+    """Т2: ожидаемое — ЛИТЕРАЛЫ, снятые прогоном вендорской функции.
+
+    Числа получены так: вендорский `get_face_bboxes` из
+    `wan/modules/animate/preprocess/utils.py` скачан curl и ВЫПОЛНЕН на тех же
+    входах (2026-08-18, 3000 случайных рамок, расхождений 0). В тест уехали
+    четыре из них литералами — импортировать вендорский файл тест не может и не
+    должен: сети в тестах нет (Т4), а импорт из проверяемого модуля поехал бы
+    вместе с кодом (Т2).
+
+    Отдельная находка, стоящая записи: в `utils.py` ДВЕ функции с именем
+    `get_face_bboxes` — на строке 52 (принимает сырые 133 точки, режет [23:91],
+    имеет обучающую аугментацию `ratio_aug`) и на строке 201 (принимает 69
+    нормированных точек и режет [1:]). Вторая затеняет первую, то есть
+    работает именно она. Обе считают одну арифметику, и обе подтверждают, что
+    речь ровно о 68 лицевых точках COCO-WholeBody — то есть о нашей группе
+    `face` (23..91).
+    """
+
+    def test_a_square_face_in_the_middle_matches_the_vendor_literal(self):
+        got = fc.face_bbox(_face_at(100, 200, 100, 200), (480, 832))
+        self.assertEqual(got, (92, 207, 89, 203))
+
+    def test_a_wide_face_matches_the_vendor_literal(self):
+        got = fc.face_bbox(_face_at(100, 300, 200, 260), (480, 832))
+        self.assertEqual(got, (85, 314, 193, 262))
+
+    def test_a_face_at_the_top_edge_is_clamped_like_the_vendors(self):
+        got = fc.face_bbox(_face_at(100, 200, 2, 102), (480, 832))
+        self.assertEqual(got, (92, 207, 0, 105),
+                         "рамка не прижата к границе кадра: вендор ставит "
+                         "max(...,0), и кроп за краем кадра пуст")
+
+    def test_a_face_at_the_right_edge_is_clamped_like_the_vendors(self):
+        got = fc.face_bbox(_face_at(760, 830, 100, 200), (480, 832))
+        self.assertEqual(got, (755, 832, 89, 203))
+
+    def test_the_box_is_not_square_and_that_is_the_point(self):
+        """Негативный контроль к снятому `face_box`, который квадрат делал.
+
+        Квадрат был нашим решением под `crop="center"` ноды. Вендор растит обе
+        стороны одинаково и формы лица не меняет; если рамка вдруг снова
+        квадратная, значит в канал вернулась наша выдумка.
+        """
+        x1, x2, y1, y2 = fc.face_bbox(_face_at(100, 300, 200, 260), (480, 832))
+        self.assertNotAlmostEqual(x2 - x1, y2 - y1, delta=50)
+        square = fc.face_box(_face_at(100, 300, 200, 260))
+        self.assertAlmostEqual(square[2] - square[0], square[3] - square[1],
+                               places=6,
+                               msg="снятый face_box перестал быть квадратным — "
+                                   "тогда сравнение доказывает не то")
+
+    def test_the_vertical_expansion_goes_three_to_one_upwards(self):
+        """Асимметрия — первоисточник: вверх 3·delta, вниз delta.
+
+        Литералы: габарит 100..200 по y, рамка 89..203, то есть 11 px вверх и
+        3 px вниз. 68 точек не содержат лба, и симметричное расширение срезало
+        бы его правдоподобно.
+        """
+        _, _, y1, y2 = fc.face_bbox(_face_at(100, 200, 100, 200), (480, 832))
+        self.assertEqual((100 - y1, y2 - 200), (11, 3))
+
+    def test_horizontally_it_is_symmetric(self):
+        x1, x2, _, _ = fc.face_bbox(_face_at(100, 200, 100, 200), (480, 832))
+        self.assertEqual((100 - x1, x2 - 200), (8, 7),
+                         "по горизонтали вендор делит запас пополам "
+                         "(int() режет 7.0088 в 7 и 92.99 в 92)")
+
+    def test_the_scale_is_guarded_in_both_directions(self):
+        """Т1 по `FACE_BBOX_SCALE`: 1.0 — рамка ровно габарит, больше — шире."""
+        original = fc.FACE_BBOX_SCALE
+        try:
+            fc.FACE_BBOX_SCALE = 1.0
+            self.assertEqual(fc.face_bbox(_face_at(100, 200, 100, 200),
+                                          (480, 832)), (100, 200, 100, 200),
+                             "запас снят, а рамка всё равно шире габарита — "
+                             "значит scale в решении не участвует")
+            fc.FACE_BBOX_SCALE = 4.0
+            wide = fc.face_bbox(_face_at(100, 200, 100, 200), (480, 832))
+            self.assertGreater(wide[1] - wide[0], 190,
+                               "scale учетверён, а рамка того же размера")
+        finally:
+            fc.FACE_BBOX_SCALE = original
+
+    def test_the_asymmetry_constants_are_guarded_in_both_directions(self):
+        """Т1 по `FACE_DELTA_H_UP` и `FACE_DELTA_H_PARTS`."""
+        original_up, original_parts = fc.FACE_DELTA_H_UP, fc.FACE_DELTA_H_PARTS
+        pts = _face_at(100, 200, 100, 200)
+        try:
+            fc.FACE_DELTA_H_UP = 1
+            _, _, y1, y2 = fc.face_bbox(pts, (480, 832))
+            self.assertEqual((100 - y1, y2 - 200), (4, 3),
+                             "асимметрия снята, а рамка всё равно смещена "
+                             "вверх — значит константа не решает "
+                             "(4 против 3 — это не асимметрия, а int(): "
+                             "96.496 режется в 96, 203.504 в 203)")
+            fc.FACE_DELTA_H_UP = original_up
+            fc.FACE_DELTA_H_PARTS = 2
+            _, _, y1, y2 = fc.face_bbox(pts, (480, 832))
+            self.assertEqual((100 - y1, y2 - 200), (22, 7),
+                             "делитель половинен, а прирост высоты не вырос "
+                             "вдвое")
+        finally:
+            fc.FACE_DELTA_H_UP = original_up
+            fc.FACE_DELTA_H_PARTS = original_parts
+
+    def test_the_frame_shape_is_h_w_and_swapping_it_is_observable(self):
+        """И5: у прибора есть вход, на котором перепутанные H и W видны.
+
+        Кадры продукта 480×832, то есть не квадратные, и перепутанный порядок
+        не падает — он ТИХО прижимает рамку не к той границе.
+        """
+        pts = _face_at(700, 800, 100, 200)
+        right = fc.face_bbox(pts, (480, 832))
+        swapped = fc.face_bbox(pts, (832, 480))
+        self.assertEqual(right, (692, 807, 89, 203))
+        self.assertIsNone(swapped,
+                          "перепутанные H и W не изменили рамку — значит "
+                          "прижатие к границе кадра не работает вовсе")
+        # Почему именно None, а не другая рамка: при (H, W) = (832, 480) лицо
+        # на x=700..800 оказывается ЗА правым краем кадра шириной 480, прижатие
+        # обнуляет ширину, и это честный третий исход. То есть перепутанный
+        # порядок здесь не молчит — но молчал бы на кадре, где лицо ближе к
+        # середине, и потому фикстура взята с края (Т3).
+        middle = _face_at(200, 300, 100, 200)
+        self.assertEqual(fc.face_bbox(middle, (480, 832)),
+                         fc.face_bbox(middle, (832, 480)),
+                         "фикстура с лицом посередине обязана быть слепа к "
+                         "порядку — иначе предыдущая проверка доказывает не "
+                         "прижатие, а что-то ещё")
+
+    def test_too_few_points_is_none_and_the_minimum_is_guarded(self):
+        """Т1 по `FACE_BOX_MIN_POINTS` в обе стороны, Р1: None — третий исход."""
+        self.assertEqual(fc.FACE_BOX_MIN_POINTS, 17)
+        self.assertIsNotNone(fc.face_bbox(_face_at(100, 200, 100, 200, seen=17),
+                                          (480, 832)))
+        self.assertIsNone(fc.face_bbox(_face_at(100, 200, 100, 200, seen=16),
+                                       (480, 832)),
+                          "рамка построена по 16 точкам — кроп промахнётся "
+                          "мимо лица, а модель прочтёт промах как лицо")
+
+    def test_a_collapsed_face_is_none_and_not_a_division_by_zero(self):
+        """Наше расхождение с вендором, названное: у него здесь ZeroDivision."""
+        self.assertIsNone(fc.face_bbox(_face_at(50, 50, 50, 50), (480, 832)))
+
+    def test_a_face_entirely_outside_the_frame_is_none(self):
+        self.assertIsNone(fc.face_bbox(_face_at(-300, -200, 100, 200),
+                                       (480, 832)),
+                          "рамка целиком за краем кадра даёт пустой кроп — "
+                          "вендор упал бы на cv2.resize")
+
+    def test_a_nonsense_frame_shape_is_refused(self):
+        for shape in ((0, 832), (480, 0), (-1, 832)):
+            with self.subTest(shape=shape):
+                with self.assertRaises(ValueError):
+                    fc.face_bbox(_face_at(100, 200, 100, 200), shape)
+
+    def test_the_return_order_is_the_vendors_x1_x2_y1_y2(self):
+        """Порядок не (left, top, right, bottom), и путаница наблюдаема."""
+        box = fc.face_bbox(_face_at(100, 300, 200, 260), (480, 832))
+        self.assertEqual(box, (85, 314, 193, 262))
+        self.assertEqual(fc.box_ltrb(box), (85, 193, 314, 262))
+        self.assertNotEqual(fc.box_ltrb(box), box,
+                            "перевод в порядок PIL ничего не переставил — на "
+                            "прямоугольной рамке это обязано быть видно")
+
+
+class TheCropComesFromTheOriginalFrame(unittest.TestCase):
+    """ГЛАВНЫЙ СТОРОЖ ПОПРАВКИ. Всё остальное здесь — обслуживание этого.
+
+    Дефект, против которого написан класс, тихий вдвойне: отрисовка точек
+    сохранится, поедет в модель и даст картинку — просто мимики в ней не будет,
+    а виноватым назначат что угодно другое.
+    """
+
+    def setUp(self):
+        self.pts = _face_at(100, 200, 100, 200)
+        self.box = fc.face_bbox(self.pts, (480, 832))
+
+    def test_the_crop_carries_the_pixels_of_the_frame(self):
+        img = fc.crop_face(_solid(832, 480, (200, 30, 40)), self.box)
+        px = img.load()
+        self.assertEqual(img.size, (512, 512))
+        for x, y in ((0, 0), (255, 255), (511, 511), (7, 400)):
+            self.assertEqual(px[x, y], (200, 30, 40),
+                             "в лицевом канале не пиксели кадра")
+
+    def test_swapping_the_source_for_the_drawing_makes_that_check_red(self):
+        """Т1 по ИСТОЧНИКУ, а не по константе: подменяю кадр на отрисовку точек.
+
+        Это ровно прежнее поведение модуля — белые точки на чёрном. Проверка
+        выше обязана на нём покраснеть; если не краснеет, она не сторожит
+        ничего, и полгода именно так и было.
+        """
+        drawn = fc.render(self.pts, fc.FACE_CHANNEL, 832, 480)
+        with self.assertRaises(AssertionError):
+            img = fc.crop_face(drawn, self.box)
+            px = img.load()
+            for x, y in ((0, 0), (255, 255), (511, 511), (7, 400)):
+                self.assertEqual(px[x, y], (200, 30, 40))
+
+    def test_the_crop_takes_the_region_the_box_names(self):
+        """Негативный контроль к предыдущему: ровный кадр не доказал бы МЕСТО."""
+        frame = _halves(832, 480)
+        left = fc.crop_face(frame, fc.face_bbox(_face_at(100, 200, 100, 200),
+                                                (480, 832)))
+        right = fc.crop_face(frame, fc.face_bbox(_face_at(600, 700, 100, 200),
+                                                 (480, 832)))
+        self.assertEqual(left.load()[256, 256], (255, 0, 0))
+        self.assertEqual(right.load()[256, 256], (0, 0, 255),
+                         "обе рамки дали один цвет — кроп берётся не там, где "
+                         "сказано")
+
+    def test_a_rectangular_box_is_stretched_to_the_square_like_the_vendor_does(self):
+        wide = fc.face_bbox(_face_at(100, 300, 200, 260), (480, 832))
+        self.assertEqual(fc.crop_face(_solid(), wide).size, (512, 512))
+
+    def test_no_box_is_a_black_frame_and_not_a_centre_crop(self):
+        """Отступление от kijai, названное числом, а не пропущенное молча.
+
+        У kijai пустой кроп подменяется центром кадра (`nodes.py:166-180`).
+        Здесь чёрный кадр — и он ОТЛИЧАЕТСЯ от центра кадра, иначе отступление
+        было бы на словах.
+        """
+        frame = _solid(832, 480, (200, 30, 40))
+        img = fc.crop_face(frame, None)
+        self.assertEqual(img.size, (512, 512))
+        self.assertEqual(img.load()[256, 256], fc.GROUND)
+        centre = fc.crop_face(frame, (316, 516, 48, 248))
+        self.assertNotEqual(centre.load()[256, 256], fc.GROUND,
+                            "центр кадра тоже чёрный — фикстура не различает "
+                            "два поведения, и тест ничего не доказывает")
+
+    def test_the_side_comes_from_the_constant_in_both_directions(self):
+        """Т1 по `FACE_SIDE`: вверх — картинка растёт, мимо кратности — отказ."""
+        original = fc.FACE_SIDE
+        try:
+            fc.FACE_SIDE = 1024
+            self.assertEqual(fc.crop_face(_solid(), self.box).size, (1024, 1024))
+            fc.FACE_SIDE = 500
+            with self.assertRaises(ValueError) as caught:
+                fc.crop_face(_solid(), self.box)
+            self.assertIn("не кратна 16", str(caught.exception))
+        finally:
+            fc.FACE_SIDE = original
+
+    def test_a_degenerate_box_is_refused_rather_than_cropped_empty(self):
+        with self.assertRaises(ValueError):
+            fc.crop_face(_solid(), (100, 100, 50, 90))
+
+    def test_load_frame_returns_the_pixels_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "f.png"
+            _solid(64, 32, (1, 2, 3)).save(p)
+            img = fc.load_frame(p)
+            self.assertEqual(img.size, (64, 32))
+            self.assertEqual(img.load()[10, 10], (1, 2, 3))
+
+
+class TheJitterIsHeldAndCounted(unittest.TestCase):
+    """Дрожащий кроп мешает читать мимику. «Сгладили» без числа — не отчёт (П1)."""
+
+    def test_a_still_face_with_detector_jitter_holds_one_box(self):
+        boxes = [(100, 200, 100, 200), (102, 202, 101, 201),
+                 (99, 199, 100, 200), (101, 201, 99, 199)]
+        got = fc.stabilise_boxes(boxes)
+        self.assertEqual(got["boxes"], [(100, 200, 100, 200)] * 4,
+                         "рамка дышит на дрожании детектора — в 512 это "
+                         "читается как наезд камеры, которого не было")
+        self.assertEqual((got["corrected"], got["total"]), (3, 4))
+        self.assertIn("скорректировано 3 кадров из 4", got["note"])
+
+    def test_a_real_move_lets_the_box_go(self):
+        """Негативный контроль (И5): вход, где прибор обязан НЕ вмешиваться."""
+        boxes = [(100, 200, 100, 200), (300, 400, 100, 200)]
+        got = fc.stabilise_boxes(boxes)
+        self.assertEqual(got["boxes"], boxes,
+                         "удержание съело настоящее движение головы")
+        self.assertEqual(got["corrected"], 0)
+
+    def test_the_deadband_is_guarded_in_both_directions(self):
+        """Т1 по `FACE_HOLD_SHIFT_PX`: ноль — коррекций нет, много — все."""
+        boxes = [(100, 200, 100, 200), (102, 202, 101, 201),
+                 (300, 400, 100, 200)]
+        original_shift = fc.FACE_HOLD_SHIFT_PX
+        original_size = fc.FACE_HOLD_SIZE_PX
+        try:
+            fc.FACE_HOLD_SHIFT_PX = 0.0
+            self.assertEqual(fc.stabilise_boxes(boxes)["corrected"], 0,
+                             "зона нечувствительности снята, а коррекции всё "
+                             "равно есть")
+            fc.FACE_HOLD_SHIFT_PX = 1000.0
+            fc.FACE_HOLD_SIZE_PX = 1000.0
+            got = fc.stabilise_boxes(boxes)
+            self.assertEqual(got["corrected"], 2,
+                             "зона поднята до размера кадра, а рамка всё "
+                             "равно едет")
+            self.assertEqual(got["boxes"], [(100, 200, 100, 200)] * 3)
+        finally:
+            fc.FACE_HOLD_SHIFT_PX = original_shift
+            fc.FACE_HOLD_SIZE_PX = original_size
+
+    def test_the_size_deadband_decides_separately_from_the_shift(self):
+        """Рамка на месте, но выросла: центр не сдвинулся, сторона изменилась."""
+        original = fc.FACE_HOLD_SIZE_PX
+        try:
+            fc.FACE_HOLD_SIZE_PX = 0.0
+            self.assertEqual(
+                fc.stabilise_boxes([(100, 200, 100, 200),
+                                    (95, 205, 100, 200)])["corrected"], 0)
+            fc.FACE_HOLD_SIZE_PX = 100.0
+            self.assertEqual(
+                fc.stabilise_boxes([(100, 200, 100, 200),
+                                    (95, 205, 100, 200)])["corrected"], 1)
+        finally:
+            fc.FACE_HOLD_SIZE_PX = original
+
+    def test_growth_alone_decides_at_the_default_size_deadband(self):
+        """Мутант, переживший первый прогон: `FACE_HOLD_SIZE_PX` 8 -> 800.
+
+        Прошлые проверки размера подставляли константу параметром и оба раза
+        задавали её сами — то есть проверяли развилку, а не то, что модуль
+        слушается СВОЕЙ константы (ровно дефект, найденный когда-то на
+        `MIN_SCORE`). Здесь центр рамки не двигается вовсе, меняется только
+        размер, и порог берётся с модуля.
+        """
+        same_centre_bigger = [(100, 200, 100, 200), (95, 205, 100, 200)]
+        same_centre_nudged = [(100, 200, 100, 200), (99, 201, 100, 200)]
+        self.assertEqual(fc.stabilise_boxes(same_centre_bigger)["corrected"], 0,
+                         "рамка выросла на 10 px при пороге 8 — удержание "
+                         "обязано её отпустить")
+        self.assertEqual(fc.stabilise_boxes(same_centre_nudged)["corrected"], 1,
+                         "рамка выросла на 2 px при пороге 8 — это дрожание, "
+                         "и его обязано удержать")
+
+    def test_a_frame_without_a_box_is_not_counted_as_a_correction(self):
+        """Два разных числа не складываются в одно (Р1): дрожание ≠ «лица нет»."""
+        got = fc.stabilise_boxes([(100, 200, 100, 200), None,
+                                  (101, 201, 100, 200)])
+        self.assertEqual(got["corrected"], 1)
+        self.assertEqual((got["total"], got["judged"]), (3, 2))
+        self.assertIsNone(got["boxes"][1])
+
+    def test_an_empty_sequence_says_zero_of_zero(self):
+        got = fc.stabilise_boxes([])
+        self.assertEqual((got["corrected"], got["total"]), (0, 0))
+
+
+class TheMissingFacesAreCountedAndNotGuessed(unittest.TestCase):
+    """Р2: ноль нарушений при нуле проверок — не успех; числа рядом с вердиктом."""
+
+    def _pts(self, x0=100.0):
+        return _face_at(x0, x0 + 100, 100, 200)
+
+    def test_every_frame_found_is_pass_with_numbers(self):
+        got = fc.plan_face_boxes([self._pts(), self._pts()],
+                                 [(832, 480), (832, 480)])
+        self.assertEqual(got["outcome"], fi.PASS)
+        self.assertEqual((got["total"], got["found"], got["missing"]), (2, 2, 0))
+        self.assertIn("кадров 2, лицо найдено на 2, не найдено на 0",
+                      got["note"])
+
+    def test_a_hole_is_fail_and_the_hole_is_a_number(self):
+        got = fc.plan_face_boxes([self._pts(), None, self._pts()],
+                                 [(832, 480)] * 3)
+        self.assertEqual(got["outcome"], fi.FAIL)
+        self.assertEqual((got["total"], got["found"], got["missing"]), (3, 2, 1))
+        self.assertIn("не найдено на 1", got["note"])
+
+    def test_no_face_anywhere_is_unmeasured_and_not_fail(self):
+        blind = _face_at(100, 200, 100, 200, seen=0)
+        got = fc.plan_face_boxes([blind, blind], [(832, 480)] * 2)
+        self.assertEqual(got["outcome"], fi.UNMEASURED,
+                         "лица не нашли нигде, а вердикт не «не смогли» — "
+                         "прибор судит по нулю проверок")
+        self.assertEqual((got["found"], got["missing"]), (0, 2))
+
+    def test_an_empty_sequence_is_unmeasured_not_pass(self):
+        got = fc.plan_face_boxes([], [])
+        self.assertEqual(got["outcome"], fi.UNMEASURED)
+        self.assertIn("кадров 0", got["note"])
+
+    def test_a_missing_frame_is_carried_by_the_last_known_box(self):
+        got = fc.plan_face_boxes([self._pts(), None], [(832, 480)] * 2)
+        self.assertEqual(got["boxes"][1], got["boxes"][0])
+        self.assertEqual((got["carried"], got["blank"]), (1, 0))
+
+    def test_a_missing_frame_before_any_face_stays_blank(self):
+        got = fc.plan_face_boxes([None, self._pts()], [(832, 480)] * 2)
+        self.assertIsNone(got["boxes"][0])
+        self.assertEqual((got["carried"], got["blank"]), (0, 1))
+        self.assertIn("1 чёрным кадром", got["note"])
+
+    def test_the_three_kinds_of_missing_are_three_numbers(self):
+        got = fc.plan_face_boxes([None, self._pts(), None], [(832, 480)] * 3)
+        self.assertEqual((got["found"], got["carried"], got["blank"]),
+                         (1, 1, 1),
+                         "«лица нет» подано одним числом — «раньше знали, где "
+                         "оно» и «не знали ни разу» это разные исходы")
+
+    def test_the_correction_counter_reaches_the_report(self):
+        still = [self._pts(100.0), self._pts(101.0), self._pts(101.5)]
+        got = fc.plan_face_boxes(still, [(832, 480)] * 3)
+        self.assertEqual(got["corrected"], 2)
+        self.assertIn("скорректировано 2 кадров из 3", got["note"])
+
+    def test_mismatched_lengths_are_refused_rather_than_zipped_short(self):
+        with self.assertRaises(ValueError) as caught:
+            fc.plan_face_boxes([self._pts()], [(832, 480), (832, 480)])
+        self.assertIn("не одна последовательность", str(caught.exception))
+
+    def test_the_frame_size_is_passed_as_w_h_and_flipped_inside(self):
+        """Один переворот и ровно здесь: `sizes` в порядке PIL, `face_bbox` в (H, W)."""
+        pts = _face_at(700, 800, 100, 200)
+        got = fc.plan_face_boxes([pts], [(832, 480)])
+        self.assertEqual(got["boxes"][0], (692, 807, 89, 203),
+                         "рамка прижата не к той стороне — (w, h) уехали в "
+                         "face_bbox без переворота")
+
+
+class TheSequenceFeedsRealPixelsToTheFaceChannel(unittest.TestCase):
+    """Сквозная проверка канала: что легло в `face/`, то и поедет в `face_video`."""
+
+    def _run(self, tmp, answers, colour=(200, 30, 40), size=(832, 480)):
+        from unittest import mock
+
+        paths = []
+        for i in range(len(answers)):
+            p = Path(tmp) / f"in{i}.png"
+            _solid(size[0], size[1], colour).save(p)
+            paths.append(p)
+        out = Path(tmp) / "out"
+        with mock.patch.object(fc, "wholebody_points",
+                               side_effect=list(answers)):
+            return fc.render_sequence(paths, out), out
+
+    def _face_pixel(self, out, name="00000.png"):
+        from PIL import Image
+
+        with Image.open(out / fc.FACE_CHANNEL / name) as im:
+            return im.size, im.load()[256, 256]
+
+    def test_the_written_face_frame_is_a_crop_of_the_driving_frame(self):
+        pts = _face_at(100, 200, 100, 200)
+        with tempfile.TemporaryDirectory() as tmp:
+            got, out = self._run(tmp, [pts])
+            self.assertEqual(self._face_pixel(out), ((512, 512), (200, 30, 40)))
+        self.assertEqual(got["face_found"], 1)
+        self.assertIn("источник — пиксели кадра драйвинга", got["note"])
+
+    def test_swapping_the_frame_source_for_the_drawing_makes_that_check_red(self):
+        """Т1 по источнику в СКВОЗНОМ пути, а не только в `crop_face`.
+
+        Подменяется `fc.load_frame` — единственная дверь модуля к пикселям
+        кадра. Возвращаю прежний выход канала (нарисованные точки); проверка
+        выше обязана покраснеть.
+        """
+        from unittest import mock
+
+        pts = _face_at(100, 200, 100, 200)
+        drawn = fc.render(pts, fc.FACE_CHANNEL, 832, 480)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(fc, "load_frame", return_value=drawn):
+                _, out = self._run(tmp, [pts])
+            with self.assertRaises(AssertionError):
+                self.assertEqual(self._face_pixel(out),
+                                 ((512, 512), (200, 30, 40)))
+
+    def test_the_body_channel_stays_drawn_and_that_is_correct(self):
+        """Вендор рисует тело и две кисти; 68 точек лица в pose_video нет."""
+        from PIL import Image
+
+        pts = _face_at(100, 200, 100, 200)
+        for i in fc.channel_indices(fc.BODY_CHANNEL):
+            pts[i] = (300.0 + (i % 5) * 10, 300.0 + (i % 7) * 10, 0.9)
+        with tempfile.TemporaryDirectory() as tmp:
+            _, out = self._run(tmp, [pts])
+            with Image.open(out / fc.BODY_CHANNEL / "00000.png") as im:
+                self.assertEqual(im.size, (832, 480))
+                px = im.load()
+                self.assertEqual(px[10, 10], fc.GROUND,
+                                 "канал тела перестал быть отрисовкой на "
+                                 "чёрном — это кроп кадра, а не поза")
+                self.assertTrue(
+                    any(px[x, y] == fc.INK
+                        for y in range(280, 380) for x in range(280, 380)),
+                    "скелет не нарисован вовсе")
+
+    def test_a_frame_without_a_face_is_carried_and_counted(self):
+        pts = _face_at(100, 200, 100, 200)
+        blind = _face_at(100, 200, 100, 200, seen=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            got, out = self._run(tmp, [pts, blind])
+            self.assertEqual(self._face_pixel(out, "00001.png"),
+                             ((512, 512), (200, 30, 40)))
+        self.assertEqual(got["outcome"], fi.FAIL)
+        self.assertEqual((got["face_found"], got["face_carried"],
+                          got["face_blank"]), (1, 1, 0))
+        self.assertEqual(got["face_missing"], ["in1.png"])
+
+    def test_a_first_frame_without_a_face_is_black_not_the_centre_of_the_frame(self):
+        blind = _face_at(100, 200, 100, 200, seen=0)
+        pts = _face_at(100, 200, 100, 200)
+        with tempfile.TemporaryDirectory() as tmp:
+            got, out = self._run(tmp, [blind, pts])
+            self.assertEqual(self._face_pixel(out, "00000.png"),
+                             ((512, 512), fc.GROUND),
+                             "лица не нашли ни разу, а в канал легла "
+                             "правдоподобная картинка — в отчёте она "
+                             "неотличима от найденного лица")
+        self.assertEqual((got["face_found"], got["face_blank"]), (1, 1))
+
+    def test_the_report_carries_every_number_the_shift_needs(self):
+        pts = _face_at(100, 200, 100, 200)
+        with tempfile.TemporaryDirectory() as tmp:
+            got, _ = self._run(tmp, [pts, None, pts])
+        for key in ("total", "rendered", "face_found", "face_missing",
+                    "face_carried", "face_blank", "face_corrected",
+                    "no_person", "outcome"):
+            self.assertIn(key, got)
+        self.assertEqual((got["total"], got["rendered"]), (3, 2))
+        self.assertEqual(got["no_person"], ["in1.png"])
+        self.assertIn("скорректировано", got["note"])
+
+    def test_the_face_channel_no_longer_goes_through_the_retired_path(self):
+        """Е2/П1: имя пути читается из ТОГО, что исполнилось, а не из намерения.
+
+        `render_face` — прежний лицевой канал. Если он снова окажется на пути
+        `render_sequence`, тест покраснеет: сквозной прогон обязан обойтись без
+        него.
+        """
+        from unittest import mock
+
+        pts = _face_at(100, 200, 100, 200)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                    fc, "render_face",
+                    side_effect=AssertionError("снятый путь снова в канале")):
+                got, _ = self._run(tmp, [pts])
+        self.assertEqual(got["outcome"], fi.PASS)
 
 
 def fork_sequence_empty(tmp: str) -> dict:
