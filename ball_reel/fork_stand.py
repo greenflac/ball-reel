@@ -1,0 +1,783 @@
+"""Приёмка АРЕНДОВАННОЙ МАШИНЫ: годна ли она к прогону, и это выясняется за минуты.
+
+ЗАЧЕМ ОТДЕЛЬНО ОТ `fork_preflight`. Предполёт отвечает на вопрос «какую
+конфигурацию взять на этой машине» — он ПОДБИРАЕТ. Этот модуль отвечает на
+другой вопрос, и задаётся он в другой момент: **машина уже арендована и счётчик
+идёт**. Здесь не подбор, а приёмка: то ли привезли, всё ли доехало, можно ли
+запускать. Поэтому и порядок другой — не «сначала посчитать бюджет», а «сначала
+то, что стоит миллисекунды».
+
+ПОРЯДОК ПРОВЕРОК ЗДЕСЬ — ЧАСТЬ ПРИБОРА, А НЕ ОФОРМЛЕНИЕ (П2).
+
+    реестр      мс      прочитать лок-файл
+    размеры     мс      stat по шести файлам: есть ли, тот ли размер
+    место       мс      сколько ещё качать и влезет ли
+    узлы        мс      каталоги расширений в custom_nodes
+    карта       ~100 мс один вызов nvidia-smi
+    sha256      МИНУТЫ  18 ГиБ через хэш — только по флагу --sha
+
+Оборванная загрузка даёт ПРАВИЛЬНОЕ ИМЯ и НЕПРАВИЛЬНЫЙ РАЗМЕР. Это самый частый
+отказ, и ловится он `stat`-ом за миллисекунду — то есть до того, как кто-нибудь
+потратит сорок минут на догрузку и первый кадр. Именно поэтому размер
+проверяется ВСЕГДА, а хэш — отдельной ступенью по флагу: хэш дороже размера на
+пять порядков, а ловит он другое (подмену содержимого при верном размере).
+
+ТРИ ИСХОДА, И ЗДЕСЬ ЭТО НЕ ФОРМАЛЬНОСТЬ (Р1). На машине без `nvidia-smi` прибор
+обязан сказать «не смогли», а не «карты нет»: первое чинится установкой
+драйвера за минуту, второе означает, что арендовали не ту машину. Свести одно к
+другому — значит вернуть деньги за исправную машину или запустить прогон на
+машине без карты.
+
+СЧЁТЧИКИ РЯДОМ С ВЕРДИКТОМ (Р2). «Нарушений 0» при «проверок 0» — не успех, а
+молчание прибора. Поэтому в итог печатаются четыре числа: проверено, провалено,
+не смогли, пропущено, — и поимённо, что именно попало в каждое.
+
+---
+
+ПРОИСХОЖДЕНИЕ ЧИСЕЛ (И4). Каждая константа-решение ниже помечена одним из трёх:
+`ЗАМЕРЕНО` (чем), `РАСЧЁТ` (по чему) или `ВЫБРАНО` (кем, из чего). Ожидаемые
+размеры весов НЕ ЖИВУТ В ЭТОМ ФАЙЛЕ ВООБЩЕ: они приходят из лок-файла потока E,
+где у каждого стоит команда, которой он снят. Скопировать их сюда значило бы
+завести второй источник истины (Е1) и получить расхождение при первой же смене
+ступени квантования.
+
+НЕПРОВЕРЕНО (Ц4), наверх:
+
+* **на арендованной машине не исполнялось.** Карты в этой среде нет,
+  `nvidia-smi` отсутствует; ветка «карта нашлась» гонялась только на
+  подставленном выводе CSV. Прогон точки входа здесь заканчивается исходом
+  «не смогли» — и это ровно то, что ожидается от честного прибора без карты;
+* **веса на этот диск не качались.** Ветка «размер сошёлся» проверена на
+  файлах, которые тест создаёт сам, а не на настоящих 18 ГиБ;
+* **`custom_nodes` в этой среде нет** — ни ComfyUI, ни обёртки. Ветка «пак на
+  месте» проверена на подделанном дереве каталогов;
+* **раскладка весов по подкаталогам `models/` — КОНВЕНЦИЯ ComfyUI, не замер.**
+  Поэтому поиск не ограничен подкаталогом: не нашли в ожидаемом — ищем по всему
+  `models/` и печатаем, где нашли;
+* **имя каталога пака на диске** может отличаться от `cnr_id`; сравнение
+  регистронезависимое, но переименованный вручную каталог прибор не найдёт.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from . import fork_comfy as _fc
+from . import fork_preflight as _fp
+from .fork_identity import FAIL, PASS, UNMEASURED
+
+# ---------------------------------------------------------------------------
+# КОНСТАНТЫ-РЕШЕНИЯ. У каждой — происхождение (И4).
+# ---------------------------------------------------------------------------
+
+#: Ступень весов, под которую считается запас памяти. ВЫБРАНО владельцем
+#: 18.08.2026 (ХЭНДОФ, решения третьего блока; лок-файл, запись `diffusion`):
+#: Q4_K_M, 10.707 ГиБ. Само число здесь НЕ ПОВТОРЯЕТСЯ — модель памяти живёт в
+#: `fork_preflight.STEPS_GB`, а размер файла в лок-файле. Здесь только имя
+#: ступени, то есть ссылка на две записи, а не третья их копия.
+DEFAULT_STEP = "Q4_K_M"
+
+#: Длина окна, на которой считаются активации. ВЫБРАНО: штатная геометрия §3
+#: (77 кадров). Вторая известная точка — 49; между ними в `fork_preflight`
+#: интерполировать нечем, и подставлять сюда третье число нельзя.
+DEFAULT_LENGTH = 77
+
+#: Сколько карт обязано быть на машине. ВЫБРАНО: утверждённая владельцем
+#: NVIDIA A16 — это ЧЕТЫРЕ независимых GPU по 16 ГБ (ХЭНДОФ: «4×16 ГБ GDDR6,
+#: 4×200 ГБ/с, 250 Вт на плату»). Память между ними НЕ СКЛАДЫВАЕТСЯ, поэтому
+#: число карт — это про пропускную способность и про параллель по данным, а
+#: про «влезет ли модель» отвечает память ОДНОЙ карты.
+#:
+#: Карт меньше — это НАХОДКА ПРИЁМКИ: арендовано не то, что утверждено и
+#: оплачено. Карт больше — не отказ.
+EXPECTED_GPU_COUNT = 4
+
+#: Ниже скольких ГиБ на карте это уже не A16. ВЫБРАНО между ДВУМЯ ЧИСЛАМИ,
+#: которые `nvidia-smi` печатает на самом деле: A16 отдаёт 16376 MiB = 15.99
+#: ГиБ, а 16-гигабайтная T4 — 15360 MiB = 15.0 ГиБ РОВНО. Планка стоит между
+#: ними.
+#:
+#: ~~15.0~~ — снято, и это находка теста, а не редактура. На 15.0 сравнение
+#: «строго меньше» пропускало T4 БАЙТ В БАЙТ по границе: подменить A16 на T4
+#: — самая правдоподобная подмена при аренде, и прибор на ней молчал.
+#: Т3 (фикстура ровно на краю) и негативный контроль на T4 это и поймали.
+#:
+#: ECC включён по умолчанию и часть памяти забирает, СКОЛЬКО ИМЕННО — НЕ
+#: ЗАМЕРЕНО; на арендованной машине это первое, что стоит вычесть.
+MIN_GPU_MEMORY_GIB = 15.5
+
+#: Сколько ГиБ обязано остаться на диске СВЕРХ того, что ещё качать. ВЫБРАНО
+#: 5.0: докачка идёт во временный файл рядом с целевым, плюс выход прогона
+#: (ролики, кадры, логи) пишется на тот же диск. Ноль здесь означал бы «влезет
+#: впритык», а впритык на диске — это отказ на 39-й минуте загрузки.
+DISK_MARGIN_GIB = 5.0
+
+#: Наборы расширений, без которых граф не поедет, и ПОЧЕМУ каждый. Имена берутся
+#: из `fork_comfy` (Е1): там они доказаны исходником и лицензией, и второй
+#: список имён разошёлся бы с первым при первом же переименовании.
+#: Сравнение с каталогами на диске РЕГИСТРОНЕЗАВИСИМОЕ — на регистре имён паков
+#: в этом проекте уже один раз разошлись.
+REQUIRED_PACKS = {
+    _fc.WRAP_PACK: ("цикл по окнам живёт ВНУТРИ её сэмплера "
+                    "(nodes_sampler.py, region wananimate loop); без неё длина "
+                    "ролика собирается в графе руками, а этого графа у нас нет"),
+    _fc.GGUF_PACK: ("UnetLoaderGGUF: без него ступень Q4_K_M не грузится "
+                    "вообще, и стек §3 превращается в fp8 на 17.1 ГиБ"),
+}
+
+#: Как выглядит каталог расширения ComfyUI, чтобы считаться импортируемым.
+#: РАСЧЁТ по устройству загрузчика ComfyUI: пак подключается импортом пакета,
+#: то есть обязан иметь `__init__.py`, и регистрирует ноды через
+#: `NODE_CLASS_MAPPINGS`. Пак без второго импортируется и не даёт НИ ОДНОЙ
+#: ноды — то есть выглядит установленным, не будучи им.
+#:
+#: Проверка ПО ФАЙЛАМ, а не импортом: импорт пака тянет torch и сам ComfyUI,
+#: то есть стоит секунды и падает на машине, где приёмка как раз и нужна.
+PACK_INIT = "__init__.py"
+PACK_MARK = "NODE_CLASS_MAPPINGS"
+
+#: Где искать ComfyUI, если не назвали `--comfy`. ВЫБРАНО: обычные места
+#: арендованных образов. Не нашли — исход «не смогли», а не «паков нет».
+COMFY_CANDIDATES = ("ComfyUI", "../ComfyUI", "/workspace/ComfyUI",
+                    "/opt/ComfyUI", "~/ComfyUI", "~/comfy/ComfyUI")
+
+#: Подкаталог `models/`, куда ComfyUI кладёт вес каждой роли. КОНВЕНЦИЯ, НЕ
+#: ЗАМЕР: проверить её можно только на установленном ComfyUI, которого здесь
+#: нет. Поэтому это лишь ПОДСКАЗКА, ГДЕ СМОТРЕТЬ ПЕРВЫМ — не нашли, ищем по
+#: всему `models/` и печатаем фактический путь (Е2: верим найденному, а не
+#: ожидаемому).
+ROLE_DIRS = {
+    "diffusion": ("unet", "diffusion_models", "unet_gguf"),
+    "text_encoder": ("text_encoders", "clip"),
+    "vae": ("vae",),
+    "clip_vision": ("clip_vision",),
+    "lora_1": ("loras",),
+    "lora_2": ("loras",),
+}
+
+#: Утилита опроса карты. Имя вынесено константой, чтобы тест мог проверить
+#: ветку «утилиты нет», не переименовывая её на машине.
+SMI_BIN = "nvidia-smi"
+
+#: Секунды на `nvidia-smi`. ВЫБРАНО 30 — столько же, сколько в `fork_preflight`
+#: (Е1 по смыслу: одна утилита, одно ожидание). Зависший драйвер — сам по себе
+#: находка, но приёмка не имеет права висеть дольше собственного смысла.
+SMI_TIMEOUT_S = 30
+
+GIB = 1024 ** 3
+
+
+def _gib(n: float | None) -> float | None:
+    return None if n is None else round(n / GIB, 3)
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 1. РЕЕСТР
+# ---------------------------------------------------------------------------
+
+def read_lock(path: str | Path) -> dict:
+    """Разбор лок-файла ПОД ПРИЁМКУ: нужен РАЗМЕР В БАЙТАХ, а не только хэш.
+
+    `fork_preflight.read_lock` отдаёт `path` и `sha256` — ему больше не нужно,
+    он хэширует всегда. Здесь размер главный: он ловит оборванную загрузку за
+    миллисекунду, а хэш — за минуты. Поэтому разбор свой, а МАСКА ПОИСКА и
+    КАТАЛОГ берутся из `fork_preflight` (Е1): два места, знающих, как зовётся
+    реестр, разъедутся при первом же переименовании.
+
+    Запись без размера — это `UNMEASURED` по ней, а не годная запись.
+    """
+    p = Path(path)
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": f"реестр {p.name} не прочитан: {str(exc)[:100]}"}
+    except ValueError as exc:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": (f"реестр {p.name} не разобран как JSON: "
+                         f"{str(exc)[:100]}. Это НАХОДКА, а не «весов нет»")}
+    raw = doc.get("weights") if isinstance(doc, dict) else doc
+    if not isinstance(raw, list) or not raw:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": (f"в реестре {p.name} нет списка `weights`. Пустой "
+                         f"разбор — «не смогли», а не «нечего проверять»")}
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rel = item.get("path") or item.get("file") or item.get("name")
+        if not rel:
+            continue
+        size = item.get("bytes")
+        entries.append({
+            "role": item.get("role") or "?",
+            "path": str(rel),
+            "name": Path(str(rel)).name,
+            "bytes": int(size) if isinstance(size, (int, float)) else None,
+            "sha256": (str(item["sha256"]).lower()
+                       if item.get("sha256") else None),
+        })
+    if not entries:
+        return {"outcome": UNMEASURED, "path": str(p), "entries": [],
+                "note": f"реестр {p.name} разобран, но ни одной записи с путём"}
+    без_размера = [e["name"] for e in entries if e["bytes"] is None]
+    return {
+        "outcome": PASS, "path": str(p), "entries": entries,
+        "note": (f"реестр {p.name}: записей {len(entries)}, суммарно "
+                 f"{_gib(sum(e['bytes'] or 0 for e in entries))} ГиБ"
+                 + (f". БЕЗ РАЗМЕРА: {', '.join(без_размера)}"
+                    if без_размера else "")),
+    }
+
+
+def find_lock(root: str | Path = ".") -> dict:
+    """Найти реестр. Маска — из `fork_preflight` (Е1), разбор — здешний."""
+    d = Path(root) / _fp.LOCK_DIR
+    found = sorted(d.glob(_fp.LOCK_GLOB)) if d.is_dir() else []
+    if not found:
+        return {"outcome": UNMEASURED, "path": None, "entries": [],
+                "note": (f"реестра нет: {d}/{_fp.LOCK_GLOB} не найден. Без него "
+                         f"«веса на месте» СКАЗАТЬ НЕЧЕМ — это не то же самое, "
+                         f"что «веса на месте»")}
+    if len(found) > 1:
+        return {"outcome": UNMEASURED, "path": None, "entries": [],
+                "note": (f"реестров сразу {len(found)}: "
+                         + ", ".join(p.name for p in found)
+                         + ". Сверяться неизвестно с чем нельзя")}
+    return read_lock(found[0])
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 2. РАЗМЕРЫ
+# ---------------------------------------------------------------------------
+
+def locate(entry: dict, models_dir: Path) -> Path | None:
+    """Где лежит вес. Сначала ожидаемый подкаталог, потом весь `models/`.
+
+    Раскладка — конвенция, а не замер (см. `ROLE_DIRS`). Прибор, который
+    сказал бы «файла нет» только потому, что образ кладёт веса иначе, врал бы в
+    самую дорогую сторону: человек пошёл бы качать 18 ГиБ уже скачанного.
+    """
+    name = entry["name"]
+    for sub in ROLE_DIRS.get(entry["role"], ()):
+        cand = models_dir / sub / name
+        if cand.exists():
+            return cand
+    # Путь из реестра как он записан — вдруг веса лежат ровно так.
+    cand = models_dir / entry["path"]
+    if cand.exists():
+        return cand
+    # sorted, а не как отдаст файловая система: порядок `rglob` не определён, и
+    # прибор, который на одной машине берёт правильный файл, а на другой —
+    # забытую копию рядом, отвечает случайностью. Мутация `ROLE_DIRS = {}`
+    # ПЕРЕЖИЛА первый аудит именно потому, что разницу съедала эта
+    # неопределённость: с сортировкой она наблюдаема и сторожится тестом.
+    try:
+        for hit in sorted(models_dir.rglob(name)):
+            if hit.is_file():
+                return hit
+    except OSError:
+        return None
+    return None
+
+
+def sizes(entries: list, models_dir: str | Path) -> dict:
+    """Есть ли файл и ТОТ ЛИ У НЕГО РАЗМЕР. Четыре состояния на файл, не два.
+
+        ok        файл есть, размер сошёлся байт в байт
+        size      файл есть, размер НЕ ТОТ — почти всегда оборванная загрузка;
+                  чинится докачкой, и это НЕ то же самое, что «файла нет»
+        missing   файла нет — качать
+        no_size   файл есть, а эталонного размера в реестре нет — сверить нечем
+
+    `size` отдельно от `missing` потому, что человек чинит их разными командами,
+    а «нет файла» вместо «файл битый» отправляет его качать заново то, что можно
+    докачать.
+    """
+    base = Path(models_dir)
+    if not base.is_dir():
+        return {"outcome": UNMEASURED, "files": [], "models_dir": str(base),
+                "ok": 0, "size": 0, "missing": 0, "no_size": 0,
+                "note": (f"каталог весов {base} не найден. Это «не смогли»: "
+                         f"путь называется ключом --models, и пока он не "
+                         f"назван, отсутствие файлов ничего не значит")}
+    files = []
+    for e in entries:
+        found = locate(e, base)
+        if found is None:
+            files.append({**e, "state": "missing", "found": None,
+                          "got_bytes": None})
+            continue
+        try:
+            got = found.stat().st_size
+        except OSError as exc:
+            files.append({**e, "state": "no_size", "found": str(found),
+                          "got_bytes": None, "why": str(exc)[:80]})
+            continue
+        if e["bytes"] is None:
+            files.append({**e, "state": "no_size", "found": str(found),
+                          "got_bytes": got})
+            continue
+        files.append({**e, "found": str(found), "got_bytes": got,
+                      "state": "ok" if got == e["bytes"] else "size"})
+    counts = {s: sum(1 for f in files if f["state"] == s)
+              for s in ("ok", "size", "missing", "no_size")}
+    # Р2: ноль расхождений при нуле сверенных файлов — не успех.
+    if counts["size"] or counts["missing"]:
+        outcome = FAIL
+    elif counts["ok"] and not counts["no_size"]:
+        outcome = PASS
+    else:
+        outcome = UNMEASURED
+    # Расхождение печатается В БАЙТАХ, а не в ГиБ, и это не педантизм: ступень
+    # ловит оборванную докачку, а недокачанный хвост бывает короче килобайта.
+    # Первая редакция печатала «0.0 вместо 0.0 ГиБ» — то есть скрывала ровно
+    # то, ради чего проверка написана. Поймано глазами на прогоне (П3).
+    bad = [f"{f['name']}: {f['state']}"
+           + (f" ({f['got_bytes']} байт вместо {f['bytes']}, разница "
+              f"{f['got_bytes'] - f['bytes']:+d})"
+              if f["state"] == "size" else "")
+           for f in files if f["state"] != "ok"]
+    return {
+        "outcome": outcome, "files": files, "models_dir": str(base), **counts,
+        "note": (f"весов в реестре {len(files)}: размер сошёлся {counts['ok']}, "
+                 f"размер не тот {counts['size']}, нет файла "
+                 f"{counts['missing']}, сверить нечем {counts['no_size']}"
+                 + (". " + "; ".join(bad[:8]) if bad else "")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 3. МЕСТО
+# ---------------------------------------------------------------------------
+
+def disk(files: list, path: str | Path = ".") -> dict:
+    """Влезет ли то, что ЕЩЁ НЕ СКАЧАНО. Не «40 ГБ вообще», а остаток.
+
+    Порог «нужно 40» отвечает на вопрос до аренды. После аренды вопрос другой:
+    половина весов уже лежит, качать осталось столько-то, и место меряется
+    против ОСТАТКА. Иначе прибор пошлёт освобождать диск там, где всё влезает.
+    """
+    # Р2: ноль байт к докачке ПРИ НУЛЕ известных весов — не «места хватает»,
+    # а «неизвестно, сколько качать». Первая редакция этого шага отвечала
+    # «годно» на машине, где реестра нет вообще, — то есть ровно тем молчанием
+    # прибора, против которого написан Р2. Поймано прогоном на пустом дереве.
+    if not files:
+        try:
+            free = shutil.disk_usage(str(path)).free
+        except OSError as exc:
+            free = None
+            why = str(exc)[:80]
+        return {"outcome": UNMEASURED, "free_gib": _gib(free), "todo_gib": None,
+                "need_gib": None, "margin_gib": DISK_MARGIN_GIB,
+                "path": str(path),
+                "note": (f"список весов пуст — сколько ещё качать, СКАЗАТЬ "
+                         f"НЕЧЕМ. Свободно "
+                         + (f"{_gib(free)} ГиБ" if free is not None
+                            else f"неизвестно ({why})")
+                         + f" на {path}, но сравнивать не с чем")}
+    todo = sum(f["bytes"] or 0 for f in files if f["state"] != "ok")
+    try:
+        free = shutil.disk_usage(str(path)).free
+    except OSError as exc:
+        return {"outcome": UNMEASURED, "free_gib": None,
+                "todo_gib": _gib(todo), "path": str(path),
+                "note": f"диск не опрошен: {str(exc)[:100]}"}
+    need = todo + DISK_MARGIN_GIB * GIB
+    ok = free >= need
+    return {
+        "outcome": PASS if ok else FAIL,
+        "free_gib": _gib(free), "todo_gib": _gib(todo),
+        "need_gib": _gib(need), "margin_gib": DISK_MARGIN_GIB, "path": str(path),
+        "note": (f"качать осталось {_gib(todo)} ГиБ, свободно {_gib(free)} ГиБ "
+                 f"на {path}, нужно {_gib(need)} ГиБ (остаток плюс запас "
+                 f"{DISK_MARGIN_GIB} ГиБ на временный файл докачки и выход "
+                 f"прогона)" + ("" if ok else " — НЕ ХВАТАЕТ")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 4. УЗЛЫ РАСШИРЕНИЙ
+# ---------------------------------------------------------------------------
+
+def find_comfy(root: str | Path = ".") -> Path | None:
+    """Где ComfyUI. Ищется по обычным местам; не нашли — «не смогли»."""
+    for c in COMFY_CANDIDATES:
+        p = Path(c).expanduser()
+        if not p.is_absolute():
+            p = Path(root) / c
+        if (p / "custom_nodes").is_dir():
+            return p
+    return None
+
+
+def nodes(comfy_root: str | Path | None = None, *, root: str | Path = ".") -> dict:
+    """Лежат ли наборы расширений и импортируемы ли они. БЕЗ СЕТИ И БЕЗ HTTP.
+
+    Живость Comfy по HTTP здесь НЕ ПРОВЕРЯЕТСЯ намеренно: это `comfy_alive` в
+    `fork_preflight`, и дублировать её значило бы завести второй ответ на один
+    вопрос. Здесь только файловая система.
+
+    Состояния пака:
+        ok           каталог есть, есть `__init__.py`, в нём NODE_CLASS_MAPPINGS
+        no_mappings  каталог и `__init__.py` есть, регистрации нод нет — пак
+                     импортируется и НЕ ДАЁТ НИ ОДНОЙ НОДЫ
+        no_init      каталог есть, пакета нет — ComfyUI его не подключит
+        missing      каталога нет
+    """
+    base = Path(comfy_root).expanduser() if comfy_root else find_comfy(root)
+    if base is None:
+        return {"outcome": UNMEASURED, "packs": [], "custom_nodes": None,
+                "note": (f"ComfyUI не найден среди {', '.join(COMFY_CANDIDATES)}. "
+                         f"Это «не смогли проверить», а НЕ «паков нет»: назовите "
+                         f"путь ключом --comfy")}
+    cn = Path(base) / "custom_nodes"
+    if not cn.is_dir():
+        return {"outcome": FAIL, "packs": [], "custom_nodes": str(cn),
+                "note": (f"{cn} нет — это уже находка: каталог расширений у "
+                         f"ComfyUI создаётся установкой, и без него ни один "
+                         f"пак не подключится")}
+    on_disk = {}
+    try:
+        for d in cn.iterdir():
+            if d.is_dir():
+                on_disk[d.name.lower()] = d
+    except OSError as exc:
+        return {"outcome": UNMEASURED, "packs": [], "custom_nodes": str(cn),
+                "note": f"{cn} не прочитан: {str(exc)[:80]}"}
+
+    packs = []
+    for want, why in REQUIRED_PACKS.items():
+        d = on_disk.get(want.lower())
+        if d is None:
+            packs.append({"pack": want, "state": "missing", "dir": None,
+                          "why": why})
+            continue
+        init = d / PACK_INIT
+        if not init.is_file():
+            packs.append({"pack": want, "state": "no_init", "dir": str(d),
+                          "why": why})
+            continue
+        try:
+            text = init.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        state = "ok" if PACK_MARK in text else "no_mappings"
+        packs.append({"pack": want, "state": state, "dir": str(d), "why": why})
+
+    forbidden = sorted(n for n in _fc.FORBIDDEN_PACKS if n.lower() in on_disk)
+    bad = [f"{p['pack']}: {p['state']}" for p in packs if p["state"] != "ok"]
+    ok_n = sum(1 for p in packs if p["state"] == "ok")
+    return {
+        "outcome": PASS if not bad else FAIL,
+        "packs": packs, "custom_nodes": str(cn), "forbidden_present": forbidden,
+        "note": (f"паков нужно {len(packs)}, на месте {ok_n}"
+                 + (". НЕ НА МЕСТЕ: " + "; ".join(bad) if bad else "")
+                 + (f". Рядом лежат отвергнутые: {', '.join(forbidden)} — "
+                    f"в графе их быть не должно, но сами по себе они не отказ"
+                    if forbidden else "")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 5. КАРТА
+# ---------------------------------------------------------------------------
+
+def read_smi() -> dict:
+    """Опросить карту. ТОЧКА ВНЕДРЕНИЯ: тест подменяет её целиком (Т4).
+
+    Возвращает `{"text": str|None, "why": str}`. `text is None` означает
+    РОВНО ОДНО: спросить нечем. Что карты нет, отсюда не следует.
+    """
+    if shutil.which(SMI_BIN) is None:
+        return {"text": None,
+                "why": (f"{SMI_BIN} не найден: спросить нечем. Это НЕ «карты "
+                        f"нет» — утилита ставится вместе с драйвером")}
+    try:
+        raw = subprocess.run(
+            [SMI_BIN, "--query-gpu=name,memory.total,compute_cap,driver_version",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=SMI_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"text": None, "why": f"{SMI_BIN} не отработал: {str(exc)[:120]}"}
+    if raw.returncode != 0:
+        return {"text": None,
+                "why": f"{SMI_BIN} вернул {raw.returncode}: {raw.stderr[:120]}"}
+    return {"text": raw.stdout, "why": ""}
+
+
+def card(*, smi=read_smi, length: int | None = None,
+         step: str | None = None) -> dict:
+    """Что за карты стоят и сколько ГиБ запаса остаётся на выбранной ступени.
+
+    Разбор CSV берётся из `fork_preflight.parse_smi`, бюджет памяти — из
+    `fork_preflight.budget` (Е1). Своей модели памяти здесь НЕТ и быть не
+    должно: вторая модель разошлась бы с первой молча.
+
+    ОГОВОРКА ПРО ЕДИНИЦЫ. `parse_smi` делит MiB на 1024 и называет результат
+    «ГБ». Арифметически это ГиБ, и ступени в `STEPS_GB` пришли из тех же
+    гибибайтов лок-файла — то есть числа сравнимы, а подпись у них неточная.
+    Здесь они печатаются как ГиБ.
+    """
+    # Умолчания разрешаются В ТЕЛЕ, а не в сигнатуре, и это не стиль.
+    # `def card(step=DEFAULT_STEP)` привязывает значение НА МОМЕНТ ОПРЕДЕЛЕНИЯ
+    # функции: подмена константы после импорта не доезжает до вызова, и тест
+    # мутации молча зеленеет. Поймано мутацией (Т1) на первом же прогоне.
+    length = DEFAULT_LENGTH if length is None else length
+    step = DEFAULT_STEP if step is None else step
+    got = smi()
+    if got.get("text") is None:
+        return {"outcome": UNMEASURED, "count": None, "gpus": [],
+                "note": got.get("why") or "карта не опрошена"}
+    parsed = _fp.parse_smi(got["text"])
+    if parsed["outcome"] != PASS:
+        return {"outcome": UNMEASURED, "count": None, "gpus": [],
+                "note": f"{SMI_BIN} ответил, но разобрать нечего: {parsed['note']}"}
+
+    cards = parsed["gpus"]
+    count = len(cards)
+    mems = [g["memory_gb"] for g in cards if g["memory_gb"] is not None]
+    lines = [f"{g['name']} {g['memory_gb']} ГиБ cc{g['compute_cap']} "
+             f"драйвер {g['driver']}" for g in cards]
+    if not mems:
+        return {"outcome": UNMEASURED, "count": count, "gpus": cards,
+                "note": (f"карт {count} ({'; '.join(lines)}), но объём памяти "
+                         f"ни у одной не разобран — запас считать не от чего")}
+
+    smallest = min(mems)
+    plan = _fp.budget(smallest, length=length)
+    row = next((r for r in plan.get("rows", []) if r["step"] == step), None)
+    headroom = row["headroom_gb"] if row else None
+
+    beefs = []
+    if count < EXPECTED_GPU_COUNT:
+        beefs.append(f"карт {count}, а утверждено {EXPECTED_GPU_COUNT} "
+                     f"(A16 — четыре независимых GPU, память НЕ складывается)")
+    if smallest < MIN_GPU_MEMORY_GIB:
+        beefs.append(f"наименьшая карта {smallest} ГиБ, а ниже "
+                     f"{MIN_GPU_MEMORY_GIB} это уже не A16")
+    if row is None:
+        beefs.append(f"ступени {step} нет в модели памяти "
+                     f"({sorted(_fp.STEPS_GB)}) — запас считать нечем")
+    elif headroom is not None and headroom < _fp.MIN_HEADROOM_GB:
+        beefs.append(f"на ступени {step} запас {headroom} ГиБ при требуемых "
+                     f"{_fp.MIN_HEADROOM_GB} — впритык или не влезает")
+
+    return {
+        "outcome": FAIL if beefs else PASS,
+        "count": count, "gpus": cards, "driver": cards[0]["driver"],
+        "smallest_gib": smallest, "step": step, "length": length,
+        "headroom_gib": headroom,
+        "need_gib": row["total_gb"] if row else None,
+        "note": (f"карт {count}: {'; '.join(lines)}. На ступени {step} нужно "
+                 f"{row['total_gb'] if row else '?'} ГиБ из {smallest}, "
+                 f"ЗАПАС {headroom} ГиБ при {length} кадрах"
+                 + (". " + "; ".join(beefs) if beefs else "")
+                 + ". Бюджет — РАСЧЁТ по fork_preflight, не замер: сколько "
+                   "забирает ECC, здесь не измерено"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# СТУПЕНЬ 6. SHA256 — ДОРОГАЯ, ТОЛЬКО ПО ФЛАГУ
+# ---------------------------------------------------------------------------
+
+def hashes(files: list) -> dict:
+    """Сверить sha256 у тех файлов, что нашлись. МИНУТЫ на 18 ГиБ.
+
+    Хэшируются только найденные: считать хэш отсутствующего нечего, и «нет
+    файла» уже сказано ступенью размеров.
+    """
+    out = []
+    for f in files:
+        if f.get("found") is None:
+            out.append({**f, "sha_state": "missing", "got_sha": None})
+            continue
+        if not f.get("sha256"):
+            out.append({**f, "sha_state": "no_hash", "got_sha": None})
+            continue
+        try:
+            got = _fp.sha256_of(f["found"])
+        except OSError as exc:
+            out.append({**f, "sha_state": "no_hash", "got_sha": None,
+                        "why": str(exc)[:80]})
+            continue
+        out.append({**f, "got_sha": got,
+                    "sha_state": "ok" if got == f["sha256"] else "mismatch"})
+    counts = {s: sum(1 for f in out if f["sha_state"] == s)
+              for s in ("ok", "mismatch", "missing", "no_hash")}
+    if counts["mismatch"]:
+        outcome = FAIL
+    elif counts["ok"] and not counts["no_hash"] and not counts["missing"]:
+        outcome = PASS
+    else:
+        outcome = UNMEASURED
+    bad = [f["name"] for f in out if f["sha_state"] == "mismatch"]
+    return {
+        "outcome": outcome, "files": out, **counts,
+        "note": (f"хэшей сверено {counts['ok'] + counts['mismatch']}: сошлось "
+                 f"{counts['ok']}, НЕ СОШЛОСЬ {counts['mismatch']}, файла нет "
+                 f"{counts['missing']}, эталона нет {counts['no_hash']}"
+                 + (". Содержимое не то: " + ", ".join(bad) if bad else "")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ОТЧЁТ
+# ---------------------------------------------------------------------------
+
+def _step(name: str, res: dict, seconds: float, *, skipped: bool = False) -> dict:
+    return {"name": name, "outcome": res["outcome"], "seconds": round(seconds, 4),
+            "note": res["note"], "skipped": skipped, "detail": res}
+
+
+def report(*, root: str = ".", models_dir: str | Path | None = None,
+           comfy_root: str | Path | None = None, disk_path: str | None = None,
+           sha: bool = False, length: int | None = None,
+           step: str | None = None, smi=read_smi,
+           lock_path: str | Path | None = None) -> dict:
+    """Вся приёмка, от миллисекунд к минутам. Длительность каждого шага — в отчёт.
+
+    Порядок вызовов ниже — и есть прибор (П2). Переставить хэширование выше
+    `stat`-а значит вернуть тот самый отказ, ради которого модуль написан:
+    сорок минут до вывода, который был доступен на первой миллисекунде.
+    """
+    steps = []
+    t = time.perf_counter()
+    lock = read_lock(lock_path) if lock_path is not None else find_lock(root)
+    steps.append(_step("реестр", lock, time.perf_counter() - t))
+
+    entries = lock["entries"]
+    base_models = (Path(models_dir) if models_dir is not None
+                   else _default_models_dir(root, comfy_root))
+
+    t = time.perf_counter()
+    if entries:
+        siz = sizes(entries, base_models)
+    else:
+        siz = {"outcome": UNMEASURED, "files": [], "models_dir": str(base_models),
+               "note": ("реестра нет — сверять размеры не с чем. Это «не "
+                        "смогли», а не «веса на месте»")}
+    steps.append(_step("размеры", siz, time.perf_counter() - t))
+
+    # Место меряется НА ТОМ ДИСКЕ, КУДА ПОЙДУТ ВЕСА, а не на текущем: на
+    # арендованных образах `models/` часто лежит на отдельном томе, и свободное
+    # место корня к нему отношения не имеет.
+    if disk_path is not None:
+        where = disk_path
+    elif Path(base_models).exists():
+        where = base_models
+    else:
+        where = root
+    t = time.perf_counter()
+    steps.append(_step("место", disk(siz["files"], where),
+                       time.perf_counter() - t))
+
+    t = time.perf_counter()
+    steps.append(_step("узлы", nodes(comfy_root, root=root),
+                       time.perf_counter() - t))
+
+    t = time.perf_counter()
+    steps.append(_step("карта", card(smi=smi, length=length, step=step),
+                       time.perf_counter() - t))
+
+    t = time.perf_counter()
+    if sha:
+        steps.append(_step("sha256", hashes(siz["files"]),
+                           time.perf_counter() - t))
+    else:
+        steps.append(_step(
+            "sha256",
+            {"outcome": UNMEASURED,
+             "note": ("СТУПЕНЬ НЕ ЗАПУСКАЛАСЬ: хэширование 18 ГиБ стоит минут "
+                      "и включается ключом --sha. Годность по содержимому НЕ "
+                      "УТВЕРЖДАЕТСЯ — утверждается только размер")},
+            time.perf_counter() - t, skipped=True))
+
+    live = [s for s in steps if not s["skipped"]]
+    passed = [s["name"] for s in live if s["outcome"] == PASS]
+    failed = [s["name"] for s in live if s["outcome"] == FAIL]
+    unmeasured = [s["name"] for s in live if s["outcome"] == UNMEASURED]
+    skipped = [s["name"] for s in steps if s["skipped"]]
+    outcome = FAIL if failed else (UNMEASURED if unmeasured else PASS)
+    return {
+        "steps": steps, "outcome": outcome,
+        "passed": len(passed), "failed": len(failed),
+        "unmeasured": len(unmeasured), "skipped": len(skipped),
+        "passed_names": passed, "failed_names": failed,
+        "unmeasured_names": unmeasured, "skipped_names": skipped,
+        "seconds": round(sum(s["seconds"] for s in steps), 3),
+        "note": (f"ступеней {len(steps)}: пройдено {len(passed)}, провалено "
+                 f"{len(failed)}, не смогли {len(unmeasured)}, пропущено "
+                 f"{len(skipped)}"
+                 + (f". ПРОВАЛЕНО: {', '.join(failed)}" if failed else "")
+                 + (f". НЕ СМОГЛИ: {', '.join(unmeasured)}" if unmeasured else "")
+                 + (f". ПРОПУЩЕНО: {', '.join(skipped)}" if skipped else "")),
+    }
+
+
+def _default_models_dir(root: str | Path, comfy_root: str | Path | None) -> Path:
+    """Куда смотреть за весами, если `--models` не назван."""
+    base = Path(comfy_root).expanduser() if comfy_root else find_comfy(root)
+    if base is not None and (Path(base) / "models").is_dir():
+        return Path(base) / "models"
+    return Path(root) / "models"
+
+
+#: Как исход ложится в код возврата. Три исхода — три кода (Р1): свести двойку
+#: в ноль означало бы, что «нечем спросить про карту» читается как «машина
+#: годна», а это ровно та ошибка, из-за которой прогон запускают на пустой
+#: машине.
+EXIT_CODES = {PASS: 0, FAIL: 1, UNMEASURED: 2}
+
+
+def render(rep: dict) -> str:
+    """Человекочитаемый отчёт. Числа рядом с вердиктом (Р2)."""
+    width = max(len(s["name"]) for s in rep["steps"])
+    lines = ["ПРИЁМКА АРЕНДОВАННОЙ МАШИНЫ", ""]
+    for s in rep["steps"]:
+        mark = "пропущено" if s["skipped"] else s["outcome"]
+        lines.append(f"  {s['name']:<{width}}  {s['seconds']:>8.3f} с  "
+                     f"{mark}")
+        lines.append(f"  {'':<{width}}  {'':>8}    {s['note']}")
+    lines += ["", f"ИТОГ: {rep['outcome']}", f"  {rep['note']}",
+              f"  всего {rep['seconds']} с",
+              f"  код возврата {EXIT_CODES[rep['outcome']]}"]
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    """Первая команда на арендованной машине.
+
+    Ноль — годна, единица — не годна, двойка — не смогли проверить.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python3 -m ball_reel.fork_stand",
+        description="приёмка арендованной машины: от миллисекунд к минутам")
+    ap.add_argument("--sha", action="store_true",
+                    help="сверить ещё и sha256 (МИНУТЫ: 18 ГиБ через хэш)")
+    ap.add_argument("--root", default=".", help="корень репозитория с реестром")
+    ap.add_argument("--comfy", default=None, help="путь к ComfyUI")
+    ap.add_argument("--models", default=None, help="путь к каталогу весов")
+    ap.add_argument("--disk", default=None, help="на каком пути мерить место")
+    ap.add_argument("--length", type=int, default=DEFAULT_LENGTH,
+                    help=f"длина окна для расчёта памяти (умолчание {DEFAULT_LENGTH})")
+    ap.add_argument("--step", default=DEFAULT_STEP,
+                    help=f"ступень весов (умолчание {DEFAULT_STEP})")
+    args = ap.parse_args(argv)
+
+    rep = report(root=args.root, models_dir=args.models, comfy_root=args.comfy,
+                 disk_path=args.disk, sha=args.sha, length=args.length,
+                 step=args.step)
+    print(render(rep))
+    return EXIT_CODES[rep["outcome"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
