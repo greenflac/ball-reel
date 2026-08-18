@@ -1196,5 +1196,154 @@ class ThePreflightJudgesTheRunWeActuallyLaunch(unittest.TestCase):
         self.assertEqual(got["checks"]["время шины"]["low_s"], 0.0)
 
 
+
+
+class TheFirstRealTimingInTheProject(unittest.TestCase):
+    """Разбор двух точек замера владельца. До них у проекта не было ни одной.
+
+    Считать надо ПРОХОДЫ модели, а не шаги: cfg больше единицы даёт два
+    прохода на шаг. На шагах две точки не сходятся вовсе — получается
+    отрицательная постоянная часть, и это первый признак, что разбор неверен.
+    """
+
+    def test_cfg_above_one_doubles_the_passes(self):
+        self.assertEqual(fp.passes_for(20, 3.5), 40)
+        self.assertEqual(fp.passes_for(4, 1), 4)
+
+    def test_cfg_exactly_one_is_a_single_pass(self):
+        """Граница, а не «больше-меньше»: cfg=1 — наш рабочий режим."""
+        self.assertEqual(fp.passes_for(3, 1.0), 3)
+
+    def test_the_two_observations_reconcile_exactly(self):
+        """Литералы (Т2) — это наблюдения владельца, они не наши и не поедут.
+
+        40*p + f = 513 и 4*p + f = 71. Сходимость точная; независимая
+        проверка — разница первого и второго прогонов (23 и 26 с) должна
+        совпасть с постоянной частью, и совпадает.
+        """
+        p, f = fp.MEASURED_PASS_S, fp.MEASURED_FIXED_S
+        self.assertAlmostEqual(40 * p + f, 513.0, places=0)
+        self.assertAlmostEqual(4 * p + f, 71.0, places=0)
+        self.assertTrue(21.0 <= f <= 27.0,
+                        f"постоянная часть {f} разошлась со временем загрузки "
+                        f"весов (23 и 26 с) — значит разбор неверен")
+
+    def test_our_own_number_is_unmeasured_because_it_is_another_card(self):
+        got = fp.render_seconds(seconds=10.0)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("ИЗМЕРЕНА НЕ У НАС", got["note"])
+        self.assertIn("ЗАНИЖЕНИЕ", got["note"],
+                      "линейный пересчёт подан как точный — а он оптимистичен")
+
+    def test_a_measured_pass_makes_it_a_verdict(self):
+        """Негативный контроль (И5): прибор обязан уметь и говорить «годно»."""
+        got = fp.render_seconds(seconds=10.0, pass_s=30.0)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertIn("ЗАМЕРЕНА на нашей карте", got["note"])
+
+    def test_longer_clips_cost_more_windows_and_more_time(self):
+        short = fp.render_seconds(seconds=5.0)
+        long = fp.render_seconds(seconds=10.0)
+        self.assertGreater(long["windows"], short["windows"])
+        self.assertGreater(long["compute_s"], short["compute_s"])
+
+    def test_the_geometry_of_the_measurement_is_the_one_it_was_taken_at(self):
+        """Пережило первый заход: пересчёт никем не сторожился.
+
+        Литералы (Т2) — это условия чужого замера, 640x640 и 81 кадр; поедут
+        они только если владелец пришлёт другой замер, и тогда тест обязан
+        покраснеть, а не поехать следом.
+        """
+        self.assertEqual(fp.MEASURED_PIXELS, 640 * 640)
+        self.assertEqual(fp.MEASURED_FRAMES, 81)
+
+    def test_our_smaller_window_scales_the_cost_down(self):
+        """Мутация «пересчёт снят» пережила сьют — значит его не было видно."""
+        got = fp.render_seconds(seconds=10.0)
+        self.assertLess(got["scale"], 1.0,
+                        "наше окно меньше замерного и по пикселям, и по "
+                        "кадрам — множитель обязан быть меньше единицы")
+        self.assertGreater(got["scale"], 0.8)
+
+    def test_the_fixed_part_is_paid_once_not_per_window(self):
+        """Иначе десятисекундный ролик стоил бы вчетверо больше постоянной."""
+        got = fp.render_seconds(seconds=10.0)
+        self.assertAlmostEqual(got["total_s"] - got["compute_s"],
+                               fp.MEASURED_FIXED_S, places=0)
+
+
+class TheBusShareHasADenominator(unittest.TestCase):
+    """«В 7.6 раза дороже» без знаменателя подталкивает к решению, которого
+    само число не обосновывает: 7.6 раза от малого — это малое."""
+
+    def test_the_graph_setting_costs_a_small_share_of_the_time(self):
+        got = fp.bus_share(seconds=10.0, blocks_to_swap=38)
+        self.assertLess(got["high"], 0.20,
+                        "доля шины оказалась велика — тогда своп 38 надо "
+                        "менять, и это уже другой разговор")
+        self.assertGreater(got["high"], 0.0)
+
+    def test_the_threshold_setting_is_cheaper_but_the_gap_is_small(self):
+        few = fp.bus_share(seconds=10.0, blocks_to_swap=5)
+        many = fp.bus_share(seconds=10.0, blocks_to_swap=38)
+        self.assertLess(few["high"], many["high"])
+        self.assertLess(many["high"] - few["high"], 0.15,
+                        "разница долей велика — вывод «своп почти бесплатен» "
+                        "перестал держаться")
+
+    def test_the_share_is_taken_from_compute_not_from_total(self):
+        """Пережило первый заход. Знаменателем обязан быть СЧЁТ, а не полное
+        время: постоянная часть (VAE-декод, кодирование текста) шину не
+        занимает и не занимала бы её и без свопа. Делить на неё значит
+        занизить долю — то есть ошибиться в успокаивающую сторону.
+        """
+        got = fp.bus_share(seconds=10.0, blocks_to_swap=38)
+        calc = fp.render_seconds(seconds=10.0)
+        # ОБА края, а не один: первая версия сторожила только верхний, и
+        # подмена знаменателя на нижнем крае пережила сьют. Прибор врал бы
+        # наполовину — ровно та же дыра, что нашлась у деления на карты.
+        for край, i in (("low", 0), ("high", 1)):
+            with self.subTest(край=край):
+                self.assertAlmostEqual(
+                    got[край], got["bus_s"][i] / calc["compute_s"], places=4)
+                self.assertNotAlmostEqual(
+                    got[край], got["bus_s"][i] / calc["total_s"], places=4)
+
+    def test_no_swap_at_all_costs_nothing_on_the_bus(self):
+        """Негативный контроль: ноль байт делится на любую полосу одинаково."""
+        got = fp.bus_share(seconds=10.0, blocks_to_swap=0)
+        self.assertEqual(got["high"], 0.0)
+
+    def test_the_verdict_stays_unmeasured_and_says_why(self):
+        got = fp.bus_share(seconds=10.0)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("ОЦЕНКИ", got["note"])
+
+
+class TheMemoryModelAgreesWithAnOutsideObservation(unittest.TestCase):
+    """Первая внешняя сверка модели памяти. Раньше её не с чем было сверять.
+
+    Наблюдение владельца: fp8_scaled на 640x640x81 занимает 84% от 24 ГБ,
+    то есть 20.16 ГБ. Наша модель складывает веса, LoRA, активации и резерв
+    Comfy. Сходимость в пределах 5% — это не доказательство модели, но это
+    первое, что её вообще проверяет извне.
+    """
+
+    def test_the_model_lands_within_five_percent_of_the_observation(self):
+        observed = 0.84 * 24.0                      # литералы наблюдения (Т2)
+        ours = 14.0 + fp.LORA_GB + fp.ACTIVATIONS_GB[77] + fp.COMFY_RESERVE_GB
+        self.assertLess(abs(ours - observed) / observed, 0.05,
+                        f"модель {ours:.2f} против наблюдённых {observed:.2f}")
+
+    def test_the_model_is_not_above_the_observation(self):
+        """Занижение опаснее завышения: обещанная память кончается на карте."""
+        observed = 0.84 * 24.0
+        ours = 14.0 + fp.LORA_GB + fp.ACTIVATIONS_GB[77] + fp.COMFY_RESERVE_GB
+        self.assertLess(ours, observed,
+                        "модель обещает БОЛЬШЕ свободной памяти, чем видно "
+                        "в наблюдении — ошибка в опасную сторону")
+
+
+
 if __name__ == "__main__":
     unittest.main()

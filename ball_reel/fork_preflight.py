@@ -630,6 +630,134 @@ def swap_floor(memory_gb: float, *, length: int = 77, step: str | None = None,
     }
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПЕРВЫЙ НАСТОЯЩИЙ ЗАМЕР ВРЕМЕНИ В ПРОЕКТЕ (18.08.2026)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# До сих пор у проекта не было НИ ОДНОГО замера длительности шага 14B: и
+# `SPEC_TFLOPS`, и таймаут бэкенда стояли ВЫБРАННЫМИ. Владелец прислал
+# воркфлоу Wan2.2 i2v, в записке которого автор привёл свои замеры на
+# RTX 4090D 24 ГБ, 640x640, 81 кадр:
+#
+#     fp8_scaled                 84% VRAM   536 с (1-й прогон)  513 с (2-й)
+#     fp8_scaled + 4steps LoRA   83% VRAM    97 с (1-й прогон)   71 с (2-й)
+#
+# РАЗБОР. Первая строка идёт на 20 шагах при cfg 3.5, вторая — на 4 шагах при
+# cfg 1. cfg больше единицы означает ДВА прохода модели на шаг (условный и
+# безусловный), поэтому считать надо ПРОХОДЫ, а не шаги: 40 против 4. Отсюда
+# два уравнения и две неизвестные — цена прохода и постоянная часть:
+#
+#     40*p + f = 513      4*p + f = 71   ->   p = 12.28,  f = 21.89
+#
+# СХОДИМОСТЬ ТОЧНАЯ: подстановка даёт 513.0 и 71.0. Это не подгонка — двух
+# точек ровно хватает на две неизвестные, а вот НЕЗАВИСИМАЯ проверка есть:
+# разница первого и второго прогонов (536-513=23 и 97-71=26 с) должна быть
+# временем загрузки весов, и она совпадает с найденной постоянной частью 21.89.
+# Три числа сошлись там, где могли не сойтись.
+
+#: Секунд на ОДИН проход модели. ИЗМЕРЕНО (не нами): RTX 4090D 24 ГБ,
+#: 640x640, 81 кадр, Wan2.2 i2v fp8_scaled; источник — записка «VRAM Usage» в
+#: воркфлоу владельца, разбор двух точек выше.
+#: ЭТО НЕ НАША КАРТА И НЕ НАША МОДЕЛЬ. Переносить на A16 напрямую нельзя.
+MEASURED_PASS_S = 12.28
+MEASURED_ON = "RTX 4090D 24 ГБ, 640x640, 81 кадр, Wan2.2 i2v fp8_scaled"
+
+#: Постоянная часть прогона: кодирование текста, VAE-декод 81 кадра, загрузка
+#: весов. ИЗМЕРЕНО там же, подтверждено разницей первого и второго прогонов.
+MEASURED_FIXED_S = 21.89
+
+#: Геометрия замера, чтобы пересчёт на нашу считался, а не писался числом (Е1).
+MEASURED_PIXELS = 640 * 640
+MEASURED_FRAMES = 81
+
+
+def passes_for(steps: int, cfg: float) -> int:
+    """Проходов модели на шаг: два при cfg>1, один при cfg=1.
+
+    ВЫНЕСЕНО ОТДЕЛЬНО, потому что именно на этом разборе сошлись две точки
+    замера. Считать шагами вместо проходов значило бы получить цену шага,
+    зависящую от cfg, — то есть не цену шага.
+    """
+    return int(steps) * (2 if cfg > 1 else 1)
+
+
+def render_seconds(*, seconds: float | None = None, pixels: int | None = None,
+                   steps: int | None = None, cfg: float | None = None,
+                   pass_s: float | None = None) -> dict:
+    """Сколько считается ролик. Три исхода; на нашей карте — «не смогли».
+
+    Пересчёт с замера линейный по пикселям и кадрам, и это ЗАНИЖЕНИЕ: внимание
+    растёт быстрее линейного по числу токенов. Названо вслух, потому что
+    оценка, ошибающаяся в оптимистичную сторону, опаснее отсутствия оценки.
+    """
+    from . import fork_comfy as fc
+
+    seconds = fc.SECONDS_MIN if seconds is None else seconds
+    pixels = fc.WRAP_WIDTH * fc.WRAP_HEIGHT if pixels is None else pixels
+    steps = fc.WRAP_STEPS if steps is None else steps
+    cfg = fc.WRAP_CFG if cfg is None else cfg
+    length = fc.frames_for_seconds(seconds)
+    plan = fc.window_plan(length["frames"])
+    scale = (pixels / MEASURED_PIXELS) * (fc.WRAP_WINDOW / MEASURED_FRAMES)
+    measured = pass_s is not None
+    pass_s = MEASURED_PASS_S if pass_s is None else pass_s
+    per_window = passes_for(steps, cfg) * pass_s * scale
+    compute = plan["windows"] * per_window
+    total = compute + MEASURED_FIXED_S
+    return {
+        "outcome": PASS if measured else UNMEASURED,
+        "compute_s": round(compute, 1), "total_s": round(total, 1),
+        "per_window_s": round(per_window, 1), "windows": plan["windows"],
+        "passes_per_window": passes_for(steps, cfg), "scale": round(scale, 4),
+        "note": (f"{seconds} с -> {plan['windows']} окон по "
+                 f"{passes_for(steps, cfg)} проходов; счёт {compute:.0f} с плюс "
+                 f"постоянная {MEASURED_FIXED_S:.0f} с = {total:.0f} с. "
+                 + (f"Цена прохода {pass_s:.2f} с ЗАМЕРЕНА на нашей карте."
+                    if measured else
+                    f"Цена прохода {pass_s:.2f} с ИЗМЕРЕНА НЕ У НАС и НЕ НА "
+                    f"НАШЕЙ МОДЕЛИ ({MEASURED_ON}), пересчёт линейный по "
+                    f"пикселям и кадрам (x{scale:.3f}) — это ЗАНИЖЕНИЕ, "
+                    f"внимание растёт быстрее линейного. На A16 будет "
+                    f"МЕДЛЕННЕЕ, во сколько раз — НЕ ЗНАЕМ")),
+    }
+
+
+def bus_share(*, seconds: float | None = None,
+              blocks_to_swap: int | None = None,
+              step_gb: float | None = None, pass_s: float | None = None) -> dict:
+    """Какую ДОЛЮ времени занимает шина. Знаменатель важнее числителя.
+
+    ЗАЧЕМ ОТДЕЛЬНО. `blockswap_seconds` считает время шины и честно печатает
+    «в 7.6 раза дороже, чем при пороговом свопе». Но 7.6 раза от малого — это
+    малое, и без знаменателя число подталкивает к решению, которого оно не
+    обосновывает. Здесь знаменатель появляется.
+    """
+    from . import fork_comfy as fc
+
+    blocks_to_swap = (fc.BLOCKS_TO_SWAP if blocks_to_swap is None
+                      else blocks_to_swap)
+    step_gb = STEPS_GB["Q4_K_M"] if step_gb is None else step_gb
+    bus = blockswap_seconds(step_gb, blocks_to_swap, seconds=seconds)
+    calc = render_seconds(seconds=seconds, pass_s=pass_s)
+    if bus.get("low_s") is None or not calc["compute_s"]:
+        return {"outcome": UNMEASURED, "low": None, "high": None,
+                "note": f"считать долю не от чего: {bus['note'][:120]}"}
+    lo = bus["low_s"] / calc["compute_s"]
+    hi = bus["high_s"] / calc["compute_s"]
+    return {
+        "outcome": UNMEASURED, "low": round(lo, 4), "high": round(hi, 4),
+        "bus_s": (bus["low_s"], bus["high_s"]), "compute_s": calc["compute_s"],
+        "blocks_to_swap": blocks_to_swap,
+        "note": (f"своп {blocks_to_swap}: шина {bus['low_s']:.1f}.."
+                 f"{bus['high_s']:.1f} с против счёта {calc['compute_s']:.0f} с "
+                 f"= {lo:.1%}..{hi:.1%} времени. ОБА ЧИСЛА ОЦЕНКИ: счёт "
+                 f"пересчитан с чужой карты, шина взята из паспорта шины. "
+                 f"Но порядок величины устойчив: чем МЕДЛЕННЕЕ карта, тем "
+                 f"МЕНЬШЕ доля шины, а A16 медленнее той, на которой мерили"),
+    }
+
+
 def throughput(flops_per_forward: float = 1.54e15, steps: int = 6,
                *, measured_tflops: float | None = None) -> dict:
     """Сколько минут на ролик. ТОЛЬКО по замеренной полосе, не по паспорту.
