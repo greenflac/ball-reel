@@ -347,6 +347,15 @@ MUTATIONS = [
     ("ball_reel.synth", "MIN_KEEP_SHARE", 0.0,
      "доля отсева больше ни о чём не говорит: порождение, где выбросили 95%, "
      "объявляется удавшимся"),
+    ("ball_reel.research_contract", "BLOCKED_STATUS_CODES", frozenset(),
+     "403 перестаёт быть блокировкой: «нас не пустили» схлопывается "
+     "в «там ничего нет»"),
+    ("ball_reel.research_contract", "BLOCKED_STATUS_CODES",
+     frozenset({401, 402, 403, 404, 407, 429, 451}),
+     "порог затянут в другую сторону: 404 объявлен блокировкой, и честное "
+     "отсутствие страницы больше нельзя отчитать как «не найдено»"),
+    ("ball_reel.research_contract", "MIN_SOURCES_FOR_FOUND", 0,
+     "«найдено» можно сказать, не показав ни одного источника"),
 ]
 
 def _mutate_source(text: str, name: str, value) -> str:

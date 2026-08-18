@@ -117,7 +117,7 @@ MediaPipe с обеих сторон. Теперь умолчание — DWPose
 $ python3 -m ball_reel.codeaudit
 PASS  тесты          Ran <N> tests        # текущее N — docs/NUMBERS.md
 PASS  покрытие ядра  порог 50%; худшие: driving 65%, pose 76%, subject 78%, motion 83%
-мутационное покрытие: 100% (119/119)
+мутационное покрытие: 100% (<N>/<N>)   # число см. docs/NUMBERS.md
 АУДИТ ПРОЙДЕН
 ```
 
