@@ -315,5 +315,92 @@ class OnRealPhotographs(unittest.TestCase):
                          "этот тест не про асимметрию")
 
 
+class TheMaskArmIsChosenFromTheSameBandAsTheBucket(unittest.TestCase):
+    """Связка «роутер → плечо маски».
+
+    Маску РИСУЕТ `fork_mask`, а РЕШАЕТ её ширину тот, кто посмотрел на клиента.
+    Держать решение рядом с рисованием значило бы завести второе место, где
+    живёт знание о телосложении, и оно разъехалось бы с первым (Е1).
+    """
+
+    def test_above_the_band_gets_the_narrow_arm(self):
+        got = fbr.arm_for(1.60)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["arm"], "narrow")
+
+    def test_inside_the_band_gets_the_wide_arm(self):
+        self.assertEqual(fbr.arm_for(1.50)["arm"], "wide")
+
+    def test_below_the_band_gets_the_wider_arm(self):
+        self.assertEqual(fbr.arm_for(1.40)["arm"], "wider")
+
+    def test_an_unmeasured_ratio_picks_NO_arm_at_all(self):
+        """Р1: умолчание здесь было бы решением за оператора по отсутствующему
+        измерению — ровно то, против чего у роутера заведён третий исход."""
+        got = fbr.arm_for(None)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["arm"])
+        self.assertIn("НЕ выбирается", got["note"])
+
+    def test_the_price_of_the_arm_is_printed_next_to_the_verdict(self):
+        """Расширение маски покупает телосложение ЗА охраняемую площадь.
+        Вердикт без цены заставляет искать её в другом документе."""
+        for value, guarded in ((1.60, "34.4%"), (1.50, "21.4%"), (1.40, "10.4%")):
+            with self.subTest(value=value):
+                self.assertIn(guarded, fbr.arm_for(value)["note"])
+
+    def test_the_boundaries_come_from_bounds_not_from_new_numbers(self):
+        """Е1: вторая пара порогов рядом с первой — два независимых
+        представления об одном теле. Проверяется следствием: сдвинули полосу —
+        сдвинулся и выбор плеча."""
+        lo, hi = fbr.bounds()
+        self.assertEqual(fbr.arm_for(hi + 0.01)["arm"], "narrow")
+        self.assertEqual(fbr.arm_for(lo - 0.01)["arm"], "wider")
+        self.assertEqual(fbr.arm_for((lo + hi) / 2)["arm"], "wide")
+        self.assertEqual(fbr.arm_for(1.50)["bounds"], (lo, hi))
+
+    def test_moving_the_split_moves_the_arm(self):
+        """Т1 в обе стороны: подмена константы обязана доехать до вызова."""
+        saved = fbr.SPLIT
+        try:
+            fbr.SPLIT = 1.0
+            self.assertEqual(fbr.arm_for(1.50)["arm"], "narrow",
+                             "полоса уехала вниз, а плечо не изменилось — "
+                             "умолчание связалось на импорте")
+            fbr.SPLIT = 2.0
+            self.assertEqual(fbr.arm_for(1.50)["arm"], "wider")
+        finally:
+            fbr.SPLIT = saved
+
+    def test_every_arm_name_exists_in_fork_mask(self):
+        """Имя плеча, которого нет в маске, — тихий отказ на прогоне."""
+        from ball_reel import fork_mask
+
+        for value in (1.60, 1.50, 1.40):
+            with self.subTest(value=value):
+                self.assertIn(fbr.arm_for(value)["arm"], fork_mask.ARMS)
+
+    def test_the_occupancy_table_covers_exactly_the_arms(self):
+        from ball_reel import fork_mask
+
+        self.assertEqual(set(fbr.ARM_OCCUPANCY), set(fork_mask.ARMS))
+
+    def test_wider_arms_leave_less_guarded_area(self):
+        """Негативный контроль к таблице: числа должны идти В ПРАВИЛЬНУЮ
+        сторону. Таблица с перепутанными строками прошла бы все проверки выше."""
+        occ = fbr.ARM_OCCUPANCY
+        self.assertLess(occ["narrow"], occ["wide"])
+        self.assertLess(occ["wide"], occ["wider"])
+
+    def test_the_photo_path_gives_bucket_and_arm_together(self):
+        """Два вызова подряд в чужом коде — два места, где можно передать
+        РАЗНЫЕ пропорции и получить корзину от одного человека, а ширину маски
+        от другого."""
+        got = fbr.arm_for_photo(proportions={fbr.KEY: 1.40})
+        self.assertEqual(got["arm"], "wider")
+        self.assertIn("Корзина:", got["note"])
+        self.assertIn(got["bucket"], fbr.BUCKETS)
+
+
 if __name__ == "__main__":
     unittest.main()
