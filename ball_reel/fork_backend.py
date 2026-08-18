@@ -114,6 +114,15 @@ FIELD_OUTPUTS = "outputs"
 FIELD_COMPLETED = "completed"
 FIELD_MESSAGES = "messages"
 MSG_EXECUTION_ERROR = "execution_error"
+#: ВТОРОЕ сообщение о неудаче, и оно НЕ ошибка. ПРОВЕРЕНО по исходнику
+#: 18.08.2026: `execution.py:686 handle_execution_error` на
+#: `InterruptProcessingException` кладёт `execution_interrupted` — БЕЗ полей
+#: `exception_message` и `exception_type`. Прерывание случается, когда задачу
+#: сняли снаружи: кнопкой, `/interrupt`, перезапуском сервера. Про граф это не
+#: говорит ничего, поэтому исход «не смогли», а не «не годно». Без этой ветки
+#: снятая задача читалась бы как «отработала и не оставила файлов», то есть
+#: как НАШ негодный граф, и следующая смена искала бы дефект там, где его нет.
+MSG_EXECUTION_INTERRUPTED = "execution_interrupted"
 
 #: Описание выходного файла внутри `outputs`.
 FIELD_FILENAME = "filename"
@@ -445,6 +454,20 @@ def is_completed(entry: dict) -> bool:
     return bool(isinstance(status, dict) and status.get(FIELD_COMPLETED))
 
 
+def was_interrupted(entry: dict) -> str | None:
+    """Сняли ли задачу снаружи. Отдельно от падения ноды — см.
+    `MSG_EXECUTION_INTERRUPTED`."""
+    status = entry.get(FIELD_STATUS) or {}
+    for msg in status.get(FIELD_MESSAGES) or []:
+        if not (isinstance(msg, (list, tuple)) and len(msg) >= 2):
+            continue
+        if msg[0] != MSG_EXECUTION_INTERRUPTED:
+            continue
+        data = msg[1] if isinstance(msg[1], dict) else {}
+        return str(data.get("node_type") or data.get("node_id") or "?")
+    return None
+
+
 def classify_history(entry: dict | None) -> dict | None:
     """Что означает запись истории. `None` = ещё рано, продолжаем ждать.
 
@@ -454,6 +477,13 @@ def classify_history(entry: dict | None) -> dict | None:
     """
     if entry is None:
         return None
+    stopped = was_interrupted(entry)
+    if stopped:
+        return {"outcome": UNMEASURED, "files": [],
+                "note": (f"{UNMEASURED}: задачу СНЯЛИ снаружи на узле "
+                         f"{stopped} (кнопка, /interrupt, перезапуск сервера). "
+                         f"Про граф это не говорит ничего — он не досчитал не "
+                         f"по своей вине")}
     err = node_error(entry)
     if err:
         return {"outcome": FAIL, "files": [],

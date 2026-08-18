@@ -660,5 +660,51 @@ class TheInstrumentCanGoRed(unittest.TestCase):
         self.assertNotEqual("не годно", "годно")
 
 
-if __name__ == "__main__":  # pragma: no cover
+
+
+class AnInterruptedJobIsNotABadGraph(unittest.TestCase):
+    """Найдено сверкой с исходником ComfyUI (`execution.py:686`), а не догадкой.
+
+    На `InterruptProcessingException` сервер кладёт `execution_interrupted` —
+    БЕЗ полей `exception_message`/`exception_type`. Прежняя версия искала
+    только `execution_error`, и снятая снаружи задача читалась как
+    «отработала и не оставила файлов», то есть как НАШ негодный граф.
+    Следующая смена искала бы дефект там, где его нет.
+    """
+
+    def _entry(self, event, data=None, completed=True, outputs=None):
+        return {"status": {"completed": completed, "status_str": "error",
+                           "messages": [[event, data or {}]]},
+                "outputs": outputs or {}}
+
+    def test_an_interrupted_job_is_unmeasured(self):
+        got = fb.classify_history(
+            self._entry("execution_interrupted", {"node_type": "WanVideoSampler"}))
+        self.assertEqual(got["outcome"], fb.UNMEASURED)
+        self.assertIn("СНЯЛИ снаружи", got["note"])
+        self.assertIn("WanVideoSampler", got["note"])
+
+    def test_a_node_that_actually_crashed_is_still_a_failure(self):
+        """Негативный контроль (И5): различие обязано работать в обе стороны."""
+        got = fb.classify_history(self._entry(
+            "execution_error",
+            {"node_type": "WanVideoSampler", "exception_message": "OOM"}))
+        self.assertEqual(got["outcome"], fb.FAIL)
+        self.assertIn("OOM", got["note"])
+
+    def test_completed_with_no_files_stays_a_failure(self):
+        """Третий случай не должен был поехать вслед за первыми двумя."""
+        got = fb.classify_history(
+            {"status": {"completed": True, "messages": []}, "outputs": {}})
+        self.assertEqual(got["outcome"], fb.FAIL)
+
+    def test_the_interrupt_event_name_is_the_one_the_server_sends(self):
+        # Литерал (Т2): так это поле зовётся в execution.py, переименовать его
+        # у себя мы не вправе.
+        self.assertEqual(fb.MSG_EXECUTION_INTERRUPTED,
+                         "execution_interrupted")
+
+
+
+if __name__ == "__main__":
     unittest.main()
