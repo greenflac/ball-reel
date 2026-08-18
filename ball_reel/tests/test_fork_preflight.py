@@ -787,6 +787,413 @@ class BlockswapIsPartOfTheMemoryModel(unittest.TestCase):
                       "два разных расчёта неразличимы в отчёте — читатель "
                       "решит, что видит тот, которого ждёт")
 
+class BlockswapCostsTimeAndTheTimeIsCounted(unittest.TestCase):
+    """Вторая половина размена «память на время».
+
+    Расчёт памяти сказал «Q4_K_M влезает» и замолчал. Но 9.51 ГиБ едут по
+    шине на каждом шаге и каждом окне, а NVLink у A16 нет. Пока это не
+    посчитано, «влезает» читается как «и ничего не стоит».
+
+    ГЛАВНОЕ ТРЕБОВАНИЕ ЭТОГО КЛАССА: без замера прибор обязан отдавать ВИЛКУ
+    и исход «не смогли», а не одно число, выглядящее замером.
+    """
+
+    def test_the_pcie_ceiling_is_the_spec_arithmetic_not_a_recollection(self):
+        """Т2: ожидаемое пересчитано литералами, а не взято из модуля.
+
+        8 GT/s и 16 GT/s на линию, 16 линий, кодирование 128b/130b:
+        8e9 * 16 * 128/130 / 8 = 15.754e9 Б/с; вдвое больше у 4.0.
+        """
+        gen3 = 8e9 * 16 * (128 / 130) / 8 / 1e9
+        gen4 = 16e9 * 16 * (128 / 130) / 8 / 1e9
+        self.assertAlmostEqual(fp.PCIE_X16_GBPS["3.0"], gen3, places=1)
+        self.assertAlmostEqual(fp.PCIE_X16_GBPS["4.0"], gen4, places=1)
+        self.assertAlmostEqual(fp.PCIE_X16_GBPS["3.0"], 15.75, places=2)
+        self.assertAlmostEqual(fp.PCIE_X16_GBPS["4.0"], 31.51, places=2)
+
+    def test_the_bus_generation_is_not_chosen_because_it_is_not_known(self):
+        """Редакция шины у A16 не подтверждена: nvidia.com закрыт (Ц3).
+
+        Выбрать одну значило бы выдать догадку за паспорт, поэтому в оценку
+        идут обе, и вилка обязана быть НЕВЫРОЖДЕННОЙ.
+        """
+        self.assertEqual(set(fp.PCIE_GEN_UNVERIFIED), {"3.0", "4.0"})
+        got = fp.blockswap_seconds(10.71, 38)
+        self.assertGreater(got["high_s"], got["low_s"])
+
+    def test_without_a_measurement_the_verdict_is_unmeasured_with_a_fork(self):
+        """Р1: третий исход не сворачивается в число."""
+        got = fp.blockswap_seconds(10.71, 38)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNotNone(got["low_s"])
+        self.assertIn("НЕ ЗАМЕРЕНО", got["note"])
+
+    def test_the_time_is_built_from_the_named_parts(self):
+        """Из ЧАСТЕЙ, а не одним числом с потолка — все четыре в отчёте.
+
+        Литералами (Т2): 10 с при 30 к/с прижимаются к 297 кадрам, окнами по
+        77 это 4 окна; шагов у графа 3; за перенос едет 9.51 ГиБ.
+        Итого 4*3 = 12 переносов и 114.12 ГиБ за ролик.
+        """
+        got = fp.blockswap_seconds(10.71, 38)
+        self.assertEqual(got["parts"]["окон"], 4)
+        self.assertEqual(got["parts"]["шагов сэмплера"], 3)
+        self.assertEqual(got["parts"]["переносов"], 12)
+        self.assertAlmostEqual(got["parts"]["ГиБ за перенос"], 9.51, places=2)
+        self.assertAlmostEqual(got["parts"]["ГиБ за ролик"], 114.12, places=1)
+
+    def test_the_fork_is_the_spec_arithmetic_and_it_is_checked_by_hand(self):
+        """Низ вилки: 114.12 ГиБ по 31.51 ГБ/с на полном паспорте.
+
+        114.12 * 2**30 / (31.51 * 1e9) = 3.89 с. Верх — та же масса по
+        15.75 ГБ/с на половине паспорта, то есть ровно вчетверо больше.
+        """
+        got = fp.blockswap_seconds(10.71, 38)
+        self.assertAlmostEqual(got["low_s"], 3.89, places=1)
+        self.assertAlmostEqual(got["high_s"], 15.56, places=1)
+        self.assertAlmostEqual(got["high_s"] / got["low_s"], 4.0, places=1)
+
+    def test_swapping_nothing_costs_no_time_and_that_is_knowledge(self):
+        """Негативный контроль (И5): вход, где прибор обязан сказать «нет».
+
+        При нулевом свопе по шине не едет ничего, и это ЕДИНСТВЕННЫЙ случай,
+        когда без замера полосы можно ответить числом: ноль байт делится на
+        любую полосу одинаково.
+        """
+        got = fp.blockswap_seconds(10.71, 0)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["low_s"], 0.0)
+        self.assertEqual(got["high_s"], 0.0)
+
+    def test_a_bigger_swap_costs_strictly_more_time(self):
+        """Второй край контроля (И5): вход, где прибор обязан шевельнуться."""
+        small = fp.blockswap_seconds(10.71, 5)
+        big = fp.blockswap_seconds(10.71, 38)
+        self.assertGreater(big["high_s"], small["high_s"])
+        self.assertGreater(small["high_s"], 0.0)
+
+    def test_a_measured_bandwidth_collapses_the_fork_to_one_number(self):
+        """Как у `throughput`: замер подаётся параметром и меняет исход.
+
+        Литералом: 114.12 ГиБ при 20 ГБ/с = 114.12*2**30/20e9 = 6.13 с.
+        """
+        got = fp.blockswap_seconds(10.71, 38, measured_gbps=20.0)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["low_s"], got["high_s"])
+        self.assertAlmostEqual(got["low_s"], 6.13, places=1)
+        self.assertIn("ЗАМЕРЕНО", got["note"])
+
+    def test_four_cards_share_one_bus_and_the_time_grows(self):
+        """Находка, которую прибор обязан печатать: NVLink нет, шина одна.
+
+        Четыре карты A16 — четыре независимых потребителя одного корневого
+        комплекса PCIe. Считать четырёхкратную выработку при неизменном
+        времени шины значило бы обещать масштабирование, которого нет.
+        """
+        one = fp.blockswap_seconds(10.71, 38)
+        four = fp.blockswap_seconds(10.71, 38, concurrent_cards=4)
+        # ОБА края вилки, а не один: деление, забытое на одном краю, оставило
+        # бы прибор наполовину врущим и мутацию — выжившей (так и было).
+        self.assertAlmostEqual(four["high_s"] / one["high_s"], 4.0, places=1)
+        self.assertAlmostEqual(four["low_s"] / one["low_s"], 4.0, places=1)
+        self.assertAlmostEqual(four["low_s"], 15.56, places=1)
+
+    def test_the_worst_case_efficiency_is_guarded_in_both_directions(self):
+        """Т1: константа-решение мутируется строже и слабее.
+
+        Ниже — прибор обязан назвать больше секунд, выше — меньше.
+        """
+        original = fp.BUS_EFFICIENCY_WORST
+        try:
+            fp.BUS_EFFICIENCY_WORST = 0.25
+            slower = fp.blockswap_seconds(10.71, 38)["high_s"]
+            fp.BUS_EFFICIENCY_WORST = 0.90
+            faster = fp.blockswap_seconds(10.71, 38)["high_s"]
+        finally:
+            fp.BUS_EFFICIENCY_WORST = original
+        self.assertAlmostEqual(slower, 31.12, places=1)
+        self.assertAlmostEqual(faster, 8.64, places=1)
+        self.assertGreater(slower, faster)
+
+    def test_the_best_case_efficiency_is_guarded_in_both_directions(self):
+        """Т1 для верхнего края: он тоже отгружаемое значение."""
+        original = fp.BUS_EFFICIENCY_BEST
+        try:
+            fp.BUS_EFFICIENCY_BEST = 0.50
+            slower = fp.blockswap_seconds(10.71, 38)["low_s"]
+            fp.BUS_EFFICIENCY_BEST = 2.00
+            faster = fp.blockswap_seconds(10.71, 38)["low_s"]
+        finally:
+            fp.BUS_EFFICIENCY_BEST = original
+        self.assertAlmostEqual(slower, 7.78, places=1)
+        self.assertAlmostEqual(faster, 1.95, places=1)
+
+    def test_gibibytes_and_gigabytes_are_not_silently_mixed(self):
+        """7% ошибки ниоткуда: веса в ГиБ, полоса в десятичных ГБ."""
+        self.assertEqual(fp.GIB_BYTES, 1073741824)
+        self.assertEqual(fp.GB_BYTES, 1000000000)
+
+    def test_a_bad_input_is_unmeasured_without_numbers_not_zero_seconds(self):
+        """Р1: «не смогли посчитать» и «посчитали, вышло мало» — разные ответы."""
+        for bad in (fp.blockswap_seconds(10.71, 41),
+                    fp.blockswap_seconds(10.71, 38, windows=0),
+                    fp.blockswap_seconds(10.71, 38, steps=0),
+                    fp.blockswap_seconds(10.71, 38, concurrent_cards=0),
+                    fp.blockswap_seconds(10.71, 38, seconds=99.0)):
+            self.assertEqual(bad["outcome"], UNMEASURED)
+            self.assertIsNone(bad["low_s"])
+
+    def test_the_graph_parameters_are_imported_not_copied(self):
+        """Е1: шаги и окно живут в `fork_comfy`, здесь их копий нет.
+
+        Признак настоящего дубля: изменил одно — обязано измениться второе.
+        """
+        from ball_reel import fork_comfy as fc
+
+        original = fc.WRAP_STEPS
+        try:
+            fc.WRAP_STEPS = 6
+            self.assertEqual(
+                fp.blockswap_seconds(10.71, 38)["parts"]["переносов"], 24,
+                "число шагов скопировано в предполёт — оно разъедется с графом")
+        finally:
+            fc.WRAP_STEPS = original
+
+
+class HowManyBlocksCanStayHome(unittest.TestCase):
+    """Каждый несвопнутый блок — сэкономленное время шины.
+
+    Граф ставит 38 из 40, и это значение владельца, а не подбор под нашу
+    карту. Между «влезает при 38» и «нужно 38» — разница в разы по шине.
+    """
+
+    def test_the_floor_is_the_minimum_swap_that_still_fits(self):
+        """Литералами (Т2): блок Q4_K_M весит 10.71*0.935092/40 = 0.2504 ГиБ.
+
+        Без свопа Q4_K_M на 15.99 ГиБ даёт остаток 0.02, а нужен 1.0. Уехать
+        с карты должно 0.98 ГиБ. Но блок в полёте возвращает один обратно:
+        при свопе N резидентных блоков остаётся 41-N, то есть свопнуть надо
+        N, чтобы уехало N-1 блоков. 4 свопа уносят 3 блока (0.75 — мало),
+        5 свопов уносят 4 (1.00 — хватает). Порог 5.
+        """
+        got = fp.swap_floor(15.99, length=77)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["floor"], 5)
+        self.assertEqual(got["step"], "Q4_K_M")
+
+    def test_the_floor_row_really_fits_and_the_one_below_really_does_not(self):
+        """Негативный контроль порога (И5): проверены обе стороны границы."""
+        below = next(r for r in fp.budget(15.99, length=77, blocks_to_swap=4)["rows"]
+                     if r["step"] == "Q4_K_M")
+        at = next(r for r in fp.budget(15.99, length=77, blocks_to_swap=5)["rows"]
+                  if r["step"] == "Q4_K_M")
+        self.assertFalse(below["fits"])
+        self.assertTrue(at["fits"])
+
+    def test_the_graph_swaps_thirty_three_blocks_more_than_memory_asks(self):
+        """Находка: 33 блока свопаются сверх нужного, и это чистое время шины."""
+        got = fp.swap_floor(15.99, length=77)
+        self.assertEqual(got["graph_blocks_to_swap"], 38)
+        self.assertEqual(got["can_stay_resident"], 33)
+
+    def test_the_floor_is_cheaper_on_the_bus_by_the_ratio_of_blocks(self):
+        """5 блоков против 38 — по шине едет в 7.6 раза меньше.
+
+        Литералом: 38/5 = 7.6, и время обязано идти ровно пропорционально
+        массе, потому что полоса от числа блоков не зависит.
+        """
+        got = fp.swap_floor(15.99, length=77)
+        self.assertAlmostEqual(
+            got["seconds_at_graph"][1] / got["seconds_at_floor"][1], 7.6,
+            places=1)
+        self.assertGreater(got["seconds_saved_worst_case"], 13.0)
+
+    def test_a_card_where_nothing_fits_is_fail_not_a_floor_of_forty(self):
+        """Р1: «не влезает даже при полном свопе» — это НЕ ГОДНО, а не порог 40.
+
+        Свернуть это в «свопай всё» значило бы выдать негодную конфигурацию
+        за рабочую: рычаг здесь не блоки, а ступень или длина окна.
+        """
+        got = fp.swap_floor(4.0, length=77)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIsNone(got["floor"])
+
+    def test_a_big_card_needs_no_swap_at_all(self):
+        """Второй край (И5): на просторной карте порог обязан быть нулевым."""
+        got = fp.swap_floor(40.0, length=77)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["floor"], 0)
+        self.assertEqual(got["seconds_at_floor"], (0.0, 0.0))
+
+    def test_an_unknown_step_is_unmeasured_not_a_floor(self):
+        got = fp.swap_floor(15.99, step="Q8_0")
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["floor"])
+
+    def test_the_headroom_bar_moves_the_floor_in_both_directions(self):
+        """Т1: порог годности — константа-решение, от неё зависит ответ."""
+        original = fp.MIN_HEADROOM_GB
+        try:
+            fp.MIN_HEADROOM_GB = 0.1
+            # 2, а не 1: своп одного блока не освобождает НИЧЕГО — его место
+            # тут же занимает блок в полёте. Ручка начинает работать со
+            # второго блока, и прибор это печатает, а не сглаживает.
+            self.assertEqual(fp.swap_floor(15.99, length=77)["floor"], 2)
+            fp.MIN_HEADROOM_GB = 4.0
+            self.assertEqual(fp.swap_floor(15.99, length=77)["floor"], 17)
+        finally:
+            fp.MIN_HEADROOM_GB = original
+
+
+class DoesSwapChangeActivations(unittest.TestCase):
+    """Догадку владельца полагается ПРОВЕРИТЬ, а не подтвердить.
+
+    `ACTIVATIONS_GB` снималось без свопа. Рассуждение «своп двигает веса, а
+    активации — тензоры счёта» правдоподобно, но у нас уже был случай, когда
+    неизмеренная гипотеза подавалась как решённое.
+    """
+
+    def test_without_a_measurement_the_answer_is_unmeasured_not_yes(self):
+        """Р1 и главное требование задачи: рассуждение в вердикт не идёт."""
+        got = fp.activations_under_swap()
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["delta_gb"])
+        self.assertIn("НЕ ЗАСЧИТЫВАЕТСЯ", got["note"])
+
+    def test_it_says_what_exactly_to_measure_and_how(self):
+        """«Не смогли» без процедуры замера — это отписка, а не третий исход."""
+        how = fp.activations_under_swap()["how"]
+        self.assertIn("blocks_to_swap", how)
+        self.assertIn("nvidia-smi", how)
+        self.assertIn("вычесть веса", how)
+
+    def test_a_measurement_that_agrees_confirms_the_owners_guess(self):
+        """Вход, где прибор обязан шевельнуться в «годно» (И5).
+
+        Литералом: базовые 2.03 ГиБ, порог 0.15 — 2.10 внутри полосы.
+        """
+        got = fp.activations_under_swap(2.10)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertAlmostEqual(got["delta_gb"], 0.07, places=2)
+
+    def test_a_measurement_that_disagrees_is_a_defect_in_the_budget(self):
+        """Вход, где прибор обязан сказать «не годно» (И5)."""
+        got = fp.activations_under_swap(3.50)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertAlmostEqual(got["delta_gb"], 1.47, places=2)
+        self.assertIn("ACTIVATIONS_GB", got["note"])
+
+    def test_activations_falling_under_swap_is_a_disagreement_too(self):
+        """Расхождение ВНИЗ — такое же расхождение (пережило мутацию `abs`).
+
+        Если при свопе активаций стало заметно МЕНЬШЕ, значит мерилось не то
+        же самое, и бюджет всё равно построен на числе не той конфигурации.
+        Прибор, сравнивающий без модуля, молча звал бы это согласием.
+        """
+        got = fp.activations_under_swap(1.50)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertAlmostEqual(got["delta_gb"], -0.53, places=2)
+
+    def test_the_tolerance_is_guarded_in_both_directions(self):
+        """Т1: строже и слабее, и оба края обязаны менять вердикт.
+
+        2.20 против 2.03 — разница 0.17: при пороге 0.15 это «не годно», при
+        пороге 0.30 — «годно».
+        """
+        original = fp.ACTIVATIONS_SWAP_TOLERANCE_GB
+        try:
+            fp.ACTIVATIONS_SWAP_TOLERANCE_GB = 0.05
+            self.assertEqual(fp.activations_under_swap(2.10)["outcome"], FAIL)
+            fp.ACTIVATIONS_SWAP_TOLERANCE_GB = 0.30
+            self.assertEqual(fp.activations_under_swap(2.20)["outcome"], PASS)
+        finally:
+            fp.ACTIVATIONS_SWAP_TOLERANCE_GB = original
+
+    def test_the_tolerance_is_smaller_than_one_swapped_block(self):
+        """Порог обязан различать шум замера и лишний блок на карте.
+
+        Блок Q4_K_M весит 0.250 ГиБ (литерал: 10.71*0.935092/40). Порог,
+        равный блоку или больше, не заметил бы ровно того, ради чего он есть.
+        """
+        self.assertLess(fp.ACTIVATIONS_SWAP_TOLERANCE_GB, 0.25)
+
+    def test_an_unknown_length_is_unmeasured_not_agreement(self):
+        got = fp.activations_under_swap(2.03, length=61)
+        self.assertEqual(got["outcome"], UNMEASURED)
+
+
+class BlockswapDoesNotExplainTheTrainingGap(unittest.TestCase):
+    """Отрицательный результат с числом и условиями (И6).
+
+    Провалившийся негативный контроль модели обучения: 54.3 ГБ там, где
+    вендор пишет «1×80G не тянет». Блоксвоп проверен как кандидат в
+    объяснение и отвергнут — знак расхождения обратный.
+    """
+
+    def test_the_gap_grows_instead_of_closing(self):
+        """Числами (Т2, литералы): 80 - 54.3 = 25.7 было, стало 80 - 30.08."""
+        got = fp.blockswap_explains_training_gap()
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertFalse(got["explains"])
+        self.assertAlmostEqual(got["ours_resident_gb"], 54.3, places=1)
+        self.assertAlmostEqual(got["ours_swapped_gb"], 30.08, places=1)
+        self.assertAlmostEqual(got["gap_before_gb"], 25.7, places=1)
+        self.assertAlmostEqual(got["gap_after_gb"], 49.92, places=1)
+
+    def test_the_negative_result_is_written_with_the_number_zero(self):
+        """И6: «не объясняет» без числа — мнение, а не результат."""
+        self.assertIn("объяснено 0 ГБ",
+                      fp.blockswap_explains_training_gap()["note"])
+
+    def test_the_instrument_can_also_say_yes(self):
+        """Негативный контроль прибора (И5): вход, где он обязан шевельнуться.
+
+        При пороге 30 ГБ вместо 80 своп разрыв действительно закрывает — с
+        24.3 ГБ до 0.08. Прибор, умеющий только «нет», не отличим от заглушки.
+        """
+        got = fp.blockswap_explains_training_gap(vendor_gb=30.0)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertTrue(got["explains"])
+
+    def test_a_bad_vendor_threshold_is_unmeasured_not_no(self):
+        got = fp.blockswap_explains_training_gap(vendor_gb=0)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["explains"])
+
+    def test_the_rejection_is_written_into_the_recorded_disagreement(self):
+        """Знание, не попавшее в запись, следующая смена добудет заново."""
+        rec = fp.TRAIN_MODEL_DISAGREES_WITH_VENDOR
+        self.assertIn("блоксвоп проверен и отвергнут", rec)
+        self.assertIn("0 ГБ", rec["блоксвоп проверен и отвергнут"])
+
+    def test_the_swap_amount_moves_the_answer_in_both_directions(self):
+        """Т1 на входе-константе: нулевой своп обязан ничего не менять."""
+        none_swapped = fp.blockswap_explains_training_gap(blocks_to_swap=0)
+        self.assertAlmostEqual(none_swapped["gap_after_gb"],
+                               none_swapped["gap_before_gb"], places=1)
+        full = fp.blockswap_explains_training_gap(blocks_to_swap=40)
+        self.assertGreater(full["gap_after_gb"], 49.92)
+
+
+class ThePreflightJudgesTheRunWeActuallyLaunch(unittest.TestCase):
+    """Отчёт, считающий всю модель резидентной, судит не тот прогон."""
+
+    def test_the_report_counts_the_swap_the_graph_sets(self):
+        got = fp.report()
+        self.assertEqual(got["blocks_to_swap"], 38)
+        self.assertEqual(
+            got["checks"]["время шины"]["parts"]["свопнуто блоков"], 38)
+
+    def test_the_report_carries_the_bus_time_and_calls_it_an_estimate(self):
+        check = fp.report()["checks"]["время шины"]
+        self.assertEqual(check["outcome"], UNMEASURED)
+        self.assertIn("НЕ ЗАМЕРЕНО", check["note"])
+
+    def test_the_swap_can_be_switched_off_and_the_report_says_so(self):
+        """Обе стороны развилки достижимы, иначе сторожится одна."""
+        got = fp.report(blocks_to_swap=None if False else 0)
+        self.assertEqual(got["checks"]["время шины"]["outcome"], PASS)
+        self.assertEqual(got["checks"]["время шины"]["low_s"], 0.0)
 
 
 if __name__ == "__main__":

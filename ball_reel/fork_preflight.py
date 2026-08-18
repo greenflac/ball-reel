@@ -75,6 +75,14 @@ brief про плотность VDI, и TFLOPS там не напечатан в
 * **бюджеты памяти — АРИФМЕТИКА, а не замер.** Числа ступеней взяты из
   ХЭНДОФ §3.1 и здесь только складываются. Сколько именно откусывает ECC,
   не замерено — `nvidia-smi` покажет на месте;
+* **время блоксвопа НЕ ЗАМЕРЕНО ВООБЩЕ.** `blockswap_seconds` отдаёт ВИЛКУ
+  из паспорта PCIe (РАСЧЁТ по спецификации шины), а не число. Редакция шины
+  у A16 (3.0 или 4.0) не подтверждена — это `nvidia.com`, домен закрыт (Ц3);
+  H2D-копирование не замерялось ни разу; сколько переноса прячется за счётом
+  — не знает никто до первого прогона;
+* **меняет ли блоксвоп активации — НЕ ПРОВЕРЕНО.** `ACTIVATIONS_GB` сняты без
+  свопа. `activations_under_swap()` — прибор для проверки, а не проверка: без
+  замера он отвечает «не смогли» и печатает процедуру;
 * **`compute_cap` A16 = 8.6 не подтверждён командой** — он выведен из строки
   даташита «Powered by NVIDIA Ampere architecture». Проверяется первой же
   командой на машине, и до тех пор это вывод, а не факт.
@@ -371,6 +379,257 @@ def budget(memory_gb: float, *, length: int = 77,
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ВТОРАЯ ПОЛОВИНА РАЗМЕНА: ВРЕМЯ, КОТОРОЕ БЛОКСВОП СТОИТ
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ЗАЧЕМ. Расчёт выше сказал «Q4_K_M влезает» и на этом замолчал. Но блоксвоп
+# не делает память бесплатной — он меняет её на время: 9.51 ГиБ едут по шине
+# на КАЖДОМ шаге сэмплера и на КАЖДОМ окне, а у A16 нет NVLink, только PCIe.
+# Пока эта половина не посчитана, «влезает» читается как «и ничего не стоит».
+#
+# ЧТО ЗДЕСЬ ГЛАВНОЕ: ВЕРДИКТ — «НЕ СМОГЛИ ИЗМЕРИТЬ», А НЕ ЧИСЛО (Р1).
+# Полоса шины здесь ни разу не замерена: карты нет. Поэтому функция отдаёт
+# ВИЛКУ (низ и верх), а не одно число, которое выглядело бы замером. Одно
+# число появляется ровно в одном случае — когда полосу подали замером
+# параметром `measured_gbps`, как это устроено у `throughput`.
+#
+# ПОЧЕМУ ВИЛКА ШИРОКАЯ, И ЭТО ЧЕСТНО. У неё два источника незнания, и оба
+# названы: редакция шины у A16 (3.0 или 4.0) и доля паспортной полосы,
+# достающаяся копированию.
+
+#: Паспортный потолок шины PCIe x16, ГБ/с (десятичных, 1e9 байт).
+#: РАСЧЁТ ПО СПЕЦИФИКАЦИИ PCI Express, а не по даташиту карты и не по замеру:
+#: скорость линии 8 GT/s у 3.0 и 16 GT/s у 4.0, кодирование 128b/130b,
+#: 16 линий.
+#:   3.0:  8e9 * 16 * 128/130 / 8 = 15.75 ГБ/с
+#:   4.0: 16e9 * 16 * 128/130 / 8 = 31.51 ГБ/с
+#: Арифметика сторожится тестом, который пересчитывает её литералами (Т2).
+PCIE_X16_GBPS = {"3.0": 15.75, "4.0": 31.51}
+
+#: КАКОЙ РЕДАКЦИИ ШИНА У A16 — НЕ ПРОВЕРЕНО, И ПРОВЕРИТЬ НЕЧЕМ.
+#: Это написано на странице спецификаций `nvidia.com`, а домен закрыт прокси и
+#: не обходится (Ц3). НУЖЕН ДОМЕН: `nvidia.com`, страница спецификаций
+#: NVIDIA A16, единственный нужный оттуда факт — редакция и число линий PCIe.
+#: Следствие в коде: редакция НЕ ВЫБИРАЕТСЯ. Обе идут в оценку, 3.0 даёт
+#: верхнюю границу времени, 4.0 — нижнюю. Выбрать одну значило бы выдать
+#: догадку за паспорт.
+PCIE_GEN_UNVERIFIED = ("3.0", "4.0")
+
+#: Какая доля паспортного потолка реально достаётся копированию host->device.
+#: ВЕРХ 1.00 — РАСЧЁТ: паспорт по определению потолок, быстрее шина не ходит.
+#: НИЗ 0.50 — ВЫБРАНО (кем: эта смена; из чего: это ШИРИНА НЕЗНАНИЯ, а не
+#: факт о железе — замера H2D у проекта нет вообще, ни одного).
+#: СТОП-УСЛОВИЕ (Ц9): первый прогон на карте печатает реальные секунды на шаг;
+#: если они выйдут за эту вилку или вилка окажется шире вдвое, чем нужно, —
+#: обе константы уходят, а на их место встаёт `measured_gbps` как ИЗМЕРЕНО.
+BUS_EFFICIENCY_BEST = 1.00
+BUS_EFFICIENCY_WORST = 0.50
+
+#: Байт в ГиБ и в ГБ. Разведены намеренно: веса считаются в ГиБ (2**30), а
+#: полоса шины — в десятичных ГБ (1e9), и молчаливое смешение дало бы 7%
+#: ошибки ниоткуда.
+GIB_BYTES = 1 << 30
+GB_BYTES = 10 ** 9
+
+
+def _graph_defaults() -> dict:
+    """Параметры графа берутся из `fork_comfy`, а не переписываются сюда (Е1).
+
+    Импорт внутри функции, а не наверху модуля: предполёт зовётся первым и
+    обязан подниматься дёшево (П2), а `fork_comfy` тянет numpy. Второе: при
+    связывании умолчаний на импорте подмена константы в тесте до них бы не
+    дошла — эту форму на проекте уже выгребали (`fork_comfy.frames_for_seconds`).
+    """
+    from . import fork_comfy as fc
+    return {"steps": fc.WRAP_STEPS, "window": fc.WRAP_WINDOW,
+            "fps": fc.WRAP_FPS, "blocks_to_swap": fc.BLOCKS_TO_SWAP,
+            "seconds_min": fc.SECONDS_MIN, "seconds_max": fc.SECONDS_MAX,
+            "frames_for_seconds": fc.frames_for_seconds,
+            "window_plan": fc.window_plan}
+
+
+def blockswap_seconds(step_gb: float, blocks_to_swap: int, *,
+                      seconds: float | None = None,
+                      windows: int | None = None,
+                      steps: int | None = None,
+                      concurrent_cards: int = 1,
+                      measured_gbps: float | None = None) -> dict:
+    """Сколько времени блоксвоп стоит на ролик. Из ЧАСТЕЙ, а не одним числом.
+
+    Части названы все четыре и каждая приходит из своего места:
+    объём за один перенос — из `blockswap_weights` (ГиБ, которые уехали в
+    оперативную память); число шагов и длина окна — из `fork_comfy` (Е1);
+    полоса — из спецификации PCIe (РАСЧЁТ) либо замером параметром.
+
+    ТРИ ИСХОДА (Р1):
+    * `годно` — либо полоса подана замером, либо возить нечего (`blocks_to_swap
+      = 0`): тогда ноль секунд, и это знание, а не оценка;
+    * `не смогли` с вилкой `low_s`/`high_s` — обычный случай: полоса не
+      замерена, редакция шины не подтверждена;
+    * `не смогли` с `low_s = None` — вход негодный, считать нечего.
+    """
+    g = _graph_defaults()
+    swapped = blockswap_weights(step_gb, blocks_to_swap)
+    if swapped["outcome"] != PASS:
+        return {"outcome": UNMEASURED, "low_s": None, "high_s": None,
+                "note": swapped["note"]}
+    if not isinstance(concurrent_cards, int) or isinstance(concurrent_cards, bool) \
+            or concurrent_cards < 1:
+        return {"outcome": UNMEASURED, "low_s": None, "high_s": None,
+                "note": (f"concurrent_cards={concurrent_cards!r} — карт в "
+                         f"работе от 1; ноль карт не считается")}
+    steps = g["steps"] if steps is None else steps
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+        return {"outcome": UNMEASURED, "low_s": None, "high_s": None,
+                "note": f"шагов сэмплера {steps!r} — их от 1"}
+
+    if windows is None:
+        # Длинный конец полосы длин: решение принимается по худшему случаю, а
+        # не по среднему. ВЫБРАНО (кем: эта смена; из чего: SECONDS_MAX —
+        # решение владельца о формате выдачи, и именно 10 с задают потолок).
+        seconds = g["seconds_max"] if seconds is None else seconds
+        if not g["seconds_min"] <= seconds <= g["seconds_max"]:
+            return {"outcome": UNMEASURED, "low_s": None, "high_s": None,
+                    "note": (f"длина {seconds} с вне полосы "
+                             f"{g['seconds_min']}-{g['seconds_max']} с "
+                             f"(решение владельца); окон не посчитать")}
+        frames = g["frames_for_seconds"](seconds)["frames"]
+        windows = g["window_plan"](frames)["windows"]
+    else:
+        frames = None
+    if not isinstance(windows, int) or isinstance(windows, bool) or windows < 1:
+        return {"outcome": UNMEASURED, "low_s": None, "high_s": None,
+                "note": f"окон {windows!r} — их от 1"}
+
+    transfers = windows * steps
+    per_transfer_bytes = swapped["ram_gb"] * GIB_BYTES
+    total_bytes = per_transfer_bytes * transfers
+    parts = {"свопнуто блоков": blocks_to_swap,
+             "ГиБ за перенос": swapped["ram_gb"], "окон": windows,
+             "шагов сэмплера": steps, "переносов": transfers,
+             "ГиБ за ролик": round(swapped["ram_gb"] * transfers, 2),
+             "карт в работе": concurrent_cards}
+
+    if per_transfer_bytes == 0:
+        return {"outcome": PASS, "low_s": 0.0, "high_s": 0.0,
+                "per_transfer_low_s": 0.0, "per_transfer_high_s": 0.0,
+                "parts": parts, "measured_gbps": measured_gbps,
+                "note": (f"свопнуто {blocks_to_swap} блоков — по шине не едет "
+                         f"ничего, времени блоксвоп не стоит вовсе. Это "
+                         f"ЗНАНИЕ, а не оценка: ноль байт делится на любую "
+                         f"полосу одинаково")}
+
+    if measured_gbps is not None and measured_gbps > 0:
+        bps = measured_gbps * GB_BYTES / concurrent_cards
+        total = total_bytes / bps
+        return {"outcome": PASS, "low_s": round(total, 2),
+                "high_s": round(total, 2),
+                "per_transfer_low_s": round(per_transfer_bytes / bps, 3),
+                "per_transfer_high_s": round(per_transfer_bytes / bps, 3),
+                "parts": parts, "measured_gbps": measured_gbps,
+                "note": (f"ЗАМЕРЕНО {measured_gbps} ГБ/с на {concurrent_cards} "
+                         f"карт(е): {parts['ГиБ за ролик']} ГиБ за ролик "
+                         f"({windows} окон × {steps} шагов × "
+                         f"{swapped['ram_gb']} ГиБ) = {total:.1f} с шины")}
+
+    fast = max(PCIE_X16_GBPS[g_] for g_ in PCIE_GEN_UNVERIFIED)
+    slow = min(PCIE_X16_GBPS[g_] for g_ in PCIE_GEN_UNVERIFIED)
+    low_bps = fast * GB_BYTES * BUS_EFFICIENCY_BEST / concurrent_cards
+    high_bps = slow * GB_BYTES * BUS_EFFICIENCY_WORST / concurrent_cards
+    low = total_bytes / low_bps
+    high = total_bytes / high_bps
+    return {
+        "outcome": UNMEASURED,
+        "low_s": round(low, 2), "high_s": round(high, 2),
+        "per_transfer_low_s": round(per_transfer_bytes / low_bps, 3),
+        "per_transfer_high_s": round(per_transfer_bytes / high_bps, 3),
+        "parts": parts, "measured_gbps": None,
+        "note": (
+            f"НЕ ЗАМЕРЕНО, вот вилка: {parts['ГиБ за ролик']} ГиБ за ролик "
+            f"({windows} окон × {steps} шагов × {swapped['ram_gb']} ГиБ на "
+            f"перенос) — от {low:.1f} до {high:.1f} с чистого времени шины на "
+            f"{concurrent_cards} карт(е). Низ = PCIe {max(PCIE_GEN_UNVERIFIED, key=lambda k: PCIE_X16_GBPS[k])} "
+            f"на полном паспорте, верх = PCIe {min(PCIE_GEN_UNVERIFIED, key=lambda k: PCIE_X16_GBPS[k])} "
+            f"на {BUS_EFFICIENCY_WORST:.0%} паспорта. Редакция шины у A16 НЕ "
+            f"ПОДТВЕРЖДЕНА (нужен nvidia.com, домен закрыт), полоса НЕ "
+            f"ЗАМЕРЕНА ни разу. СКОЛЬКО ИЗ ЭТОГО ПРЯЧЕТСЯ ЗА СЧЁТОМ — здесь "
+            f"НЕ ЗНАЕТ НИКТО: перенос может идти параллельно вычислению, и "
+            f"тогда наблюдаемая добавка меньше вилки, вплоть до нуля"),
+    }
+
+
+def swap_floor(memory_gb: float, *, length: int = 77, step: str | None = None,
+               seconds: float | None = None, steps: int | None = None,
+               concurrent_cards: int = 1) -> dict:
+    """Сколько блоков МОЖНО НЕ СВОПАТЬ: каждый несвопнутый — сэкономленное время.
+
+    Граф ставит 38 из 40, и это значение взято у владельца, а не подобрано под
+    нашу карту. Между «влезает при 38» и «нужно 38» разница в разы времени
+    шины: свопать надо ровно столько, сколько требует память, и ни блоком
+    больше. Функция ищет МИНИМАЛЬНЫЙ своп, при котором ступень ещё влезает с
+    запасом `MIN_HEADROOM_GB`, и печатает, во сколько раз это дешевле по шине.
+
+    ТРИ ИСХОДА (Р1): `годно` — порог найден; `не годно` — не влезает даже при
+    полном свопе (рычаг не в блоках); `не смогли` — вход не считается.
+    """
+    g = _graph_defaults()
+    step = max(STEPS_GB, key=lambda k: STEPS_GB[k]) if step is None else step
+    if step not in STEPS_GB:
+        return {"outcome": UNMEASURED, "floor": None,
+                "note": (f"ступень {step!r} не посчитана; известны "
+                         f"{sorted(STEPS_GB)}")}
+    probe = budget(memory_gb, length=length, blocks_to_swap=BLOCKS_TOTAL)
+    if probe["outcome"] == UNMEASURED:
+        return {"outcome": UNMEASURED, "floor": None, "note": probe["note"]}
+
+    floor = None
+    for candidate in range(0, BLOCKS_TOTAL + 1):
+        rows = budget(memory_gb, length=length,
+                      blocks_to_swap=candidate).get("rows") or []
+        row = next((r for r in rows if r["step"] == step), None)
+        if row is not None and row["fits"]:
+            floor = candidate
+            break
+    if floor is None:
+        return {"outcome": FAIL, "floor": None, "step": step,
+                "memory_gb": memory_gb, "length": length,
+                "note": (f"{step} на {memory_gb} ГиБ при {length} кадрах не "
+                         f"влезает с запасом {MIN_HEADROOM_GB} даже при полном "
+                         f"свопе всех {BLOCKS_TOTAL} блоков — рычаг здесь не "
+                         f"блоксвоп, а ступень квантования или длина окна")}
+
+    graph = g["blocks_to_swap"]
+    at_floor = blockswap_seconds(STEPS_GB[step], floor, seconds=seconds,
+                                 steps=steps, concurrent_cards=concurrent_cards)
+    at_graph = blockswap_seconds(STEPS_GB[step], graph, seconds=seconds,
+                                 steps=steps, concurrent_cards=concurrent_cards)
+    row = next(r for r in budget(memory_gb, length=length,
+                                 blocks_to_swap=floor)["rows"]
+               if r["step"] == step)
+    saved = None
+    if at_floor["high_s"] is not None and at_graph["high_s"]:
+        saved = round(at_graph["high_s"] - at_floor["high_s"], 2)
+    return {
+        "outcome": PASS, "floor": floor, "graph_blocks_to_swap": graph,
+        "can_stay_resident": max(0, graph - floor), "step": step,
+        "memory_gb": memory_gb, "length": length,
+        "headroom_at_floor_gb": row["headroom_gb"],
+        "seconds_at_floor": (at_floor["low_s"], at_floor["high_s"]),
+        "seconds_at_graph": (at_graph["low_s"], at_graph["high_s"]),
+        "seconds_saved_worst_case": saved,
+        "note": (
+            f"{step} на {memory_gb} ГиБ при {length} кадрах влезает уже при "
+            f"свопе {floor} из {BLOCKS_TOTAL} (запас {row['headroom_gb']} при "
+            f"требуемом {MIN_HEADROOM_GB}). Граф ставит {graph}, то есть "
+            f"{max(0, graph - floor)} блок(ов) свопаются ЗРЯ: память они "
+            f"экономят сверх нужного, а время шины тратят. Вилка времени "
+            f"шины на ролик: при {floor} — {at_floor['low_s']}..{at_floor['high_s']} с, "
+            f"при {graph} — {at_graph['low_s']}..{at_graph['high_s']} с. "
+            f"ОБЕ ВИЛКИ — ОЦЕНКИ, не замер"),
+    }
+
+
 def throughput(flops_per_forward: float = 1.54e15, steps: int = 6,
                *, measured_tflops: float | None = None) -> dict:
     """Сколько минут на ролик. ТОЛЬКО по замеренной полосе, не по паспорту.
@@ -643,7 +902,8 @@ def comfy_alive(url: str = COMFY_URL, *, timeout_s: float = COMFY_TIMEOUT_S,
 
 def report(*, length: int = 77, measured_tflops: float | None = None,
            path: str = ".", lock_path: str | Path | None = None,
-           comfy_url: str = COMFY_URL) -> dict:
+           comfy_url: str = COMFY_URL,
+           blocks_to_swap: int | None = None) -> dict:
     """Весь предполёт. Числами (Р2): проверено N, провалено M, не смогли K.
 
     Порядок — дешёвое раньше дорогого (П2): диск опрашивается за миллисекунды,
@@ -654,7 +914,19 @@ def report(*, length: int = 77, measured_tflops: float | None = None,
     checks["карты"] = cards
 
     first = (cards.get("gpus") or [{}])[0]
-    checks["память"] = budget(first.get("memory_gb"), length=length)
+    # Своп берётся из графа (Е1), а не подразумевается нулевым: отчёт обязан
+    # мерить ТОТ прогон, который мы запускаем. Умолчание разрешается в теле —
+    # значение в сигнатуре связалось бы на импорте и подмена до него бы не
+    # дошла (эту форму на проекте уже выгребали).
+    blocks_to_swap = (_graph_defaults()["blocks_to_swap"]
+                      if blocks_to_swap is None else blocks_to_swap)
+    checks["память"] = budget(first.get("memory_gb"), length=length,
+                              blocks_to_swap=blocks_to_swap)
+    # Вторая половина размена. Идёт следом за памятью и всегда «не смогли»:
+    # полоса шины не замерена ни разу, и вилку нельзя читать как замер.
+    chosen = checks["память"].get("chosen")
+    step_gb = STEPS_GB[chosen] if chosen else max(STEPS_GB.values())
+    checks["время шины"] = blockswap_seconds(step_gb, blocks_to_swap)
     # Хэширование гигабайтов дороже опроса карты, но дешевле замера полосы, и
     # идёт между ними (П2). Без лок-файла оно вообще не начинается.
     checks["веса"] = weights(path, lock_path=lock_path)
@@ -668,9 +940,12 @@ def report(*, length: int = 77, measured_tflops: float | None = None,
         "checks": checks,
         "passed": passed, "failed": failed, "unmeasured": unmeasured,
         "outcome": FAIL if failed else (UNMEASURED if unmeasured else PASS),
+        "blocks_to_swap": blocks_to_swap,
         "note": (f"проверок {len(checks)}: пройдено {passed}, провалено "
                  f"{failed}, не смогли {unmeasured}. ЛИЦЕНЗИИ НЕ ПРОВЕРЯЮТСЯ — "
-                 f"это вопрос отгрузки, не разработки."),
+                 f"это вопрос отгрузки, не разработки. Память посчитана при "
+                 f"блоксвопе {blocks_to_swap}; время шины — ВИЛКА ОЦЕНКИ, не "
+                 f"замер."),
     }
 
 # ---------------------------------------------------------------------------
@@ -737,6 +1012,15 @@ TRAIN_MODEL_DISAGREES_WITH_VENDOR = {
     "вывод": ("модель занижает расход на видео минимум в полтора раза; на "
               "режим «кадры», ради которого она и написана, это влияет "
               "неизвестно как"),
+    # ОТРИЦАТЕЛЬНЫЙ РЕЗУЛЬТАТ, ЗАПИСАН 18.08 (И6). Блоксвоп проверен как
+    # кандидат в объяснение и ОТВЕРГНУТ: он уменьшает резидентные веса, а наш
+    # расчёт и без него НИЖЕ вендорского порога — учёт свопа разрыв не
+    # закрывает, а увеличивает. Числа не дублируются сюда (Е1), их считает
+    # `blockswap_explains_training_gap()`, у неё же встроен негативный
+    # контроль: при пороге ниже нашего расчёта прибор обязан сказать «да».
+    "блоксвоп проверен и отвергнут": (
+        "объяснено 0 ГБ; см. blockswap_explains_training_gap() — знак "
+        "расхождения обратный, разрыв РАСТЁТ"),
 }
 
 
@@ -798,4 +1082,190 @@ def training_budget(memory_gb: float | None = None, *,
                  f"({mode}) {parts['активации']} + контекст "
                  f"{parts['контекст CUDA']} = {total} ГБ при {memory_gb} ГБ "
                  f"памяти, запас {headroom}. {verdict}. ВСЁ РАСЧЁТ, НЕ ЗАМЕР"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЗАДАЧА, КОТОРУЮ НЕЛЬЗЯ ЗАКРЫТЬ РАССУЖДЕНИЕМ: МЕНЯЕТ ЛИ СВОП АКТИВАЦИИ
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `ACTIVATIONS_GB` снималось БЕЗ блоксвопа (77 кадров -> 2.03 ГиБ, 49 -> 1.32).
+# Владелец полагает, что своп их не меняет, и рассуждение за это есть: своп
+# двигает ВЕСА, а активации — промежуточные тензоры счёта, их геометрия от
+# места хранения весов не зависит.
+#
+# РАССУЖДЕНИЕ — НЕ ЗАМЕР, И ЗДЕСЬ ОНО НЕ ЗАСЧИТЫВАЕТСЯ. Известны как минимум
+# три механизма, по которым оно может не сработать, и ни один не проверен:
+#   1. закреплённые (pinned) буферы на стороне хоста и очередь копирования
+#      живут в том же аллокаторе, и `max_memory_allocated` их видит;
+#   2. предзагрузка следующего блока делает пик «активации + два блока»
+#      одновременным, а не последовательным — у нас это учтено отдельно
+#      (`IN_FLIGHT_BLOCKS`), но ТОЛЬКО как веса;
+#   3. обёртка при свопе может менять путь внимания (offload вынуждает
+#      материализовать то, что иначе жило бы в регистрах).
+#
+# Поэтому здесь ПРИБОР, а не вывод: без замера он отвечает «не смогли» и
+# печатает, ЧТО и КАК мерить; с замером — сходится или нет, числом.
+
+#: Насколько замер при свопе может разойтись с замером без свопа, чтобы это
+#: ещё считалось «своп активации не меняет», ГиБ.
+#: ВЫБРАНО 0.15 (кем: эта смена; из чего: 0.15 ГиБ — заметно меньше одного
+#: блока Q4_K_M (0.250 ГиБ), то есть порог различает «шум замера» и «на карте
+#: лежит лишний блок». Не измерено: разброса повторных замеров у нас нет).
+#: СТОП-УСЛОВИЕ (Ц9): первый прогон на карте печатает оба пика; если разброс
+#: двух прогонов ОДНОЙ конфигурации окажется больше 0.15 ГиБ, порог негоден и
+#: переписывается по наблюдённому разбросу, а не подгоняется под ответ.
+ACTIVATIONS_SWAP_TOLERANCE_GB = 0.15
+
+#: ЧЕМ ЭТО МЕРЯЕТСЯ. Текст здесь затем, чтобы следующая смена не изобретала
+#: процедуру заново и не мерила не то. Ключевое — вычесть веса: `nvidia-smi`
+#: показывает ВСЁ занятое, а веса при свопе и без свопа разные по построению,
+#: и без вычитания разница весов была бы прочитана как разница активаций.
+ACTIVATIONS_SWAP_MEASUREMENT = (
+    "два прогона ОДНОГО ролика (77 кадров, Q4_K_M, одно зерно), меняется "
+    "ровно один вход графа — `blocks_to_swap`: 0 и 38.\n"
+    "  1) фон:  nvidia-smi --query-gpu=memory.used --format=csv,noheader,"
+    "nounits -lms 200 > peak_swap0.csv   (и peak_swap38.csv на втором прогоне)\n"
+    "  2) пик:  python3 -c \"import sys;print(max(int(l) for l in "
+    "open(sys.argv[1]) if l.strip()))\" peak_swap0.csv\n"
+    "  3) вычесть веса: fork_preflight.blockswap_weights(10.71, 0)['vram_gb'] "
+    "и то же для 38 — остаток и есть активации плюс резерв Comfy;\n"
+    "  4) подать оба остатка сюда: activations_under_swap(остаток_при_свопе, "
+    "baseline_gb=остаток_без_свопа).\n"
+    "ПРИ ЧЁМ ЗДЕСЬ БЛОКСВОП=0: это негативный контроль самого замера — если "
+    "два прогона при 0 разойдутся больше порога, мерить нечем, и никакая "
+    "разница при 38 ничего не докажет."
+)
+
+
+def activations_under_swap(measured_gb: float | None = None, *,
+                           length: int = 77,
+                           baseline_gb: float | None = None,
+                           tolerance_gb: float | None = None) -> dict:
+    """Меняет ли блоксвоп расход на активации. ТРИ ИСХОДА, и по умолчанию третий.
+
+    * `не смогли` — замера нет (обычный случай: карты нет). Печатает, что и
+      как мерить, а НЕ догадку владельца, поданную как ответ;
+    * `годно` — замер при свопе сошёлся с замером без свопа: гипотеза
+      «своп активации не трогает» ЭТИМ ЗАМЕРОМ подтверждена;
+    * `не годно` — разошёлся: `ACTIVATIONS_GB` мерились не той конфигурации, и
+      бюджет памяти врёт на разницу.
+    """
+    tolerance_gb = (ACTIVATIONS_SWAP_TOLERANCE_GB if tolerance_gb is None
+                    else tolerance_gb)
+    base = ACTIVATIONS_GB.get(length) if baseline_gb is None else baseline_gb
+    if base is None:
+        return {"outcome": UNMEASURED, "delta_gb": None, "baseline_gb": None,
+                "note": (f"активации для длины {length} не сняты и без свопа; "
+                         f"известны {sorted(ACTIVATIONS_GB)} — сравнивать не с "
+                         f"чем")}
+    if measured_gb is None:
+        return {
+            "outcome": UNMEASURED, "delta_gb": None, "baseline_gb": base,
+            "measured_gb": None, "tolerance_gb": tolerance_gb,
+            "how": ACTIVATIONS_SWAP_MEASUREMENT,
+            "note": (
+                f"НЕ ПРОВЕРЕНО и проверить нечем: карты нет. Известно ровно "
+                f"одно — {base} ГиБ на {length} кадрах сняты БЕЗ свопа. "
+                f"Рассуждение «своп двигает веса, а не активации» правдоподобно "
+                f"и в вердикт НЕ ЗАСЧИТЫВАЕТСЯ: три механизма, по которым оно "
+                f"может не сработать, перечислены выше и ни один не закрыт. "
+                f"Что мерить — в поле `how`, порог схождения "
+                f"{tolerance_gb} ГиБ"),
+        }
+    if not isinstance(measured_gb, (int, float)) or isinstance(measured_gb, bool) \
+            or measured_gb < 0:
+        return {"outcome": UNMEASURED, "delta_gb": None, "baseline_gb": base,
+                "note": f"замер {measured_gb!r} — не похоже на гигабайты"}
+    delta = round(measured_gb - base, 3)
+    agrees = abs(delta) <= tolerance_gb
+    return {
+        "outcome": PASS if agrees else FAIL,
+        "delta_gb": delta, "baseline_gb": base, "measured_gb": measured_gb,
+        "tolerance_gb": tolerance_gb, "length": length,
+        "note": (
+            f"замер при свопе {measured_gb} против {base} без свопа: разница "
+            f"{delta:+} ГиБ при пороге {tolerance_gb}. "
+            + ("СОШЛОСЬ — на этом замере блоксвоп активации не меняет, "
+               "и догадка владельца подтверждена ЗАМЕРОМ, а не рассуждением."
+               if agrees else
+               f"РАЗОШЛОСЬ — `ACTIVATIONS_GB` сняты не той конфигурации, "
+               f"которую мы запускаем, и бюджет памяти врёт на {delta:+} ГиБ. "
+               f"Чинить надо ACTIVATIONS_GB, а не порог.")),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРОВАЛИВШИЙСЯ НЕГАТИВНЫЙ КОНТРОЛЬ ОБУЧЕНИЯ: ОБЪЯСНЯЕТ ЛИ ЕГО БЛОКСВОП
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `TRAIN_MODEL_DISAGREES_WITH_VENDOR` записал: наш расчёт даёт 54.3 ГБ там, где
+# вендор пишет «1×80G не тянет». Появившийся блоксвоп — первый кандидат в
+# объяснение, и его надо было проверить, а не отложить.
+#
+# ОТВЕТ: НЕ ОБЪЯСНЯЕТ, И ЗНАК РАСХОЖДЕНИЯ ЭТО ЗАКРЫВАЕТ НАСМЕРТЬ. Блоксвоп
+# только УМЕНЬШАЕТ резидентные веса, а наше число и без него МЕНЬШЕ вендорского
+# порога. Учесть своп — значит уехать от вендора ещё дальше, а не приблизиться.
+# Записано отрицательным результатом с числами (И6), а не мнением: функция
+# ниже считает обе стороны и печатает, на сколько разрыв РАСТЁТ.
+
+
+def blockswap_explains_training_gap(*, vendor_gb: float = 80.0,
+                                    base: str = "bf16",
+                                    mode: str = "видео 81 кадр",
+                                    rank: int = 32,
+                                    blocks_to_swap: int | None = None) -> dict:
+    """Объясняет ли блоксвоп разрыв нашей модели обучения с вендором.
+
+    ТРИ ИСХОДА (Р1): `годно` — своп сближает наш расчёт с вендорским
+    утверждением (разрыв по модулю уменьшается); `не годно` — не сближает или
+    уводит дальше; `не смогли` — вход не считается.
+
+    НЕГАТИВНЫЙ КОНТРОЛЬ ВСТРОЕН В СИГНАТУРУ (И5): `vendor_gb` — параметр. При
+    вендорском 80 прибор обязан сказать «нет», при пороге НИЖЕ нашего расчёта
+    (например 30) — «да», потому что там своп разрыв действительно закрывает.
+    Прибор, умеющий только «нет», не отличается от заглушки.
+    """
+    ours = training_budget(base=base, mode=mode, rank=rank)
+    if ours["outcome"] == UNMEASURED and ours["total_gb"] is None:
+        return {"outcome": UNMEASURED, "explains": None, "note": ours["note"]}
+    if not isinstance(vendor_gb, (int, float)) or isinstance(vendor_gb, bool) \
+            or vendor_gb <= 0:
+        return {"outcome": UNMEASURED, "explains": None,
+                "note": f"порог вендора {vendor_gb!r} — не гигабайты"}
+    b = (_graph_defaults()["blocks_to_swap"] if blocks_to_swap is None
+         else blocks_to_swap)
+    swapped = blockswap_weights(TRAIN_BASE_GB[base], b)
+    if swapped["outcome"] != PASS:
+        return {"outcome": UNMEASURED, "explains": None,
+                "note": swapped["note"]}
+
+    total_resident = ours["total_gb"]
+    total_swapped = round(total_resident - TRAIN_BASE_GB[base]
+                          + swapped["vram_gb"], 2)
+    gap_before = round(vendor_gb - total_resident, 2)
+    gap_after = round(vendor_gb - total_swapped, 2)
+    explains = abs(gap_after) < abs(gap_before)
+    return {
+        "outcome": PASS if explains else FAIL, "explains": explains,
+        "vendor_gb": vendor_gb, "blocks_to_swap": b,
+        "ours_resident_gb": total_resident, "ours_swapped_gb": total_swapped,
+        "gap_before_gb": gap_before, "gap_after_gb": gap_after,
+        "gap_change_gb": round(abs(gap_after) - abs(gap_before), 2),
+        "note": (
+            f"их конфигурация {base} + {mode}, порог вендора {vendor_gb} ГБ. "
+            f"Наш расчёт без свопа {total_resident}, со свопом {b} блоков "
+            f"{total_swapped} (база {TRAIN_BASE_GB[base]} -> "
+            f"{swapped['vram_gb']} на карте, {swapped['ram_gb']} уезжает в "
+            f"оперативную). Разрыв с вендором был {gap_before}, стал "
+            f"{gap_after}. "
+            + (f"БЛОКСВОП РАЗРЫВ СБЛИЖАЕТ на "
+               f"{round(abs(gap_before) - abs(gap_after), 2)} ГБ" if explains else
+               f"БЛОКСВОП РАЗРЫВ НЕ ОБЪЯСНЯЕТ: он уменьшает расход, а наш "
+               f"расчёт и так НИЖЕ вендорского порога — учёт свопа уводит "
+               f"дальше ещё на {round(abs(gap_after) - abs(gap_before), 2)} ГБ. "
+               f"Отрицательный результат (И6): объяснено 0 ГБ из "
+               f"{abs(gap_before)}. Искать надо в активациях на видео, в "
+               f"чекпоинтах градиентов, в батче и в копиях DeepSpeed — "
+               f"то есть там, где расход РАСТЁТ, а не падает")),
     }
