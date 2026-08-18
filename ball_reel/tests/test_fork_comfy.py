@@ -745,7 +745,12 @@ class TheLockFileIsCompleteAndEveryNumberHasACommand(unittest.TestCase):
                 self.assertIsInstance(w["bytes"], int)
                 self.assertEqual(len(w["sha256"]), 64)
                 self.assertIn("paths-info", w["measured_by"])
-                self.assertEqual(w["measured_at"], "2026-08-17")
+                # Дата проверяется ФОРМАТОМ, а не конкретным днём. Раньше здесь
+                # стоял литерал «2026-08-17», и он краснел при каждом ПОВТОРНОМ
+                # замере — то есть наказывал за то, ради чего сторож и заведён.
+                # Защиты литерал не давал никакой: подменить дату на любую
+                # другую он бы позволил ровно так же.
+                self.assertRegex(w["measured_at"], r"^20\d\d-\d\d-\d\d$")
 
     def test_the_sizes_are_measured_and_not_recalled(self):
         """Припоминание — не замер. Признак замера здесь — байты, а не ГБ:
@@ -807,6 +812,18 @@ class TheLockFileIsCompleteAndEveryNumberHasACommand(unittest.TestCase):
     def test_the_lock_names_the_packs_the_code_actually_cuts(self):
         self.assertEqual(tuple(self.lock["workflow"]["removed_packs"]),
                          fk.CUSTOM_PACKS)
+
+    def test_the_lock_pins_the_quant_stage_the_owner_chose(self):
+        """Решение владельца от 18.08.2026 — Q4_K_M под карту A16.
+
+        Литералом и намеренно: тихая смена ступени меняет и качество, и
+        скорость, и объём закачки. Пусть краснеет — тогда смена будет
+        осознанной, а не унаследованной.
+        """
+        diffusion = next(w for w in self.lock["weights"]
+                         if w["role"] == "diffusion")
+        self.assertEqual(diffusion["path"], "Wan2.2-Animate-14B-Q4_K_M.gguf")
+        self.assertEqual(diffusion["bytes"], 11496331072)
 
     def test_the_total_is_the_sum_and_fits_the_forty_gigabyte_claim(self):
         """§3: «диск: 40 ГБ достаточно». Теперь это замер, а не оценка."""
@@ -992,8 +1009,15 @@ class TheQuantStageIsAFlagNotARewrite(unittest.TestCase):
         try:
             fk.QUANT_TEMPLATE = fk.QUANT_GGUF
             files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
-            self.assertIn("Wan2.2-Animate-14B-Q3_K_M.gguf", files,
-                          "подмена константы умолчания не доехала до вызова")
+            # Проверяется СЛЕДСТВИЕ подмены, а не имя ступени: сторож про
+            # механизм, и привязка к конкретному файлу делала его хрупким к
+            # смене ступени владельцем (Q3_K_M -> Q4_K_M, 18.08.2026).
+            self.assertNotIn("Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                             files,
+                             "подмена константы умолчания не доехала до вызова")
+            self.assertTrue(any(f.endswith(".gguf") for f in files),
+                            f"после подмены умолчания диффузия всё ещё не "
+                            f"GGUF: {sorted(files)}")
         finally:
             fk.QUANT_TEMPLATE = saved
 
