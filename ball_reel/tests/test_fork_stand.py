@@ -48,11 +48,25 @@ DIFF_SHA = "43d720f243c3cdf5346ca05b525ec662f89bc5ebeb8e998dc347b840406cdfa6"
 VAE_NAME = "wan_2.1_vae.safetensors"
 VAE_BYTES = 253815318
 
-#: Вывод `nvidia-smi` для утверждённой машины: четыре A16 по 16376 MiB.
-#: Строка СОБРАНА ЗДЕСЬ, а не снята с карты — карты нет (Ц4).
+#: Вывод `nvidia-smi` для утверждённой машины. СТРОКА СОЧИНЕНА ЗДЕСЬ ЦЕЛИКОМ,
+#: и «16376 MiB» в ней — НЕ НАБЛЮДЕНИЕ (Ц4): `nvidia-smi` на A16 не запускался
+#: ни разу, а до 18.08.2026 это число ходило по проекту как замер. Здесь оно
+#: годится ровно на одно — быть ОПТИМИСТИЧНЫМ КРАЕМ вилки допущений; ниже есть
+#: такая же сочинённая строка с пессимистичным краем.
 SMI_A16 = "\n".join(["NVIDIA A16, 16376 MiB, 8.6, 550.90.07"] * 4) + "\n"
 SMI_ONE_A16 = "NVIDIA A16, 16376 MiB, 8.6, 550.90.07\n"
+
+#: ПЕССИМИСТИЧНЫЙ КРАЙ ТОЙ ЖЕ ВИЛКИ: настоящая A16, которая печатает 15360 MiB
+#: = 15.0 ГиБ. Тоже сочинено. Фикстура нужна именно потому, что мы НЕ ЗНАЕМ,
+#: какой из двух краёв правда: прибор обязан не забраковать эту машину.
+SMI_A16_LOW = "\n".join(["NVIDIA A16, 15360 MiB, 8.6, 550.90.07"] * 4) + "\n"
+
+#: ПОДМЕНА КАРТЫ ПРИ АРЕНДЕ: T4 вместо A16, тот же класс «16 ГБ».
 SMI_SMALL = "\n".join(["NVIDIA T4, 15360 MiB, 7.5, 550.90.07"] * 4) + "\n"
+
+#: Карта с именем утверждённой, но с памятью, которой не бывает у 16 ГБ.
+#: Четыре штуки, чтобы ступень числа карт не подмешивала свою находку.
+SMI_A16_TINY = "\n".join(["NVIDIA A16, 8192 MiB, 8.6, 550.90.07"] * 4) + "\n"
 
 
 def smi_says(text):
@@ -290,16 +304,27 @@ class TheCardStepMustSayCannotRatherThanNoCard(unittest.TestCase):
         self.assertEqual(got["outcome"], PASS, got["note"])
         self.assertGreater(got["headroom_gib"], 1.0)
 
-    def test_the_project_default_does_not_fit_the_approved_card(self):
-        """НАХОДКА ПРИБОРА, а не особенность теста, и число здесь главное.
+    def test_the_project_default_is_judged_at_the_blockswap_the_graph_sets(self):
+        """ИСПРАВЛЕННЫЙ ДЕФЕКТ: ступень мерила конфигурацию, которую не запускают.
 
-        Умолчание проекта — Q4_K_M на 77 кадрах. По модели памяти
-        `fork_preflight` это 15.97 ГиБ из 15.99, то есть ЗАПАС 0.02 ГиБ при
-        требуемом 1.0. Прибор обязан сказать это ЧИСЛОМ и на арендованной
-        машине, а не после OOM на первом кадре. Литералы ниже посчитаны
-        отдельно: 10.71 + 2.03 + 2.03 + 1.20 = 15.97 (Т2).
+        Умолчание проекта — Q4_K_M на 77 кадрах, и граф ставит своп 38 из 40.
+        Литералы (Т2): 10.71 × 0.935092 / 40 = 0.2504 на блок; резидентно
+        40-38+1 = 3 блока = 0.751; несвопаемое 10.71 × 0.064908 = 0.695; итого
+        весов 1.45. Плюс LoRA 2.03, активации 2.03, резерв Comfy 1.20 = 6.71.
         """
         got = st.card(smi=smi_says(SMI_A16))
+        self.assertEqual(got["need_gib"], 6.71)
+        self.assertEqual(got["headroom_gib"], 9.28)
+        self.assertEqual(got["outcome"], PASS, got["note"])
+
+    def test_without_blockswap_the_same_card_is_tight(self):
+        """НЕГАТИВНЫЙ КОНТРОЛЬ ТОЙ ЖЕ ПРАВКИ (И5): своп обязан менять ответ.
+
+        При `blocks=0` вся модель лежит на карте, и Q4_K_M на 77 кадрах даёт
+        15.97 из 15.99 — запас 0.02 при требуемом 1.0. Прибор, отвечающий
+        одинаково при 0 и при 38, не мерил бы блоксвоп вовсе.
+        """
+        got = st.card(smi=smi_says(SMI_A16), blocks=0)
         self.assertEqual(got["need_gib"], 15.97)
         self.assertEqual(got["headroom_gib"], 0.02)
         self.assertEqual(got["outcome"], FAIL)
@@ -314,9 +339,37 @@ class TheCardStepMustSayCannotRatherThanNoCard(unittest.TestCase):
         self.assertEqual(got["outcome"], FAIL)
         self.assertIn("утверждено", got["note"])
 
-    def test_a_smaller_card_is_a_finding(self):
+    def test_a_substituted_card_is_caught_by_its_name_not_by_a_guessed_byte(self):
+        """Подмена A16 на T4 ловится ИМЕНЕМ ОТ ДРАЙВЕРА (Е2).
+
+        Раньше её ловила планка 15.5 ГиБ, обоснованная разностью двух чисел,
+        которых никто не наблюдал. Имя — свидетельство: оно есть в том же
+        выводе и не требует знать раскладку памяти ни одной из карт.
+        """
         got = st.card(smi=smi_says(SMI_SMALL), step="Q3_K_M", length=49)
         self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("не ту карту", got["note"])
+
+    def test_an_approved_card_with_the_pessimistic_layout_is_not_rejected(self):
+        """ТРЕТИЙ ИСХОД (Р1) НА ГЛАВНОМ НЕЗНАНИИ ЭТОГО МОДУЛЯ.
+
+        Если утверждённая A16 печатает 15360 MiB (нижний край вилки, и он
+        ровно так же не наблюдался, как верхний), приёмка НЕ ВПРАВЕ сказать
+        «не та карта»: имя то самое, а по объёму мы отличить не можем.
+        Ответ — «не смогли», и это не «годно» и не «негодно».
+        """
+        got = st.card(smi=smi_says(SMI_A16_LOW))
+        self.assertEqual(got["outcome"], UNMEASURED, got["note"])
+        self.assertNotEqual(got["outcome"], FAIL)
+        self.assertEqual(got["smallest_gib"], 15.0)
+        self.assertIn("НЕ СМОГЛИ ОТЛИЧИТЬ", got["note"])
+
+    def test_a_card_below_any_sixteen_gigabyte_layout_is_a_finding(self):
+        """И5, другая сторона: 8 ГиБ — это уже не незнание, а находка."""
+        got = st.card(smi=smi_says(SMI_A16_TINY))
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(got["count"], 4, "число карт не должно мешать")
+        self.assertIn("ни одна карта класса 16 ГБ", got["note"])
 
     def test_garbage_from_the_utility_is_unmeasured(self):
         got = st.card(smi=smi_says("\n\n"))
@@ -481,18 +534,61 @@ class TheDecisionConstantsAreGuardedInBothDirections(unittest.TestCase):
             st.EXPECTED_GPU_COUNT = original
 
     def test_the_memory_bar_is_guarded(self):
+        """Т1 в обе стороны. Карта во всех трёх ветках НАЗЫВАЕТСЯ A16, иначе
+
+        мутация планки была бы неотличима от проверки имени.
+        """
         original = st.MIN_GPU_MEMORY_GIB
         try:
-            st.MIN_GPU_MEMORY_GIB = 14.0
+            st.MIN_GPU_MEMORY_GIB = 14.5   # слабее: 15.0 попадает выше планки
             self.assertEqual(
-                st.card(smi=smi_says(SMI_SMALL), step="Q3_K_M",
+                st.card(smi=smi_says(SMI_A16_LOW), step="Q3_K_M",
                         length=49)["outcome"], PASS)
-            st.MIN_GPU_MEMORY_GIB = 16.5
+            st.MIN_GPU_MEMORY_GIB = 16.5   # строже: даже 15.99 сомнительна
+            self.assertEqual(
+                st.card(smi=smi_says(SMI_A16), step="Q3_K_M",
+                        length=49)["outcome"], UNMEASURED)
+        finally:
+            st.MIN_GPU_MEMORY_GIB = original
+
+    def test_the_doubt_floor_is_guarded(self):
+        """Т1: нижняя граница полосы сомнения — тоже константа-решение."""
+        original = st.GPU_MEMORY_DOUBT_GIB
+        try:
+            st.GPU_MEMORY_DOUBT_GIB = 15.5   # строже: 15.0 уже находка
+            self.assertEqual(
+                st.card(smi=smi_says(SMI_A16_LOW), step="Q3_K_M",
+                        length=49)["outcome"], FAIL)
+            st.GPU_MEMORY_DOUBT_GIB = 4.0    # слабее: 8 ГиБ проходит в сомнение
+            self.assertEqual(
+                st.card(smi=smi_says(SMI_A16_TINY), step="Q3_K_M",
+                        length=49)["outcome"], UNMEASURED)
+        finally:
+            st.GPU_MEMORY_DOUBT_GIB = original
+
+    def test_the_expected_card_name_is_guarded(self):
+        """Т1 в обе стороны по имени утверждённой карты.
+
+        Судим по находке, а не по итоговому исходу: у T4 объём 15.0 ГиБ и без
+        того попадает в полосу сомнения, и итог там «не смогли» по другой
+        причине. Мутация обязана переставить именно НАХОДКУ ПРО ИМЯ.
+        """
+        original = st.EXPECTED_GPU_NAME
+        try:
+            self.assertNotIn("не ту карту",
+                             st.card(smi=smi_says(SMI_A16))["note"])
+            self.assertIn("не ту карту",
+                          st.card(smi=smi_says(SMI_SMALL))["note"])
+            st.EXPECTED_GPU_NAME = "T4"      # обе находки обязаны поменяться
+            self.assertIn("не ту карту",
+                          st.card(smi=smi_says(SMI_A16))["note"])
+            self.assertNotIn("не ту карту",
+                             st.card(smi=smi_says(SMI_SMALL))["note"])
             self.assertEqual(
                 st.card(smi=smi_says(SMI_A16), step="Q3_K_M",
                         length=49)["outcome"], FAIL)
         finally:
-            st.MIN_GPU_MEMORY_GIB = original
+            st.EXPECTED_GPU_NAME = original
 
     def test_the_default_step_is_guarded(self):
         original = st.DEFAULT_STEP

@@ -1345,5 +1345,149 @@ class TheMemoryModelAgreesWithAnOutsideObservation(unittest.TestCase):
 
 
 
+
+class TheAvailableVramIsAnExplicitUnknown(unittest.TestCase):
+    """Главное незнание проекта заведено в приборы как ВЕЛИЧИНА С ТРЕМЯ
+
+    СОСТОЯНИЯМИ. Все ожидаемые здесь — литералы (Т2): строки состояний и
+    границы вилки вписаны руками, а не импортированы из проверяемого модуля.
+    Импортированное «замерено на карте» проехало бы вместе с переименованием
+    и промолчало ровно тогда, когда состояние и надо ловить.
+    """
+
+    def test_without_a_measurement_the_answer_is_a_bracket_not_a_number(self):
+        got = fp.vram_available()
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["state"], "не замерено, вот вилка")
+        self.assertEqual((got["low_gib"], got["high_gib"]), (15.0, 15.99))
+
+    def test_the_project_has_no_measurement_and_the_code_says_so(self):
+        """Ц7: правило «15.99 не замер» держится тестом, а не строкой в правилах.
+
+        Как только кто-нибудь впишет число в `A16_VRAM_MEASURED_GIB`, этот
+        тест покраснеет и потребует приложить вывод команды.
+        """
+        self.assertIsNone(fp.A16_VRAM_MEASURED_GIB,
+                          "число ставится ТОЛЬКО вместе с выводом nvidia-smi "
+                          "на карте; пока его нет, здесь None")
+
+    def test_a_measurement_collapses_the_bracket_into_one_number(self):
+        got = fp.vram_available(15.42)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["state"], "замерено на карте")
+        self.assertEqual((got["low_gib"], got["high_gib"]), (15.42, 15.42))
+
+    def test_no_bracket_at_all_is_the_third_state(self):
+        got = fp.vram_available(bracket=())
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["state"], "неизвестно вовсе")
+        self.assertIsNone(got["low_gib"])
+
+    def test_garbage_instead_of_a_measurement_is_not_a_measurement(self):
+        """И5, негативный контроль: ноль, минус и строка не становятся замером."""
+        for bad in (0, -1, "16", True):
+            with self.subTest(bad=bad):
+                got = fp.vram_available(bad)
+                self.assertEqual(got["outcome"], UNMEASURED)
+                self.assertEqual(got["state"], "неизвестно вовсе")
+
+    def test_the_source_of_the_memory_number_is_printed(self):
+        """Вызов с непроверенным числом ВИДЕН В ОТЧЁТЕ."""
+        anonymous = fp.budget(15.99, blocks_to_swap=38)
+        self.assertIsNone(anonymous["memory_source"])
+        self.assertIn("ИСТОЧНИК ЧИСЛА ПАМЯТИ НЕ НАЗВАН", anonymous["note"])
+        named = fp.budget(15.99, blocks_to_swap=38, memory_source="nvidia-smi")
+        self.assertIn("источник числа памяти: nvidia-smi", named["note"])
+
+
+class TheTableIsGivenUnderBothAssumptions(unittest.TestCase):
+    """Прибор, отвечающий по-разному при 15.0 и 15.99, обязан сказать это.
+
+    Литералы запасов посчитаны отдельно (Т2): на блок 10.71 × 0.935092 / 40 =
+    0.2504; несвопаемое 10.71 × 0.064908 = 0.695; рядом всегда LoRA 2.03,
+    активации 2.03 и резерв Comfy 1.20 = 5.26.
+    """
+
+    def test_at_the_graph_blockswap_the_answer_does_not_depend_on_the_unknown(self):
+        got = fp.budget_bracket(blocks_to_swap=38)
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertEqual(row["total_gb"], 6.71)
+        self.assertEqual(row["headroom_low_gb"], 8.29)
+        self.assertEqual(row["headroom_high_gb"], 9.28)
+        self.assertEqual(row["verdict"], "влезает при обоих")
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertEqual(got["chosen"], "Q4_K_M")
+
+    def test_at_the_floor_the_answer_depends_on_the_unknown_and_says_so(self):
+        """ГЛАВНЫЙ ТРЕТИЙ ИСХОД (Р1): «не знаем, сколько памяти».
+
+        Своп 5 блоков: занято 14.97, запас 1.02 при 15.99 и 0.03 при 15.0.
+        Это не «влезает» и не «не влезает».
+        """
+        got = fp.budget_bracket(blocks_to_swap=5, step="Q4_K_M")
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertEqual(row["total_gb"], 14.97)
+        self.assertEqual(row["headroom_low_gb"], 0.03)
+        self.assertEqual(row["headroom_high_gb"], 1.02)
+        self.assertEqual(row["verdict"], "только при оптимистичном")
+        self.assertEqual(got["outcome"], UNMEASURED, got["note"])
+        self.assertNotEqual(got["outcome"], PASS)
+
+    def test_without_blockswap_the_heavy_step_fits_under_neither(self):
+        got = fp.budget_bracket(blocks_to_swap=0, step="Q4_K_M")
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertEqual(row["total_gb"], 15.97)
+        self.assertEqual(row["verdict"], "ни при одном")
+        self.assertEqual(got["outcome"], FAIL)
+
+    def test_a_measured_card_gives_one_column_not_two(self):
+        got = fp.budget_bracket(blocks_to_swap=38, measured_gib=15.42)
+        self.assertEqual(got["state"], "замерено на карте")
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertEqual(row["headroom_low_gb"], row["headroom_high_gb"])
+
+    def test_knowing_nothing_about_memory_is_its_own_outcome(self):
+        got = fp.budget_bracket(blocks_to_swap=38, bracket=())
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["rows"], [])
+
+    def test_an_unknown_step_does_not_silently_pass(self):
+        got = fp.budget_bracket(blocks_to_swap=38, step="Q9_K_XXL")
+        self.assertEqual(got["outcome"], UNMEASURED)
+
+
+class TheSwapFloorNamesTheAssumptionItCameFrom(unittest.TestCase):
+    """«Порог свопа 5 блоков» назывался без допущения, при котором получен."""
+
+    def test_the_floor_is_different_under_the_two_assumptions(self):
+        got = fp.swap_floor_bracket()
+        self.assertEqual(got["floor_high"], 5, "при 15.99 ГиБ")
+        self.assertEqual(got["floor_low"], 9, "при 15.0 ГиБ")
+        self.assertEqual(got["outcome"], UNMEASURED, got["note"])
+        self.assertIn("ПОРОГИ РАЗОШЛИСЬ", got["note"])
+
+    def test_the_lighter_step_needs_less_swapping_under_both(self):
+        got = fp.swap_floor_bracket(step="Q3_K_M")
+        self.assertLess(got["floor_low"], 9)
+        self.assertLess(got["floor_high"], 5)
+
+    def test_a_measured_card_makes_the_two_floors_one(self):
+        got = fp.swap_floor_bracket(measured_gib=15.99)
+        self.assertEqual((got["floor_low"], got["floor_high"]), (5, 5))
+        self.assertEqual(got["outcome"], PASS, got["note"])
+
+    def test_a_shorter_window_needs_less_swapping(self):
+        """Т3: середина диапазона, а не только края."""
+        got = fp.swap_floor_bracket(length=49)
+        self.assertLess(got["floor_high"], 5)
+
+    def test_knowing_nothing_about_memory_is_not_a_floor_of_zero(self):
+        got = fp.swap_floor_bracket(bracket=())
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["floor_low"])
+        self.assertIsNone(got["floor_high"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
