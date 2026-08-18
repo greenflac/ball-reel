@@ -590,3 +590,96 @@ Wan-Animate, и переход на DoRA этого не меняет. Разв�
 интуитивному: падение при загрузке видно сразу и стоит минуту, а тихий ноль
 стоит часов ложной диагностики. Поэтому шаг «адаптер» стоит ПЕРЕД дорогими
 осями, и вопрос «приложилось ли» закрывается до вопроса «стало ли лучше».
+
+## Разведка по чужим реализациям: три находки, меняющие план
+
+Все три перепроверены мной по первоисточникам, а не приняты от агентов на слово.
+
+### 1. ОТМЕНЯЕТСЯ прежнее «тренера под Animate нет»
+
+Утверждение было верно для трёх проверенных тренеров и НЕВЕРНО вообще.
+`modelscope/DiffSynth-Studio` — официальный тренер, знающий именно Animate:
+
+```
+$ curl .../DiffSynth-Studio/main/examples/wanvideo/model_training/lora/Wan2.2-Animate-14B.sh
+--model_id_with_origin_paths "Wan-AI/Wan2.2-Animate-14B:diffusion_pytorch_model*.safetensors,…"
+--data_file_keys "video,animate_pose_video,animate_face_video"
+--extra_inputs "input_image,animate_pose_video,animate_face_video"
+--lora_base_model "dit" --lora_target_modules "q,k,v,o,ffn.0,ffn.2" --lora_rank 32
+--learning_rate 1e-4 --num_epochs 5 --height 480 --width 832 --num_frames 81
+# 1*80G GPU cannot train Wan2.2-Animate-14B LoRA
+# We tested on 8*80G GPUs
+```
+
+Следствия: развилка «против какой базы обучать» СНЯТА — учим против самой Animate;
+вопрос про двух экспертов снят вместе с ней (boundary не задаём, эксперт один);
+`tools/fork_probe_lora_fit.py` остаётся полезен, но уже не как основание выбора
+донора, а как сторож совместимости.
+
+Вендорский эталонный рецепт, проверен в исходнике
+(`wan/modules/animate/animate_utils.py`):
+
+```python
+def get_loraconfig(transformer, rank=128, alpha=128, init_lora_weights="gaussian"):
+    if "blocks" in name and "face" not in name and "modulation" not in name
+```
+
+r=128 против демонстрационных 32 у DiffSynth, и **face-ветка исключена явно**.
+Последнее — независимое подтверждение решения владельца: вендор своей LoRA
+аппарат лица не трогает.
+
+### 2. КАНАЛ ЛИЦА: возможно, мы кормим модель не тем
+
+`wan/modules/animate/preprocess/process_pipepline.py:72-80`:
+
+```python
+face_bbox_for_image = get_face_bboxes(meta['keypoints_face'][:, :2], scale=1.3, …)
+x1, x2, y1, y2 = face_bbox_for_image
+face_image = frames[idx][y1:y2, x1:x2]      # пиксели ИСХОДНОГО кадра
+face_image = cv2.resize(face_image, (512, 512))
+```
+
+Вендор подаёт в `face_video` НАСТОЯЩИЙ RGB-кроп лица; точки нужны только для
+рамки. Потребитель — свёрточный энкодер движения, портированный из LIA.
+
+Мы подаём нарисованные точки DWPose (§ поправка 4 хэндофа). Так сделано в
+официальном шаблоне ComfyUI, из которого мы производили граф, — то есть в
+экосистеме ДВА несовместимых канала лица, и с обучением совпадает не тот,
+что в шаблоне.
+
+**НЕПРОВЕРЕНО и это главное:** что нарисованные точки дают мёртвый сигнал, я не
+измерял. Проверяется первым же прогоном на карте (И2): прогнать энкодер
+движения на точках и на настоящем кропе, сравнить разброс выходного кода. Почти
+константа на точках = число вместо гипотезы. До замера канал не менять.
+
+### 3. МАСКА: вендорское умолчание грубее нашего, а режим замены свёрнут
+
+`preprocess_data.py`, argparse:
+
+```
+--iterations default=3   --k default=7
+--w_len default=1  "A value of 1 means no subdivision is performed"
+--h_len default=1
+```
+
+`get_aug_mask` при w_len=h_len=1 заливает весь bbox целиком. То есть умолчание
+вендора в режиме замены — дилатация ~21 px ПЛЮС схлопывание в ПРЯМОУГОЛЬНИК.
+Не силуэт. Реквизит рядом с телом попадает внутрь и перерисовывается всегда.
+
+И у новой ноды `WanAnimate2ToVideo` входов `background_video` и `character_mask`
+НЕТ ВОВСЕ (проверено по списку входов в `comfy_extras/nodes_wan.py`):
+
+```
+WanAnimateToVideo  : … reference_image, face_video, pose_video,
+                     background_video, character_mask, continue_motion, …
+WanAnimate2ToVideo : … reference_image, pose_video, positive_pose,
+                     pose_strength, pose_start_percent …   ← маски и фона нет
+```
+
+Вывод для продукта: сохранность реквизита — НЕ решённая где-то задача, которую
+мы зря изобретаем. Её не решил никто: вендор ушёл в прямоугольник, upstream
+свернул режим замены, единственный найденный проект, который пробовал плотную
+маску, вынес обе опции в интерфейс и не выбрал. Наш путь — плотная маска с
+классами и вычитанием предметов — единственный известный, который пытается.
+Это довод НЕ отказываться от `fork_props`, но и трезвость: аналогов нет,
+сравнивать не с чем, планки придётся ставить своим замером.
