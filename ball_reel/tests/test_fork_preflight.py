@@ -696,5 +696,98 @@ class TheTrainingBudgetIsCountedNotRecalled(unittest.TestCase):
             msg="в реестре расхождения лежит число, которого функция не даёт")
 
 
+
+
+class BlockswapIsPartOfTheMemoryModel(unittest.TestCase):
+    """Модель, не знающая про то, что делает граф, судит не тот прогон.
+
+    До 18.08 `budget` считал всю модель резидентной и браковал Q4_K_M на
+    16 ГиБ (остаток 0.02 при требуемом 1.0). Граф при этом свопит 38 блоков
+    из 40. Ошибка была не в числе, а в том, что мерилась конфигурация,
+    которую мы не запускаем, — и точно так же она пропустила бы негодную.
+    """
+
+    def test_the_block_count_is_the_measured_one(self):
+        # Литерал (Т2): 40 блоков получены разбором заголовков четырёх шардов
+        # safetensors Range-запросами, без скачивания весов.
+        self.assertEqual(fp.BLOCKS_TOTAL, 40)
+
+    def test_the_block_share_is_the_measured_one(self):
+        # 16 153 538 560 из 17 274 817 108 параметров.
+        self.assertAlmostEqual(fp.BLOCK_SHARE, 0.935092, places=6)
+
+    def test_swapping_nothing_leaves_the_whole_model_on_the_card(self):
+        """Негативный контроль (И5): при нулевом свопе модель обязана
+        выродиться в прежнюю, иначе она чинит не то."""
+        got = fp.blockswap_weights(10.71, 0)
+        self.assertAlmostEqual(got["vram_gb"], 10.71, places=2)
+
+    def test_swapping_everything_still_leaves_the_unswappable_part(self):
+        """6.49% параметров блоксвоп не трогает вовсе.
+
+        Обнулить их значило бы занижение расхода — ошибка в опасную сторону:
+        отчёт обещает память, которой на карте нет.
+        """
+        got = fp.blockswap_weights(10.71, 40)
+        self.assertGreater(got["vram_gb"], 0.6)
+        self.assertLess(got["vram_gb"], 1.2)
+
+    def test_more_blocks_than_the_model_has_is_unmeasured_not_zero(self):
+        got = fp.blockswap_weights(10.71, 41)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["vram_gb"])
+
+    def test_the_in_flight_block_is_counted_and_the_number_is_guarded(self):
+        """Пережила первый заход мутаций в обе стороны — значит её не
+        сторожил никто, и отгружаемое значение можно было менять молча.
+
+        Арифметика литералами (Т2): 40 блоков, свопнуто 38, остаются
+        резидентными 2, и ещё один лежит на карте в момент своего счёта —
+        итого 3. Единица здесь ВЫБРАНА консервативно: занизить значит
+        пообещать памяти больше, чем есть, и получить отказ на карте, а не
+        в отчёте.
+        """
+        got = fp.blockswap_weights(10.71, 38)
+        self.assertEqual(got["resident_blocks"], 3)
+        self.assertAlmostEqual(got["vram_gb"], 1.45, places=2)
+
+    def test_the_in_flight_allowance_is_never_optimistic(self):
+        """Ноль означал бы, что блок появляется на карте бесплатно."""
+        self.assertGreaterEqual(fp.IN_FLIGHT_BLOCKS, 1)
+        self.assertEqual(
+            fp.blockswap_weights(10.71, 40)["resident_blocks"],
+            fp.IN_FLIGHT_BLOCKS,
+            "при полном свопе на карте обязан оставаться ровно блок в полёте")
+
+    def test_what_leaves_the_card_arrives_in_system_memory(self):
+        """Блоксвоп не уменьшает расход, он его переносит — и это в отчёте."""
+        got = fp.blockswap_weights(10.71, 38)
+        self.assertGreater(got["ram_gb"], 9.0)
+        self.assertIn("ОПЕРАТИВНУЮ", got["note"])
+
+    def test_the_owners_step_fits_the_card_once_blockswap_is_counted(self):
+        """Число, из-за которого поднялся вопрос к владельцу, — и его ответ."""
+        got = fp.budget(15.99, length=77, blocks_to_swap=38)
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertTrue(row["fits"])
+        self.assertGreater(row["headroom_gb"], 9.0)
+
+    def test_without_blockswap_the_same_step_does_not_fit(self):
+        """Обе стороны развилки проверены, иначе тест сторожит одну."""
+        got = fp.budget(15.99, length=77)
+        row = next(r for r in got["rows"] if r["step"] == "Q4_K_M")
+        self.assertFalse(row["fits"])
+        self.assertLess(row["headroom_gb"], 0.1)
+
+    def test_the_report_says_out_loud_which_of_the_two_was_computed(self):
+        with_swap = fp.budget(15.99, blocks_to_swap=38)["note"]
+        without = fp.budget(15.99)["note"]
+        self.assertIn("блоксвопе 38", with_swap)
+        self.assertIn("БЕЗ БЛОКСВОПА", without,
+                      "два разных расчёта неразличимы в отчёте — читатель "
+                      "решит, что видит тот, которого ждёт")
+
+
+
 if __name__ == "__main__":
     unittest.main()

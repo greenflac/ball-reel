@@ -229,7 +229,79 @@ def parse_smi(text: str) -> dict:
                                  for g in found))}
 
 
-def budget(memory_gb: float, *, length: int = 77) -> dict:
+# ─────────────────────────────────────────────────────────────────────────────
+# БЛОКСВОП: модель памяти обязана знать про то, что граф делает
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ЗАЧЕМ. До 18.08 `budget` считал, что вся модель лежит в видеопамяти, и по
+# нему Q4_K_M не влезал в 16 ГиБ ни на одном окне (остаток 0.02 ГиБ при
+# требуемом 1.0). Но граф, который мы собираем, ставит `blocks_to_swap = 38`
+# из 40: тридцать восемь блоков живут в оперативной памяти и приезжают на
+# карту по одному. То есть модель браковала конфигурацию, которую мы не
+# запускаем, — и точно так же пропустила бы негодную. Пока этого расчёта не
+# было, любой вердикт по памяти был вердиктом не о том прогоне.
+
+#: Сколько трансформерных блоков у Wan2.2-Animate-14B.
+#: ИЗМЕРЕНО 18.08.2026: разбор заголовков четырёх шардов safetensors
+#: Range-запросами (`tools/fork_probe_lora_fit.py:header`), без скачивания
+#: весов. Ключи вида `blocks.N.*` дают ровно 40 различных N, и все сорок
+#: блоков одинакового размера — 403 838 464 параметра каждый.
+BLOCKS_TOTAL = 40
+
+#: Какая доля параметров модели лежит в блоках, а не вне их.
+#: ИЗМЕРЕНО там же: 16 153 538 560 из 17 274 817 108 параметров.
+#: Остальные 6.49% — то, что блоксвоп НЕ ТРОГАЕТ и что остаётся на карте
+#: всегда: эмбеддинги, `time_projection` (157 М параметров одним тензором),
+#: `face_adapter`, `patch_embedding`. Считать их свопаемыми было бы занижение
+#: расхода, то есть ошибка в опасную сторону.
+BLOCK_SHARE = 0.935092
+
+#: Сколько блоков занимает место на карте СВЕРХ оставленных резидентными.
+#: ВЫБРАНО (кем: эта смена; из чего: устройство свопа в обёртке — блок
+#: приезжает на карту к моменту своего счёта, и в худший момент на ней лежит
+#: и он, и тот, что считается). Единица — консервативная оценка: занизить
+#: здесь значит пообещать памяти больше, чем есть, и получить OOM на карте,
+#: а не в отчёте. НЕ ИЗМЕРЕНО: замер требует карты.
+IN_FLIGHT_BLOCKS = 1
+
+
+def blockswap_weights(step_gb: float, blocks_to_swap: int) -> dict:
+    """Сколько весов реально лежит на карте при данном блоксвопе. Три исхода.
+
+    Возвращает и то, сколько при этом требуется ОПЕРАТИВНОЙ памяти: блоксвоп
+    не уменьшает расход, он его переносит. Промолчать об этом значило бы
+    поменять один отказ по памяти на другой, менее понятный.
+    """
+    if not isinstance(blocks_to_swap, int) or isinstance(blocks_to_swap, bool):
+        return {"outcome": UNMEASURED, "vram_gb": None, "ram_gb": None,
+                "note": f"blocks_to_swap={blocks_to_swap!r} — не целое число"}
+    if not 0 <= blocks_to_swap <= BLOCKS_TOTAL:
+        return {"outcome": UNMEASURED, "vram_gb": None, "ram_gb": None,
+                "note": (f"blocks_to_swap={blocks_to_swap} вне 0..{BLOCKS_TOTAL}: "
+                         f"у 14B ровно {BLOCKS_TOTAL} блоков (ИЗМЕРЕНО по "
+                         f"заголовкам весов), и свопнуть больше нечего")}
+    per_block = step_gb * BLOCK_SHARE / BLOCKS_TOTAL
+    outside = step_gb * (1.0 - BLOCK_SHARE)
+    resident = min(BLOCKS_TOTAL,
+                   BLOCKS_TOTAL - blocks_to_swap + IN_FLIGHT_BLOCKS)
+    vram = outside + per_block * resident
+    ram = per_block * blocks_to_swap
+    return {
+        "outcome": PASS, "vram_gb": round(vram, 2), "ram_gb": round(ram, 2),
+        "per_block_gb": round(per_block, 3),
+        "resident_blocks": resident, "swapped_blocks": blocks_to_swap,
+        "note": (f"свопнуто {blocks_to_swap} из {BLOCKS_TOTAL}: на карте "
+                 f"остаётся {resident} блок(ов) по {per_block:.3f} ГиБ плюс "
+                 f"{outside:.2f} ГиБ несвопаемого (эмбеддинги, "
+                 f"time_projection, face_adapter) = {vram:.2f} ГиБ весов. "
+                 f"В ОПЕРАТИВНУЮ переезжает {ram:.2f} ГиБ — блоксвоп не "
+                 f"уменьшает расход, он его переносит, и на PCIe без NVLink "
+                 f"это ещё и время, которое здесь НЕ ПОСЧИТАНО"),
+    }
+
+
+def budget(memory_gb: float, *, length: int = 77,
+           blocks_to_swap: int | None = None) -> dict:
     """Какая ступень влезает в эту карту. ПОДБОР, а не приговор.
 
     Возвращает все посчитанные варианты, а не только выбранный: человек,
@@ -250,10 +322,19 @@ def budget(memory_gb: float, *, length: int = 77) -> dict:
     # влезает. «Впритык» — отдельное состояние именно потому, что ECC забирает
     # неизмеренную часть памяти, и остаток 0.03 ГБ от неё не защищает.
     rows = []
+    swap_notes = []
     for step, weights in sorted(STEPS_GB.items(), key=lambda kv: -kv[1]):
+        if blocks_to_swap is not None:
+            swapped = blockswap_weights(weights, blocks_to_swap)
+            if swapped["outcome"] != PASS:
+                return {"outcome": UNMEASURED, "fits": [], "chosen": None,
+                        "rows": [], "note": swapped["note"]}
+            weights = swapped["vram_gb"]
+            swap_notes.append(f"{step}: {swapped['note']}")
         total = round(weights + LORA_GB + activations + COMFY_RESERVE_GB, 2)
         headroom = round(memory_gb - total, 2)
         rows.append({"step": step, "total_gb": total, "headroom_gb": headroom,
+                     "weights_gb": weights,
                      "fits": headroom >= MIN_HEADROOM_GB,
                      "tight": 0 <= headroom < MIN_HEADROOM_GB})
     fits = [r for r in rows if r["fits"]]
@@ -273,8 +354,11 @@ def budget(memory_gb: float, *, length: int = 77) -> dict:
         "chosen": chosen["step"] if chosen else None,
         "length": length, "memory_gb": memory_gb,
         "min_headroom_gb": MIN_HEADROOM_GB,
+        "blocks_to_swap": blocks_to_swap, "blockswap": swap_notes,
         "note": (
-            f"на {memory_gb} ГБ при {length} кадрах: "
+            f"на {memory_gb} ГБ при {length} кадрах"
+            + (f" и блоксвопе {blocks_to_swap}" if blocks_to_swap is not None
+               else " БЕЗ БЛОКСВОПА (вся модель на карте)") + ": "
             + "; ".join(f"{r['step']} {r['total_gb']} ({describe(r)})"
                         for r in rows)
             + (f". Берём {chosen['step']} — при запасе меньше "
