@@ -400,6 +400,38 @@ class TheForksTakenOutOfTheEntryPoint(unittest.TestCase):
             UNMEASURED)
 
 
+class TheRenderStepClosesTheGapToTheServer(unittest.TestCase):
+    """До 18.08 стыка не было вовсе: сборщик отдавал формат интерфейса,
+    клиент ждал формат API, и обе половины были зелёными по отдельности."""
+
+    def _render(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out", **kw)
+        return next(s for s in got["steps"] if s["step"] == "рендер")
+
+    def test_without_a_backend_it_is_unmeasured_not_a_pass(self):
+        got = self._render()
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("НЕ «нечего рендерить»", got["note"])
+
+    def test_the_step_comes_after_everything_cheap(self):
+        order = list(fork_run.STEPS)
+        for cheap in ("предполёт", "входы", "корзина", "граф", "адаптер"):
+            with self.subTest(step=cheap):
+                self.assertLess(order.index(cheap), order.index("рендер"))
+
+    def test_a_dead_server_is_unmeasured_and_says_so_about_the_graph(self):
+        """Негативный контроль (И5): отказ связи не есть приговор графу."""
+        got = self._render(backend=True)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("не доехал", got["note"])
+
+    def test_the_numbers_reach_the_report(self):
+        note = self._render(backend=True)["note"]
+        self.assertIn("узлов в графе 27", note)
+        self.assertIn("ждали", note)
+
+
 class TheOperatorEntryPoint(unittest.TestCase):
     """Ради чего писался слой оператора: новый драйвинг без входа в код."""
 

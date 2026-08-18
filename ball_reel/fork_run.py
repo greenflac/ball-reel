@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import (fork_build_route, fork_channels, fork_comfy, fork_leak,
-               fork_lora_attach, fork_lora_dataset, fork_mask, fork_preflight,
-               fork_props, fork_seam, fork_template)
+from . import (fork_backend, fork_build_route, fork_channels, fork_comfy,
+               fork_leak, fork_lora_attach, fork_lora_dataset, fork_mask,
+               fork_preflight, fork_props, fork_seam, fork_template)
 from .fork_comfy import SECONDS_MAX, SECONDS_MIN
 from .fork_identity import FAIL, PASS, UNMEASURED
 
@@ -32,7 +32,7 @@ from .fork_identity import FAIL, PASS, UNMEASURED
 #: миллисекунды, а поиск его после снятия условий по сотне кадров стоил бы
 #: всего прогона. Длительность каждого шага печатается.
 STEPS = ("предполёт", "входы", "корзина", "условия", "маски", "предметы",
-         "граф", "адаптер", "протечка", "шов")
+         "граф", "адаптер", "рендер", "протечка", "шов")
 
 
 def seconds_for(frame_count: int, *, fps: int | None = None) -> float:
@@ -81,6 +81,7 @@ def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
 
 def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         grow_px: int | None = None,
+        backend: bool = False,
         props: str | Path | None = None,
         adapter: str | Path | None = None,
         mask_model=None,
@@ -284,6 +285,42 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
                 time.perf_counter() - t))
         except (OSError, ValueError) as exc:
             steps.append(_step("адаптер", FAIL, str(exc)[:200],
+                               time.perf_counter() - t))
+
+    # РЕНДЕР — здесь и нигде раньше: он единственный шаг, который стоит
+    # минут на чужой машине, и всё, что можно забраковать до него, уже
+    # забраковано (П2). Сюда же приходит перевод графа в формат, который
+    # сервер принимает: до 18.08 этого стыка не было вовсе — сборщик отдавал
+    # формат интерфейса, клиент ждал формат API, и обе половины были зелёными
+    # по отдельности.
+    t = time.perf_counter()
+    if not backend:
+        steps.append(_step(
+            "рендер", UNMEASURED,
+            ("бэкенд не запрошен (`backend=False`) — генерации не было. Это "
+             "НЕ «нечего рендерить»: граф собран и переведён, не хватает "
+             "только машины с ComfyUI"),
+            time.perf_counter() - t))
+    else:
+        try:
+            api = fork_comfy.to_api(derived)
+            if api["outcome"] != PASS:
+                steps.append(_step("рендер", api["outcome"],
+                                   f"перевод графа: {api['note']}",
+                                   time.perf_counter() - t))
+            else:
+                # Транспорт называется ЯВНО: у `fork_backend.run` он по
+                # умолчанию `None`, и вызов без него падает атрибутной
+                # ошибкой вместо честного «сервер не отвечает». Это найдено
+                # прогоном стыка, а не чтением.
+                got = fork_backend.run(
+                    api["api"], out_dir=out / "render",
+                    transport=fork_backend.HttpTransport())
+                steps.append(_step("рендер", got["outcome"], got["note"],
+                                   time.perf_counter() - t))
+        except (OSError, ValueError, KeyError, AttributeError) as exc:
+            steps.append(_step("рендер", UNMEASURED,
+                               f"{type(exc).__name__}: {str(exc)[:180]}",
                                time.perf_counter() - t))
 
     # Протечка на моке НЕ ИЗМЕРЯЕТСЯ, и это не пропуск: сравнивать выход с

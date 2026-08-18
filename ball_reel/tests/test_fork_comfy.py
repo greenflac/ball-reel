@@ -1942,5 +1942,165 @@ class TheRenderPicksTheRulesInsteadOfBeingWrittenTwice(unittest.TestCase):
         self.assertIn("wrapper", str(caught.exception))
 
 
+
+
+class TheGraphIsTranslatedIntoWhatTheServerAccepts(unittest.TestCase):
+    """Дыра, из-за которой e2e не запускался: обе половины зелёные, стыка нет.
+
+    `fork_backend.check_graph` на нашем графе отвечал «формат UI, а /prompt
+    принимает формат API». Сборщик и клиент были готовы каждый по себе.
+    """
+
+    def _api(self, graph=None):
+        return fk.to_api(
+            fk.derive_wrapper() if graph is None else graph)
+
+    def test_the_whole_graph_converts(self):
+        got = self._api()
+        self.assertEqual(got["outcome"], fk.PASS, got["note"])
+        self.assertEqual(got["converted"], got["checked"])
+
+    def test_the_backend_no_longer_refuses_it(self):
+        """Свидетельство, а не намерение (Е2): судит тот же прибор, что отказал."""
+        from ball_reel import fork_backend
+
+        self.assertEqual(fork_backend.check_graph(self._api()["api"]), [])
+
+    def test_every_node_carries_class_type_and_inputs(self):
+        for nid, node in self._api()["api"].items():
+            with self.subTest(node=nid):
+                self.assertIn("class_type", node)
+                self.assertIsInstance(node["inputs"], dict)
+
+    def test_links_become_pairs_of_source_and_slot(self):
+        """Проверяется КЛАСС УЗЛА-ИСТОЧНИКА, а не то, что ссылка на что-то есть.
+
+        Мутация «развернуть концы связи» пережила первую версию теста: у
+        сэмплера вход `model` идёт нулевым слотом, поэтому подстановка
+        приёмника вместо источника давала ту же пару чисел и та же проверка
+        зеленела. Ссылка, указывающая на сам сэмплер, — это цикл в графе,
+        и узнали бы мы о нём на карте.
+        """
+        api = self._api()["api"]
+        sid, sampler = next((k, v) for k, v in api.items()
+                            if v["class_type"] == "WanVideoSampler")
+        src_id, slot = sampler["inputs"]["model"]
+        self.assertNotEqual(src_id, sid, "связь указывает на сам узел")
+        self.assertEqual(api[src_id]["class_type"], "WanVideoSetBlockSwap")
+        self.assertEqual(slot, 0)
+        emb_id, _ = sampler["inputs"]["image_embeds"]
+        self.assertEqual(api[emb_id]["class_type"], "WanVideoAnimateEmbeds")
+
+    def test_the_dropped_widgets_are_named_in_the_report(self):
+        """Иначе константа с именем дорисованного виджета — украшение.
+
+        Первая версия сверяла отчёт с `fk.UI_ONLY_AFTER_SEED` — то есть с
+        импортом из проверяемого модуля, — и мутация имени пережила её ровно
+        поэтому: ожидаемое поехало вместе с кодом (Т2). Здесь литерал: так
+        зовут виджет во фронтенде ComfyUI, и переименовать его у себя мы не
+        вправе.
+        """
+        dropped = " ".join(self._api()["dropped_ui_widgets"])
+        self.assertIn("control_after_generate", dropped)
+
+    def test_only_the_file_taking_nodes_carry_an_upload_button(self):
+        """Литералы (Т2): расширить список молча значит съесть чужое значение."""
+        self.assertEqual(set(fk.UI_UPLOAD_NODES), {"LoadImage", "LoadVideo"})
+
+    def test_a_string_where_an_integer_is_declared_is_a_failure(self):
+        graph = fk.derive_wrapper()
+        node = next(n for n in graph["graph"]["nodes"]
+                    if n["type"] == "WanVideoDecode")
+        node["widgets_values"][1] = "272"          # tile_x объявлен INT
+        got = fk.to_api(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("tile_x", got["problems"][0])
+
+    def test_a_boolean_where_an_integer_is_declared_is_a_failure(self):
+        """True в Python — целое; без явной проверки это пролезает."""
+        graph = fk.derive_wrapper()
+        node = next(n for n in graph["graph"]["nodes"]
+                    if n["type"] == "WanVideoDecode")
+        node["widgets_values"][1] = True
+        self.assertEqual(fk.to_api(graph)["outcome"], fk.FAIL)
+
+    def test_the_widget_values_land_under_their_own_names(self):
+        """Литералы (Т2). Съедет разбор — тест покраснеет, а не поедет следом."""
+        api = self._api()["api"]
+        sampler = next(n for n in api.values()
+                       if n["class_type"] == "WanVideoSampler")
+        self.assertEqual(sampler["inputs"]["steps"], 3)
+        self.assertEqual(sampler["inputs"]["scheduler"], "dpm++_sde")
+        self.assertEqual(sampler["inputs"]["riflex_freq_index"], 0)
+
+    def test_the_interface_only_widgets_are_dropped(self):
+        """Не выкинув их, мы сдвинули бы ВСЕ последующие значения на позицию.
+
+        Две штуки дорисовывает фронтенд: `control_after_generate` после
+        целого виджета `seed` (у нас всплыло на сэмплере — 14 значений против
+        13 объявленных) и кнопка загрузки у нод, принимающих файл.
+        """
+        got = self._api()
+        self.assertEqual(len(got["dropped_ui_widgets"]), 6)
+        api = got["api"]
+        sampler = next(n for n in api.values()
+                       if n["class_type"] == "WanVideoSampler")
+        self.assertNotIn("fixed", sampler["inputs"].values())
+        self.assertIs(sampler["inputs"]["force_offload"], True,
+                      "после зерна не выкинуто дорисованное — значение "
+                      "уехало на позицию вправо")
+
+    def test_a_type_that_does_not_match_the_declaration_is_a_failure(self):
+        """Негативный контроль (И5) на настоящем дефекте.
+
+        Именно так нашлось, что `batched_cfg` (BOOLEAN) получал пустую строку:
+        в формате UI имён нет, и значение просто лежало в списке.
+        """
+        graph = fk.derive_wrapper()
+        node = next(n for n in graph["graph"]["nodes"]
+                    if n["type"] == "WanVideoSampler")
+        node["widgets_values"][9] = "не булево"
+        got = fk.to_api(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIsNone(got["api"], "негодный перевод отдан наружу")
+        self.assertIn("batched_cfg", got["problems"][0])
+
+    def test_an_unknown_node_type_is_unmeasured_not_guessed(self):
+        """Позиционная догадка стоит не ошибки сборки, а неверного ролика."""
+        graph = fk.derive_wrapper()
+        graph["graph"]["nodes"][0]["type"] = "ЧегоТакогоНетВРеестре"
+        got = fk.to_api(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("не разобран", got["problems"][0])
+
+    def test_too_many_values_are_refused_rather_than_truncated(self):
+        graph = fk.derive_wrapper()
+        node = next(n for n in graph["graph"]["nodes"]
+                    if n["type"] == "WanVideoDecode")
+        node["widgets_values"].extend([1, 2, 3])
+        got = fk.to_api(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+
+    def test_something_that_is_not_a_ui_graph_is_unmeasured(self):
+        got = fk.to_api({"нет": "узлов"})
+        self.assertEqual(got["outcome"], fk.UNMEASURED,
+                         "ноль ошибок при нуле переведённого прочтено как "
+                         "успех — Р2 нарушено")
+
+    def test_the_widget_names_come_from_hashed_sources(self):
+        """Ц10: внешнее имя доказывается командой, а не памятью модели."""
+        self.assertGreaterEqual(len(fk.WIDGET_SOURCES), 7)
+        for name, sha in fk.WIDGET_SOURCES.items():
+            with self.subTest(source=name):
+                self.assertRegex(sha, r"^[0-9a-f]{64}$")
+
+    def test_every_node_type_the_builder_uses_has_proven_names(self):
+        """Иначе новый узел проедет в граф, а перевод его молча не осилит."""
+        used = {n["type"] for n in fk.derive_wrapper()["graph"]["nodes"]}
+        missing = sorted(used - set(fk.API_WIDGETS))
+        self.assertEqual(missing, [], f"имён виджетов нет для: {missing}")
+
+
+
 if __name__ == "__main__":
     unittest.main()

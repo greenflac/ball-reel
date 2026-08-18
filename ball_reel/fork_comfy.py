@@ -1900,8 +1900,14 @@ def derive_wrapper(*, seconds: float | None = None,
     w.link(mask_conv, "MASK", embeds, "mask")
 
     sampler = w.node("WanVideoSampler", pack=wrap,
+                     # Порядок и типы сверены с объявлением ноды
+                     # (`API_WIDGETS`, разбор исходника). ~~""~~ на месте
+                     # `batched_cfg` заменено на False 18.08: виджет объявлен
+                     # BOOLEAN, а пустая строка туда попала из шаблона и была
+                     # НЕВИДИМА, пока граф жил в формате UI — там имён нет, и
+                     # значение просто лежит в списке. Нашёл переводчик в API.
                      widgets=[WRAP_STEPS, WRAP_CFG, WRAP_SHIFT, WRAP_SEED,
-                              "fixed", True, WRAP_SCHEDULER, 0, 1.0, "",
+                              "fixed", True, WRAP_SCHEDULER, 0, 1.0, False,
                               "comfy", 0, -1, False],
                      inputs=[("model", "WANVIDEOMODEL"),
                              ("image_embeds", "WANVIDIMAGE_EMBEDS"),
@@ -2211,3 +2217,197 @@ RENDER_KINDS = {
     "wrapper": {"audit": lambda g: audit_wrapper({"graph": g}),
                 "check": check_wrapper_inputs, "length_key": "num_frames"},
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ФОРМАТ UI ПРОТИВ ФОРМАТА API: без этого перевода e2e не запускается
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# НАЙДЕНО 18.08.2026 прямым вызовом: `fork_backend.check_graph` на нашем графе
+# отвечает «граф в формате UI (ключ `nodes` списком), а /prompt принимает
+# формат API». Обе половины были зелёными по отдельности, а стыка не было — тот
+# самый класс, ради которого в проекте заведён сторож достижимости.
+#
+# Формат UI — то, что сохраняет веб-интерфейс: список узлов, отдельный список
+# связей, значения виджетов ПОЗИЦИОННЫМ списком БЕЗ ИМЁН. Формат API — то, что
+# принимает `/prompt`: {"<id>": {"class_type": ..., "inputs": {имя: значение
+# или [id_источника, слот]}}}. Перевод упирается ровно в одно: имена виджетов
+# в UI не хранятся вовсе, их надо знать.
+#
+# ОТКУДА ВЗЯТЫ ИМЕНА. Не из головы и не из наблюдения за интерфейсом, а
+# разбором `INPUT_TYPES`/`define_schema` в ИСХОДНИКАХ самих нод (правило Ц10:
+# существование внешнего имени доказывается командой до того, как оно попало в
+# код). Файлы скачаны и захешированы; два из трёх хешей СОШЛИСЬ с теми, что уже
+# лежали в реестре доказательств этого модуля, — то есть разобран тот же файл,
+# который читала предыдущая смена.
+
+#: Источники имён виджетов: файл -> sha256 тела на 18.08.2026.
+#: Проверяется командой `sha256sum` после `curl`; хеши `nodes.py` и
+#: `nodes_model_loading.py` совпадают с `_SHA_NODES` и `_SHA_LOADING`.
+WIDGET_SOURCES = {
+    "kijai/ComfyUI-WanVideoWrapper@main:nodes.py":
+        "6b3bb6a619e5a928259e6e8400c73ffe7140f17439c5007dd8596b90055f0666",
+    "kijai/ComfyUI-WanVideoWrapper@main:nodes_model_loading.py":
+        "2297aed82d0908505b735e3248f98fc39f815119e4a32c57ee9cf59d4a8a5ba5",
+    "kijai/ComfyUI-WanVideoWrapper@main:nodes_sampler.py":
+        "374e552a2f96e10ddfcb37785718be0ea0dfa34a6551a5930e8963e3bc87630b",
+    "comfyanonymous/ComfyUI@master:nodes.py":
+        "9f9162cc9ec180baad14c082fc61a781fed53baf325046d9853757e4ebd0c4e9",
+    "comfyanonymous/ComfyUI@master:comfy_extras/nodes_video.py":
+        "727653159de9a6e9d5b37b1101d3ece5df7dce8fc6a5a3a1f27e260afcfa6c14",
+    "comfyanonymous/ComfyUI@master:comfy_extras/nodes_mask.py":
+        "f235d52703229b0bb7840cc48f0fffe6b00bf9398e119aa7d7f2fc9f3bdaba12",
+    "city96/ComfyUI-GGUF@main:nodes.py":
+        "16be3b08b13de6279fc432addc628320019fcb24963cbc6b52b248de8f06316e",
+}
+
+#: Тип узла -> (имена виджетов В ПОРЯДКЕ ОБЪЯВЛЕНИЯ, сколько из них обязательны).
+#: ИЗМЕРЕНО 18.08.2026 разбором исходников нод (см. `WIDGET_SOURCES`), а не
+#: списано с интерфейса. Порядок существенен: в формате UI значения лежат
+#: позиционно, и имя им даёт только он.
+API_WIDGETS = {
+    'CLIPLoaderGGUF': ((('clip_name', 'COMBO'), ('type', 'COMBO')), 2),
+    'CLIPTextEncode': ((('text', 'COMBO'), ('clip', 'COMBO')), 2),
+    'CLIPVisionLoader': ((('clip_name', 'COMBO'),), 1),
+    'CreateVideo': ((('fps', 'FLOAT'), ('bit_depth', 'INT')), 1),
+    'GetVideoComponents': ((), 0),
+    'ImageToMask': ((('channel', 'COMBO'),), 1),
+    'LoadImage': ((('image', 'COMBO'),), 1),
+    'LoadVideo': ((('file', 'COMBO'),), 1),
+    'SaveVideo': ((('filename_prefix', 'STRING'), ('format', 'COMBO'), ('codec', 'COMBO')), 3),
+    'WanVideoAnimateEmbeds': ((('width', 'INT'), ('height', 'INT'), ('num_frames', 'INT'), ('force_offload', 'BOOLEAN'), ('frame_window_size', 'INT'), ('colormatch', 'COMBO'), ('pose_strength', 'FLOAT'), ('face_strength', 'FLOAT'), ('tiled_vae', 'BOOLEAN')), 8),
+    'WanVideoBlockSwap': ((('blocks_to_swap', 'INT'), ('offload_img_emb', 'BOOLEAN'), ('offload_txt_emb', 'BOOLEAN'), ('use_non_blocking', 'BOOLEAN'), ('vace_blocks_to_swap', 'INT'), ('prefetch_blocks', 'INT'), ('block_swap_debug', 'BOOLEAN')), 3),
+    'WanVideoClipVisionEncode': ((('strength_1', 'FLOAT'), ('strength_2', 'FLOAT'), ('crop', 'COMBO'), ('combine_embeds', 'COMBO'), ('force_offload', 'BOOLEAN'), ('tiles', 'INT'), ('ratio', 'FLOAT')), 5),
+    'WanVideoDecode': ((('enable_vae_tiling', 'BOOLEAN'), ('tile_x', 'INT'), ('tile_y', 'INT'), ('tile_stride_x', 'INT'), ('tile_stride_y', 'INT'), ('normalization', 'COMBO')), 5),
+    'WanVideoLoraSelectMulti': ((('lora_0', 'COMBO'), ('strength_0', 'FLOAT'), ('lora_1', 'COMBO'), ('strength_1', 'FLOAT'), ('lora_2', 'COMBO'), ('strength_2', 'FLOAT'), ('lora_3', 'COMBO'), ('strength_3', 'FLOAT'), ('lora_4', 'COMBO'), ('strength_4', 'FLOAT'), ('low_mem_load', 'BOOLEAN'), ('merge_loras', 'BOOLEAN')), 10),
+    'WanVideoModelLoader': ((('model', 'COMBO'), ('base_precision', 'COMBO'), ('quantization', 'COMBO'), ('load_device', 'COMBO'), ('attention_mode', 'COMBO'), ('rms_norm_function', 'COMBO')), 4),
+    'WanVideoSampler': ((('steps', 'INT'), ('cfg', 'FLOAT'), ('shift', 'FLOAT'), ('seed', 'INT'), ('force_offload', 'BOOLEAN'), ('scheduler', 'COMBO'), ('riflex_freq_index', 'INT'), ('denoise_strength', 'FLOAT'), ('batched_cfg', 'BOOLEAN'), ('rope_function', 'COMBO'), ('start_step', 'INT'), ('end_step', 'INT'), ('add_noise_to_samples', 'BOOLEAN')), 7),
+    'WanVideoSetBlockSwap': ((), 0),
+    'WanVideoSetLoRAs': ((), 0),
+    'WanVideoTextEmbedBridge': ((), 0),
+    'WanVideoVAELoader': ((('model_name', 'COMBO'), ('precision', 'COMBO'), ('use_cpu_cache', 'BOOLEAN'), ('verbose', 'BOOLEAN')), 1),
+}
+
+#: Каким типам объявленных виджетов какие значения годятся. Проверка дешёвая
+#: и ловит целый класс: значение, попавшее не в тот виджет, чаще всего ещё и
+#: не того типа. Найдено сразу же — `batched_cfg` (BOOLEAN) получал пустую
+#: строку.
+WIDGET_TYPE_OK = {
+    "INT": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "FLOAT": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "BOOLEAN": lambda v: isinstance(v, bool),
+    "STRING": lambda v: isinstance(v, str),
+    "COMBO": lambda v: isinstance(v, (str, int, float, bool)),
+}
+
+#: Виджеты, которых В ОБЪЯВЛЕНИИ НОДЫ НЕТ, а в сохранённом UI-графе они есть.
+#: Их дорисовывает фронтенд ComfyUI, и в формат API они не идут. Не выкинув их,
+#: мы сдвинули бы ВСЕ последующие значения на одну позицию — то есть подали бы
+#: `scheduler` туда, где ждут `force_offload`, и узнали бы об этом по ролику.
+#:
+#: 1. `control_after_generate` — приписывается фронтендом после целого виджета
+#:    с именем `seed`. У нас всплыло на `WanVideoSampler`: 14 значений в графе
+#:    против 13 объявленных, лишнее — строка "fixed" сразу после зерна.
+#: 2. Кнопка загрузки у нод, которые принимают файл: `LoadImage`, `LoadVideo`.
+#:    Там 2 значения против 1 объявленного.
+#: Оба случая — известное поведение интерфейса, а не дефект нашего графа; это
+#: проверено сверкой всех 27 узлов с объявлениями, расхождений больше нет.
+UI_ONLY_AFTER_SEED = "control_after_generate"
+SEED_WIDGETS = ("seed", "noise_seed")
+UI_UPLOAD_NODES = ("LoadImage", "LoadVideo")
+
+
+def api_widget_names(node: dict) -> dict:
+    """Имена виджетов ЭТОГО узла с учётом того, что часть входов уже связана.
+
+    Связанный вход виджетом быть перестаёт: значение придёт по связи, и в
+    позиционном списке его нет. Считать иначе значит сдвинуть весь список.
+    """
+    spec = API_WIDGETS.get(node.get("type"))
+    if spec is None:
+        return {"outcome": UNMEASURED, "names": None, "required": 0,
+                "note": (f"тип {node.get('type')!r} не разобран: имён его "
+                         f"виджетов в реестре нет. Позиционная догадка здесь "
+                         f"запрещена — она молча подаёт значение не в тот вход")}
+    pairs, required = spec
+    linked = {i.get("name") for i in node.get("inputs", [])
+              if i.get("link") is not None}
+    kept = [(n, t) for n, t in pairs if n not in linked]
+    req = sum(1 for n, _ in pairs[:required] if n not in linked)
+    return {"outcome": PASS, "names": [n for n, _ in kept],
+            "types": [t for _, t in kept], "required": req, "note": ""}
+
+
+def _strip_ui_widgets(node: dict, names: list, values: list) -> tuple:
+    """Выкинуть дорисованное интерфейсом. Возвращает (значения, что выкинуто)."""
+    values = list(values)
+    dropped = []
+    if node.get("type") in UI_UPLOAD_NODES and len(values) == len(names) + 1:
+        dropped.append(f"кнопка загрузки {values.pop()!r}")
+    for i, name in enumerate(names):
+        if name in SEED_WIDGETS and len(values) > len(names) and i + 1 < len(values):
+            dropped.append(f"{UI_ONLY_AFTER_SEED} {values.pop(i + 1)!r}")
+    return values, dropped
+
+
+def to_api(graph: dict) -> dict:
+    """Перевести граф из формата UI в формат API. Три исхода, числа рядом.
+
+    НЕ УГАДЫВАЕТ. Узел, для которого имён виджетов нет, или узел, у которого
+    число значений не сходится с объявлением, — это «не смогли перевести», а
+    не «переведём как получится». Позиционная догадка здесь стоит не ошибки
+    сборки, а неверного ролика через двадцать минут счёта на карте.
+    """
+    graph = graph.get("graph", graph)
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        return {"outcome": UNMEASURED, "api": None, "problems": [],
+                "checked": 0, "converted": 0,
+                "note": ("это не граф формата UI: ключа `nodes` списком нет. "
+                         "Ноль ошибок при нуле переведённого — не успех (Р2)")}
+
+    by_link = {l[0]: l for l in _links_of(graph) if len(l) > 4}
+    api, problems, dropped_all = {}, [], []
+    for node in nodes:
+        nid = str(node.get("id"))
+        spec = api_widget_names(node)
+        if spec["outcome"] != PASS:
+            problems.append(spec["note"])
+            continue
+        names, values = spec["names"], list(node.get("widgets_values") or [])
+        values, dropped = _strip_ui_widgets(node, names, values)
+        dropped_all.extend(dropped)
+        if not spec["required"] <= len(values) <= len(names):
+            problems.append(
+                f"{node.get('type')}#{nid}: значений виджетов {len(values)}, а "
+                f"объявлено {spec['required']}..{len(names)} ({', '.join(names)}"
+                f"). Разложить позиционно нельзя — какое значение чьё, "
+                f"неизвестно")
+            continue
+        for name, kind, value in zip(names, spec["types"], values):
+            check = WIDGET_TYPE_OK.get(kind)
+            if check is not None and not check(value):
+                problems.append(
+                    f"{node.get('type')}#{nid}: виджет {name} объявлен {kind}, "
+                    f"а подано {value!r} ({type(value).__name__}). В формате UI "
+                    f"это невидимо — имён там нет, и значение просто лежит "
+                    f"в списке")
+        inputs = dict(zip(names, values))
+        for slot in node.get("inputs", []):
+            link = by_link.get(slot.get("link"))
+            if link is not None:
+                inputs[slot["name"]] = [str(link[1]), link[2]]
+        api[nid] = {"class_type": node.get("type"), "inputs": inputs,
+                    "_meta": {"title": node.get("title") or node.get("type")}}
+
+    return {
+        "outcome": FAIL if problems else (PASS if api else UNMEASURED),
+        "api": api if not problems else None,
+        "problems": problems, "checked": len(nodes), "converted": len(api),
+        "dropped_ui_widgets": dropped_all,
+        "note": (f"узлов в графе {len(nodes)}, переведено {len(api)}, "
+                 f"не смогли {len(problems)}; выкинуто дорисованных "
+                 f"интерфейсом виджетов {len(dropped_all)}"
+                 + ("" if not problems else ": " + "; ".join(problems[:3]))
+                 + ". НЕПРОВЕРЕНО: настоящий ComfyUI этот перевод не принимал"),
+    }
