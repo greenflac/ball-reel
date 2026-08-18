@@ -23,15 +23,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import (fork_build_route, fork_channels, fork_comfy, fork_leak,
-               fork_lora_dataset, fork_mask, fork_preflight, fork_props,
-               fork_seam)
+               fork_lora_attach, fork_lora_dataset, fork_mask, fork_preflight,
+               fork_props, fork_seam)
 from .fork_identity import FAIL, PASS, UNMEASURED
 
 #: Порядок шагов. Дешёвое раньше дорогого (П2): отсутствующий вход ловится за
 #: миллисекунды, а поиск его после снятия условий по сотне кадров стоил бы
 #: всего прогона. Длительность каждого шага печатается.
 STEPS = ("предполёт", "входы", "корзина", "условия", "маски", "предметы",
-         "граф", "протечка", "шов")
+         "граф", "адаптер", "протечка", "шов")
 
 
 def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
@@ -43,6 +43,7 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         grow_px: int = fork_mask.BLOCK,
         quant: str | None = None,
         props: str | Path | None = None,
+        adapter: str | Path | None = None,
         mask_model=None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
@@ -165,6 +166,37 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     except (OSError, ValueError) as exc:
         steps.append(_step("граф", UNMEASURED, str(exc)[:200],
                            time.perf_counter() - t))
+
+    # АДАПТЕР — сразу после графа, потому что имена тензоров модели берутся из
+    # того, что граф собирается грузить, и до всякой генерации: адаптер, который
+    # не приложится, делает бессмысленным весь дорогой прогон. Числовой канал
+    # здесь не работает — он требует трёх настоящих прогонов на карте.
+    t = time.perf_counter()
+    if adapter is None:
+        steps.append(_step("адаптер", UNMEASURED,
+                           "адаптер не подан — проверять нечего. Это НЕ «LoRA "
+                           "не нужна»: базовая линия без адаптера штатна",
+                           time.perf_counter() - t))
+    else:
+        try:
+            keys = fork_lora_attach.read_tensor_names(adapter)
+            static = {
+                "outcome": UNMEASURED,
+                "note": ("имён тензоров модели нет — они снимаются "
+                         "`tools/fork_probe_lora_fit.py` с карты или из сети, "
+                         "а на моке брать их неоткуда"),
+                "dora": fork_lora_attach.dora_readiness(keys)}
+            merged = fork_lora_attach.report(static=static)
+            worst = (FAIL if static["dora"]["outcome"] == FAIL
+                     else merged["outcome"])
+            steps.append(_step(
+                "адаптер", worst,
+                f"ключей в адаптере {len(keys)}. "
+                f"DoRA: {static['dora']['note']} {merged['note']}",
+                time.perf_counter() - t))
+        except (OSError, ValueError) as exc:
+            steps.append(_step("адаптер", FAIL, str(exc)[:200],
+                               time.perf_counter() - t))
 
     # Протечка на моке НЕ ИЗМЕРЯЕТСЯ, и это не пропуск: сравнивать выход с
     # драйвингом можно только когда выход есть, а генерации в спринте нет.
