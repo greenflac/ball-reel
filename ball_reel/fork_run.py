@@ -23,13 +23,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import (fork_build_route, fork_channels, fork_comfy, fork_leak,
-               fork_lora_dataset, fork_mask, fork_preflight, fork_seam)
+               fork_lora_dataset, fork_mask, fork_preflight, fork_props,
+               fork_seam)
 from .fork_identity import FAIL, PASS, UNMEASURED
 
 #: Порядок шагов. Дешёвое раньше дорогого (П2): отсутствующий вход ловится за
 #: миллисекунды, а поиск его после снятия условий по сотне кадров стоил бы
 #: всего прогона. Длительность каждого шага печатается.
-STEPS = ("предполёт", "входы", "корзина", "условия", "маски",
+STEPS = ("предполёт", "входы", "корзина", "условия", "маски", "предметы",
          "граф", "протечка", "шов")
 
 
@@ -41,6 +42,7 @@ def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
 def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         grow_px: int = fork_mask.BLOCK,
         quant: str | None = None,
+        props: str | Path | None = None,
         mask_model=None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
@@ -109,6 +111,36 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         steps.append(_step("маски", UNMEASURED,
                            bodyparts.why_unavailable().split(".")[0],
                            time.perf_counter() - t))
+
+    # ПРЕДМЕТЫ — сразу после масок, потому что они правят ИМЕННО маску, и до
+    # графа, потому что граф эту маску получает. Разметка снимается на сборке
+    # темплейта руками оператора и переиспользуется всеми клиентами: драйвинг у
+    # темплейта один. Её отсутствие — не провал, а «нечего применять».
+    t = time.perf_counter()
+    if props is None:
+        steps.append(_step("предметы", UNMEASURED,
+                           "разметка предметов не подана — предметы остаются "
+                           "там, куда их отнёс сегментатор тела, а он относит "
+                           "предмет в руке к персонажу классом `others`",
+                           time.perf_counter() - t))
+    elif masks is None:
+        steps.append(_step("предметы", UNMEASURED,
+                           "масок нет — размечать поверх нечего",
+                           time.perf_counter() - t))
+    else:
+        try:
+            # Маски берутся ФАЙЛАМИ из каталога, куда их положил шаг выше:
+            # `fork_mask.sequence` пишет на диск и массивов не возвращает.
+            # Первая версия звала `masks["masks"]` и падала в KeyError, а шаг
+            # печатал провал — то есть отчёт врал бы про разметку, которой
+            # ничто не мешало отработать.
+            written = sorted(Path(masks["dir"]).glob("*.png"))
+            marked = fork_props.sequence(props, written)
+            steps.append(_step("предметы", marked["outcome"], marked["note"],
+                               time.perf_counter() - t))
+        except (OSError, ValueError, KeyError) as exc:
+            steps.append(_step("предметы", FAIL, str(exc)[:200],
+                               time.perf_counter() - t))
 
     t = time.perf_counter()
     try:
