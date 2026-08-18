@@ -20,7 +20,15 @@
 — чужая ступень, и этот файл её не трогает.
 
 ФИКСТУРЫ С ОБОИХ КРАЁВ И ИЗ СЕРЕДИНЫ (Т3): файл ровного размера, на байт
-меньше, на байт больше, файла нет вовсе.
+меньше, на байт больше, файла нет вовсе. Для оперативной памяти — четыре:
+вдоволь, впритык (влезает, но меньше запаса), не хватает, `/proc/meminfo` нет.
+
+ОПЕРАТИВНАЯ ПАМЯТЬ ТОЖЕ НЕ БЕРЁТСЯ С МАШИНЫ (Т4). `/proc/meminfo` подменяется
+параметром `meminfo` — такой же явной точкой внедрения, как `smi`. Без неё
+тест «памяти хватает» зеленел бы на большой машине и краснел на маленькой,
+то есть мерил бы раннер, а не код. Числа ОЗУ ниже — литералы, посчитанные
+отдельно: 10.71 ГиБ Q4_K_M × 0.935092 / 40 блоков × 38 свопнутых = 9.51 ГиБ,
+плюс запас 4.0 = 13.51 ГиБ (Т2).
 """
 
 from __future__ import annotations
@@ -55,6 +63,49 @@ def smi_says(text):
 def smi_absent():
     """НЕГАТИВНЫЙ КОНТРОЛЬ (И5): утилиты нет, спросить нечем."""
     return lambda: {"text": None, "why": "nvidia-smi не найден: спросить нечем"}
+
+
+#: Литералы ОЗУ (Т2). Ни одно число не импортировано из проверяемого кода:
+#: 10.71 × 0.935092 = 10.0148; / 40 = 0.25037 на блок; × 38 = 9.5141 -> 9.51.
+RAM_NEED_GIB = 9.51
+RAM_NEED_WITH_MARGIN_GIB = 13.51
+KB_PER_GIB = 1048576  # 2**30 / 1024: единица «kB» в /proc/meminfo — кибибайт
+
+
+def meminfo_text(total_kb: int, avail_kb: int, free_kb: int | None = None,
+                 *, with_available: bool = True) -> str:
+    """`/proc/meminfo` в том виде, в каком его печатает ядро."""
+    free = total_kb // 8 if free_kb is None else free_kb
+    lines = [f"MemTotal:       {total_kb} kB",
+             f"MemFree:        {free} kB"]
+    if with_available:
+        lines.append(f"MemAvailable:   {avail_kb} kB")
+    lines += ["Buffers:           54796 kB", "Cached:          2318640 kB"]
+    return "\n".join(lines) + "\n"
+
+
+def meminfo_says(total_gib: float, avail_gib: float, free_gib=None,
+                 **kw):
+    """Точка внедрения вместо чтения /proc/meminfo (Т4)."""
+    text = meminfo_text(round(total_gib * KB_PER_GIB),
+                        round(avail_gib * KB_PER_GIB),
+                        None if free_gib is None else round(free_gib * KB_PER_GIB),
+                        **kw)
+    return lambda: {"text": text, "why": ""}
+
+
+def meminfo_raw(text):
+    return lambda: {"text": text, "why": ""}
+
+
+def meminfo_absent():
+    """НЕГАТИВНЫЙ КОНТРОЛЬ (И5): /proc/meminfo нет — спросить нечем."""
+    return lambda: {"text": None, "why": "/proc/meminfo не прочитан"}
+
+
+#: Машина, на которой памяти ВДОВОЛЬ. Отдельным именем, потому что её
+#: подставляют все сквозные проверки отчёта: без неё они мерили бы раннер.
+MEMINFO_PLENTY = lambda: meminfo_says(128.0, 100.0)()
 
 
 def write_lock(dirpath: Path, entries=None) -> Path:
@@ -276,6 +327,142 @@ class TheCardStepMustSayCannotRatherThanNoCard(unittest.TestCase):
         self.assertEqual(got["outcome"], FAIL)
 
 
+class TheRamStepIsTheRequirementBlockswapCreated(unittest.TestCase):
+    """Блоксвоп не убрал 9.51 ГиБ — он перенёс их с карты в ОЗУ машины.
+
+    Т3, четыре фикстуры: вдоволь / впритык / не хватает / спросить нечем.
+    И5 в обе стороны: есть вход, где ступень ОБЯЗАНА сказать «годно», и вход,
+    где ОБЯЗАНА сказать «негодно».
+    """
+
+    def test_a_machine_with_plenty_of_ram_reads_as_good(self):
+        """И5, сторона «обязана шевельнуться в плюс»."""
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0))
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertEqual(got["need_gib"], RAM_NEED_GIB)
+        self.assertEqual(got["total_gib"], 128.0)
+        self.assertEqual(got["available_gib"], 100.0)
+
+    def test_a_machine_without_enough_ram_reads_as_not_good(self):
+        """И5, сторона «обязана сказать нет»: 4 ГиБ против требуемых 9.51."""
+        got = st.ram(meminfo=meminfo_says(8.0, 4.0))
+        self.assertEqual(got["outcome"], FAIL, got["note"])
+        self.assertIn("НЕ ХВАТАЕТ", got["note"])
+        self.assertEqual(got["left_gib"], round(4.0 - RAM_NEED_GIB, 3))
+
+    def test_ram_that_fits_but_leaves_less_than_the_margin_is_not_good(self):
+        """СЕРЕДИНА (Т3): 11 ГиБ больше требуемых 9.51 и меньше 13.51.
+
+        Это и есть машина, ради которой ступень написана: арифметически
+        влезает, а на деле уйдёт в своп на диск. «Влезает» здесь не годно.
+        """
+        got = st.ram(meminfo=meminfo_says(16.0, 11.0))
+        self.assertEqual(got["outcome"], FAIL, got["note"])
+        self.assertGreater(got["available_gib"], got["need_gib"])
+        self.assertLess(got["available_gib"], RAM_NEED_WITH_MARGIN_GIB)
+
+    def test_no_meminfo_is_unmeasured_and_never_no_memory(self):
+        """Р1/И5: главный негативный контроль ступени. Не Linux — не отказ."""
+        got = st.ram(meminfo=meminfo_absent())
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertNotEqual(got["outcome"], FAIL)
+        # Требование посчитано даже там, где машину спросить нечем: человек
+        # обязан узнать ЧИСЛО, под которое ему выбирать машину.
+        self.assertEqual(got["need_gib"], RAM_NEED_GIB)
+
+    def test_the_available_field_is_read_and_not_the_free_one(self):
+        """Разница между MemFree и MemAvailable — гигабайты, и она решает.
+
+        Сервер, который только что скачал 18 ГиБ весов, показывает почти
+        нулевой MemFree при полностью свободной памяти: весь кэш забит этими
+        весами. По MemFree такая машина была бы забракована.
+        """
+        cached = st.ram(meminfo=meminfo_says(128.0, 100.0, free_gib=0.5))
+        self.assertEqual(cached["outcome"], PASS, cached["note"])
+        self.assertEqual(cached["available_gib"], 100.0)
+        # И обратная сторона: большой MemFree не спасает малый MemAvailable.
+        lying = st.ram(meminfo=meminfo_says(128.0, 4.0, free_gib=100.0))
+        self.assertEqual(lying["outcome"], FAIL, lying["note"])
+
+    def test_a_kernel_without_memavailable_is_unmeasured_not_substituted(self):
+        """MemAvailable появился в ядре 3.14. Подставить MemFree — соврать."""
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0, free_gib=100.0,
+                                          with_available=False))
+        self.assertEqual(got["outcome"], UNMEASURED, got["note"])
+        self.assertIsNone(got["available_gib"])
+        self.assertIn("MemFree", got["note"])
+
+    def test_an_unknown_step_cannot_be_priced_and_says_so(self):
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0), step="Q9_K_XXL")
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["need_gib"])
+
+    def test_an_impossible_block_count_is_unmeasured(self):
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0), blocks=41)
+        self.assertEqual(got["outcome"], UNMEASURED, got["note"])
+
+    def test_without_blockswap_the_requirement_collapses_to_zero(self):
+        """Негативный контроль формулы (И5): нет свопа — нечему быть в ОЗУ."""
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0), blocks=0)
+        self.assertEqual(got["need_gib"], 0.0)
+        self.assertIn("БЛОКСВОП ВЫКЛЮЧЕН", got["note"])
+
+    def test_a_lighter_step_needs_less_ram(self):
+        """Требование обязано ЗАВИСЕТЬ от ступени, а не быть вписанным."""
+        heavy = st.ram(meminfo=meminfo_says(128.0, 100.0), step="Q4_K_M")
+        light = st.ram(meminfo=meminfo_says(128.0, 100.0), step="Q3_K_M")
+        self.assertGreater(heavy["need_gib"], light["need_gib"])
+        # Литерал: 8.04 × 0.935092 / 40 × 38 = 7.1418 -> 7.14 (Т2).
+        self.assertEqual(light["need_gib"], 7.14)
+
+    def test_the_numbers_are_numbers_and_not_a_flag(self):
+        """Р2/Е3: частичный результат печатается числами."""
+        got = st.ram(meminfo=meminfo_says(16.0, 14.0))
+        for key in ("total_gib", "available_gib", "need_gib", "left_gib",
+                    "margin_gib"):
+            self.assertIsInstance(got[key], float, key)
+
+    def test_meminfo_kilobytes_are_kibibytes(self):
+        """Подпись «kB» в /proc/meminfo врёт, число нет: делитель 1024."""
+        vals = st.parse_meminfo("MemTotal:       1048576 kB\n")
+        self.assertEqual(vals["MemTotal"], 1073741824)
+
+    def test_the_shipped_meminfo_path_is_the_one_the_kernel_uses(self):
+        """Сторож на ОТГРУЖАЕМОМ значении, который сам его НЕ ПОДМЕНЯЕТ.
+
+        Мутация `MEMINFO_PATH` на несуществующий путь ПЕРЕЖИЛА первый заход:
+        единственный тест этой константы сам её и мутировал, поэтому исходное
+        значение не сторожил никто, и приёмка на любой машине честно говорила
+        бы «не смогли» — то есть тихо перестала бы проверять ОЗУ вообще. Это
+        ровно тот дефект, что уже был на `DISK_MARGIN_GIB`.
+
+        Здесь два assert, и ни один не skip (Т6): литерал написан руками (Т2),
+        а на Linux дополнительно проверяется, что по этому пути действительно
+        отвечает ядро.
+        """
+        import sys
+        self.assertEqual(st.MEMINFO_PATH, "/proc/meminfo")
+        got = st.read_meminfo()
+        if sys.platform.startswith("linux"):
+            self.assertIsNotNone(got["text"],
+                                 "на Linux по этому пути обязано читаться")
+            self.assertIn("MemAvailable", got["text"])
+        else:
+            self.assertIsNone(got["text"])
+            self.assertIn("НЕ «памяти нет»", got["why"])
+
+    def test_the_real_reader_reports_cannot_when_the_path_is_absent(self):
+        """Ветка «файла нет» — проверяется подменой, без ухода с машины."""
+        original = st.MEMINFO_PATH
+        try:
+            st.MEMINFO_PATH = "/нет/такого/meminfo"
+            got = st.read_meminfo()
+            self.assertIsNone(got["text"])
+            self.assertIn("НЕ «памяти нет»", got["why"])
+        finally:
+            st.MEMINFO_PATH = original
+
+
 class TheDecisionConstantsAreGuardedInBothDirections(unittest.TestCase):
     """Т1: каждая константа-решение мутируется строже И слабее."""
 
@@ -348,6 +535,46 @@ class TheDecisionConstantsAreGuardedInBothDirections(unittest.TestCase):
             self.assertEqual(st.disk(done, tmp.name)["outcome"], FAIL)
         finally:
             st.DISK_MARGIN_GIB = original
+
+    def test_the_ram_margin_is_guarded(self):
+        """Т1: запас ОЗУ мутируется слабее И строже, оба раза наблюдаемо."""
+        original = st.RAM_MARGIN_GIB
+        try:
+            # Слабее: без запаса машина «впритык» становится годной.
+            st.RAM_MARGIN_GIB = 0.0
+            self.assertEqual(st.ram(meminfo=meminfo_says(16.0, 11.0))["outcome"],
+                             PASS)
+            # Строже: машина, годная при отгружаемом запасе, перестаёт быть.
+            st.RAM_MARGIN_GIB = 100.0
+            self.assertEqual(st.ram(meminfo=meminfo_says(128.0, 100.0))["outcome"],
+                             FAIL)
+        finally:
+            st.RAM_MARGIN_GIB = original
+
+    def test_the_shipped_ram_margin_is_bracketed_from_both_sides(self):
+        """Сторож на ОТГРУЖАЕМОМ значении, который сам его НЕ ПОДМЕНЯЕТ.
+
+        Ровно та дыра, что уже была на `DISK_MARGIN_GIB`: единственный тест
+        константы сам её и мутировал, поэтому исходные 5.0 не сторожил никто, и
+        мутация в ноль пережила аудит. Здесь запас зажат с двух сторон
+        литералами: при 13.4 ГиБ доступных ступень ОБЯЗАНА сказать «негодно»
+        (значит запас больше 3.89), при 13.6 — «годно» (значит не больше 4.09).
+        Любая мутация 4.0 наружу этого коридора красит один из двух assert.
+        """
+        self.assertEqual(st.ram(meminfo=meminfo_says(16.0, 13.4))["outcome"],
+                         FAIL, "13.4 ГиБ — меньше 9.51 + запас")
+        self.assertEqual(st.ram(meminfo=meminfo_says(16.0, 13.6))["outcome"],
+                         PASS, "13.6 ГиБ — больше 9.51 + запас")
+
+    def test_the_swapped_block_count_comes_from_the_graph(self):
+        """Е1: число блоков не вписано в приёмку, а взято из `fork_comfy`.
+
+        Литерал 38 (Т2). Краснеет ОСМЫСЛЕННО: граф сменил blocks_to_swap —
+        требование к ОЗУ изменилось, посмотри, нарочно ли.
+        """
+        got = st.ram(meminfo=meminfo_says(128.0, 100.0))
+        self.assertEqual(got["blocks"], 38)
+        self.assertIn("38 из 40", got["note"])
 
     def test_the_required_pack_list_is_guarded(self):
         tmp = tempfile.TemporaryDirectory()
@@ -568,7 +795,8 @@ class TheVerdictIsNumbersAndThreeOutcomes(unittest.TestCase):
                                            encoding="utf-8")
         return dict(root=str(self.root), models_dir=str(models),
                     comfy_root=str(self.root / "ComfyUI"),
-                    smi=smi_says(SMI_A16), step="Q3_K_M", length=49)
+                    smi=smi_says(SMI_A16), meminfo=meminfo_says(128.0, 100.0),
+                    step="Q3_K_M", length=49)
 
     def test_a_good_machine_is_good_and_the_exit_code_is_zero(self):
         rep = st.report(**self._good_machine())
@@ -632,12 +860,47 @@ class TheVerdictIsNumbersAndThreeOutcomes(unittest.TestCase):
         rep = st.report(**self._good_machine())
         order = [s["name"] for s in rep["steps"]]
         self.assertEqual(order,
-                         ["реестр", "размеры", "место", "узлы", "карта", "sha256"])
+                         ["оперативка", "реестр", "размеры", "место", "узлы",
+                          "карта", "sha256"])
+
+    def test_a_machine_short_on_ram_fails_the_whole_acceptance(self):
+        """Ступень доезжает до вердикта, а не остаётся числом внутри.
+
+        Машина с четырьмя A16, всеми весами и всеми паками — и 11 ГиБ ОЗУ.
+        До этой ступени она проходила приёмку целиком и падала на первом
+        прогоне. Теперь это код возврата 1 и имя ступени в отчёте.
+        """
+        args = self._good_machine()
+        args["meminfo"] = meminfo_says(16.0, 11.0)
+        rep = st.report(**args)
+        self.assertEqual(rep["outcome"], FAIL, rep["note"])
+        self.assertEqual(st.EXIT_CODES[rep["outcome"]], 1)
+        self.assertIn("оперативка", rep["failed_names"])
+
+    def test_a_machine_without_meminfo_is_unmeasured_not_failed(self):
+        """Р1 сквозь весь прибор: не-Linux — это двойка, а не единица."""
+        args = self._good_machine()
+        args["meminfo"] = meminfo_absent()
+        rep = st.report(**args)
+        self.assertEqual(rep["outcome"], UNMEASURED, rep["note"])
+        self.assertEqual(st.EXIT_CODES[rep["outcome"]], 2)
+        self.assertIn("оперативка", rep["unmeasured_names"])
+        self.assertEqual(rep["failed"], 0)
+
+    def test_the_report_counts_seven_steps_now(self):
+        """Р2: арифметика счётчиков считает ступени, а не помнит их число."""
+        rep = st.report(**self._good_machine())
+        self.assertEqual(len(rep["steps"]), 7)
+        self.assertEqual(rep["passed"] + rep["failed"] + rep["unmeasured"]
+                         + rep["skipped"], 7)
+        self.assertIn("ступеней 7", rep["note"])
+        self.assertIn("оперативка", st.render(rep))
 
     def test_an_empty_machine_says_cannot_rather_than_good(self):
         empty = tempfile.TemporaryDirectory()
         self.addCleanup(empty.cleanup)
-        rep = st.report(root=empty.name, smi=smi_absent())
+        rep = st.report(root=empty.name, smi=smi_absent(),
+                        meminfo=meminfo_absent())
         self.assertEqual(rep["outcome"], UNMEASURED)
         self.assertEqual(rep["passed"], 0, rep["note"])
         self.assertGreater(rep["unmeasured"], 0)
