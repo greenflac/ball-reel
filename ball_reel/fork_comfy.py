@@ -2267,7 +2267,14 @@ WIDGET_SOURCES = {
 #: позиционно, и имя им даёт только он.
 API_WIDGETS = {
     'CLIPLoaderGGUF': ((('clip_name', 'COMBO'), ('type', 'COMBO')), 2),
-    'CLIPTextEncode': ((('text', 'COMBO'), ('clip', 'COMBO')), 2),
+    # `clip` СНЯТ 18.08: он вход-связь, а не виджет. Разбор исходника принял
+    # его за виджет (в новом API ноды объявлены `io.Clip.Input`, и мой парсер
+    # свёл незнакомый вид к COMBO). Поймано сверкой с ЭТАЛОНОМ владельца —
+    # `workflows/fork_widget_names.reference.json`, где фронтенд ComfyUI сам
+    # называет виджеты: у `CLIPTextEncode` он знает ровно один, `text`.
+    # В нашем графе `clip` всегда связан, поэтому дефект ничего не сломал; но
+    # развяжи его кто-нибудь — и в него уехало бы значение промта.
+    'CLIPTextEncode': ((('text', 'STRING'),), 1),
     'CLIPVisionLoader': ((('clip_name', 'COMBO'),), 1),
     'CreateVideo': ((('fps', 'FLOAT'), ('bit_depth', 'INT')), 1),
     'GetVideoComponents': ((), 0),

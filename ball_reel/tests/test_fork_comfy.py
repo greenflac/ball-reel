@@ -2102,5 +2102,132 @@ class TheGraphIsTranslatedIntoWhatTheServerAccepts(unittest.TestCase):
 
 
 
+
+
+class TheWidgetNamesAgreeWithARealComfyExport(unittest.TestCase):
+    """ВТОРОЙ независимый источник имён, и он обязан сойтись с первым.
+
+    Первый — разбор исходников нод. Второй — настоящий экспорт ComfyUI,
+    присланный владельцем: его фронтенд кладёт рядом с позиционным списком
+    ещё и `widgets_values_named`, то есть сам называет каждое значение.
+    Два источника, снятых разными способами; расхождение между ними — это
+    находка, а не шум. Так и вышло: `clip` у `CLIPTextEncode` разбор принял
+    за виджет, а эталон знает у него ровно один — `text`.
+    """
+
+    REF = Path("workflows/fork_widget_names.reference.json")
+
+    def setUp(self):
+        if not self.REF.exists():
+            self.skipTest(f"нет эталона {self.REF} — сверять не с чем")
+        self.ref = json.loads(self.REF.read_text(encoding="utf-8"))["имена"]
+
+    def test_no_declared_widget_is_missing_from_the_real_export(self):
+        bad = []
+        for node_type, (pairs, _req) in fk.API_WIDGETS.items():
+            theirs = self.ref.get(node_type)
+            if theirs is None:
+                continue
+            for name, _kind in pairs:
+                if name not in theirs:
+                    bad.append(f"{node_type}.{name}")
+        self.assertEqual(bad, [], f"в реестре есть имена, которых настоящий "
+                                  f"ComfyUI не знает: {bad}")
+
+    def test_the_export_confirms_the_upload_pseudo_widget(self):
+        """Именно это правило выкидывает лишнее значение у нод с файлом."""
+        self.assertIn("upload", self.ref["LoadImage"])
+
+    def test_the_export_confirms_control_after_generate_follows_the_seed(self):
+        """Независимое подтверждение правила, найденного на нашем сэмплере."""
+        ksampler = self.ref["KSamplerAdvanced"]
+        self.assertEqual(ksampler[ksampler.index("noise_seed") + 1],
+                         "control_after_generate")
+
+    def test_the_reference_covers_enough_to_be_worth_calling_a_check(self):
+        self.assertGreaterEqual(len(self.ref), 10,
+                                "эталон слишком мал — сверка ничего не ловит")
+
+
+
+
+
+class TheApiFormatMatchesARealComfyExport(unittest.TestCase):
+    """ЭТАЛОН формата API: настоящий экспорт `Export (API)`, присланный
+    владельцем 18.08.2026 (`workflows/fork_api_format.reference.json`,
+    sha256 9ac395ac57fc0e66…, 32 узла).
+
+    До него формат был известен по документации и по чтению `server.py`.
+    Теперь есть образец, сделанный самим ComfyUI, — и три наших правила
+    подтверждаются им НЕЗАВИСИМО, а не нашими же рассуждениями.
+    """
+
+    REF = Path("workflows/fork_api_format.reference.json")
+
+    def setUp(self):
+        if not self.REF.exists():
+            self.skipTest(f"нет эталона {self.REF}")
+        self.ref = json.loads(self.REF.read_text(encoding="utf-8"))
+
+    def test_our_records_have_the_same_shape_as_the_real_ones(self):
+        theirs = {k for node in self.ref.values() for k in node}
+        ours = {k for node in fk.to_api(fk.derive_wrapper())["api"].values()
+                for k in node}
+        self.assertEqual(ours, theirs)
+
+    def test_the_real_export_has_no_control_after_generate(self):
+        """Подтверждение выкидывания дорисованного — не наше рассуждение.
+
+        В формате интерфейса эта строка у `KSamplerAdvanced` стоит сразу за
+        зерном (видно в `fork_widget_names.reference.json`). В формате API её
+        нет ни у одного узла. Значит правило верное, и проверено оно образцом,
+        а не нами.
+        """
+        self.assertNotIn("control_after_generate",
+                         {k for n in self.ref.values() for k in n["inputs"]})
+
+    def test_the_real_export_has_no_upload_widget_either(self):
+        loaders = [n for n in self.ref.values()
+                   if n["class_type"] == "LoadImage"]
+        self.assertTrue(loaders, "в эталоне нет LoadImage — проверка ищет не то")
+        self.assertEqual(set(loaders[0]["inputs"]), {"image"})
+
+    def test_links_are_written_the_same_way_we_write_them(self):
+        pairs = [v for n in self.ref.values() for v in n["inputs"].values()
+                 if isinstance(v, list) and len(v) == 2]
+        self.assertTrue(pairs)
+        for src, slot in pairs:
+            with self.subTest(link=(src, slot)):
+                self.assertIsInstance(src, str)
+                self.assertIsInstance(slot, int)
+
+    def test_the_backend_accepts_the_real_export(self):
+        """Негативный контроль наоборот: прибор обязан пропускать годное.
+
+        `check_graph` мы писали, глядя на свой граф. Если бы он браковал
+        настоящий экспорт ComfyUI, это значило бы, что он проверяет наши
+        привычки, а не формат.
+        """
+        from ball_reel import fork_backend
+
+        self.assertEqual(fork_backend.check_graph(self.ref), [])
+
+    def test_no_widget_in_the_real_export_is_unknown_to_our_registry(self):
+        """Расхождение здесь — находка: либо у нас лишнее имя, либо не хватает."""
+        bad = []
+        for nid, node in self.ref.items():
+            spec = fk.API_WIDGETS.get(node["class_type"])
+            if spec is None:
+                continue
+            ours = {n for n, _ in spec[0]}
+            theirs = {k for k, v in node["inputs"].items()
+                      if not (isinstance(v, list) and len(v) == 2)}
+            extra = theirs - ours
+            if extra:
+                bad.append(f"{node['class_type']}#{nid}: {sorted(extra)}")
+        self.assertEqual(bad, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()

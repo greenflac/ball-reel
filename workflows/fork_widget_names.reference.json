@@ -1,0 +1,95 @@
+{
+  "_зачем": "ЭТАЛОН ИМЁН ВИДЖЕТОВ, снятый не с исходников, а с настоящего экспорта ComfyUI. Владелец прислал воркфлоу Wan2.2 i2v 18.08.2026; его фронтенд (версия ue_properties 7.7/7.1) кладёт рядом с позиционным списком `widgets_values` ещё и `widgets_values_named` — имя каждого значения. Это НЕЗАВИСИМАЯ проверка реестра `fork_comfy.API_WIDGETS`, собранного разбором исходников: два источника, и они обязаны сходиться.",
+  "_источник": "экспорт владельца, video_wan2_2_14B_i2v.json",
+  "_sha256_файла": "8d5630eb895ee51f7f567119a87e2227ce2f083e77c1385094ae758c6ef4c056",
+  "_снято": "2026-08-18",
+  "_чего_он_НЕ_доказывает": "Это формат ИНТЕРФЕЙСА, не API. Он подтверждает ИМЕНА виджетов и то, какие из них дорисовывает фронтенд, но не подтверждает, что наш переведённый граф примет сервер. Для этого нужен экспорт Export (API).",
+  "имена": {
+    "MarkdownNote": [
+      "text"
+    ],
+    "LoadImage": [
+      "image",
+      "upload"
+    ],
+    "SaveVideo": [
+      "filename_prefix",
+      "format",
+      "codec"
+    ],
+    "84e2cf3f-de93-40ef-ab22-b9375296917b": [
+      "text",
+      "width",
+      "height",
+      "value_1",
+      "noise_seed",
+      "unet_name",
+      "lora_name",
+      "unet_name_1",
+      "lora_name_1",
+      "clip_name",
+      "vae_name",
+      "value"
+    ],
+    "WanImageToVideo": [
+      "width",
+      "height",
+      "length",
+      "batch_size"
+    ],
+    "CreateVideo": [
+      "fps",
+      "bit_depth"
+    ],
+    "ModelSamplingSD3": [
+      "shift"
+    ],
+    "CLIPTextEncode": [
+      "text"
+    ],
+    "PrimitiveInt": [
+      "value",
+      "fixed"
+    ],
+    "PrimitiveBoolean": [
+      "value"
+    ],
+    "VAELoader": [
+      "vae_name"
+    ],
+    "CLIPLoader": [
+      "clip_name",
+      "type",
+      "device"
+    ],
+    "UNETLoader": [
+      "unet_name",
+      "weight_dtype"
+    ],
+    "PrimitiveFloat": [
+      "value"
+    ],
+    "LoraLoaderModelOnly": [
+      "lora_name",
+      "strength_model"
+    ],
+    "KSamplerAdvanced": [
+      "add_noise",
+      "noise_seed",
+      "control_after_generate",
+      "steps",
+      "cfg",
+      "sampler_name",
+      "scheduler",
+      "start_at_step",
+      "end_at_step",
+      "return_with_leftover_noise"
+    ],
+    "ComfySwitchNode": [
+      "switch"
+    ],
+    "ComfyMathExpression": [
+      "expression"
+    ]
+  }
+}
