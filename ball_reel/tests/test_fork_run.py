@@ -648,5 +648,72 @@ class TheOperatorEntryPoint(unittest.TestCase):
                       "числа проверяльщика до отчёта не доехали")
 
 
+
+
+class TheOrderedLengthMustFitTheDrivingWeHave(unittest.TestCase):
+    """Найдено на НАСТОЯЩЕМ материале репозитория, а не рассуждением.
+
+    В `demo/bench/driving` лежит 96 кадров. Пол продукта — пять секунд. При
+    30 к/с это 149 кадров, и граф просил бы у модели 53 кадра позы, которых
+    никто не снимал. Пол тихо превращался в требование дорисовать движение.
+    """
+
+    def test_ninety_six_frames_do_not_cover_the_five_second_floor(self):
+        got = fork_run.length_fits_driving(96)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual((got["have"], got["need"], got["short"]),
+                         (96, 149, 53))
+
+    def test_the_note_says_what_to_do_about_it(self):
+        note = fork_run.length_fits_driving(96)["note"]
+        self.assertIn("НЕ ХВАТАЕТ 53", note)
+        self.assertIn("3.2 с", note, "не названа длина, которую материал даёт")
+
+    def test_exactly_enough_is_enough(self):
+        """Граница, а не «больше-меньше»: 149 — ровно столько, сколько нужно."""
+        self.assertEqual(fork_run.length_fits_driving(149)["outcome"], PASS)
+
+    def test_one_frame_short_is_not_enough(self):
+        got = fork_run.length_fits_driving(148)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["short"], 1)
+
+    def test_a_full_ten_second_driving_fits(self):
+        self.assertEqual(fork_run.length_fits_driving(300)["outcome"], PASS)
+
+    def test_a_long_driving_orders_ten_seconds_and_not_the_floor(self):
+        """Пережило первый заход: подмена расчётной длины полом проходила.
+
+        Сравнивать «хватает ли» мало — при подмене на пол хватало БЫ ТЕМ
+        БОЛЕЕ, и вердикт не менялся. А заказ при этом молча съезжал с десяти
+        секунд на пять: клиент получил бы ролик вдвое короче, и ни один
+        прибор бы не возразил. Проверять надо ЗАКАЗ, а не только его
+        выполнимость.
+        """
+        got = fork_run.length_fits_driving(300)
+        self.assertEqual(got["seconds"], 10.0)
+        self.assertEqual(got["need"], 297)
+
+    def test_the_floor_is_not_quietly_lowered_to_match(self):
+        """Подогнать пол под материал было бы удобно и неверно.
+
+        Продуктовое требование остаётся требованием: прибор говорит «не
+        смогли» и называет недостачу, а решает человек. Если пол поедет за
+        материалом, никто никогда не узнает, что ролик короче заказанного.
+        """
+        self.assertEqual(fork_run.length_fits_driving(96)["seconds"], 5.0)
+
+    def test_the_step_reaches_the_report_and_stands_early(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fork_run.run(_photo(tmp), _frames(tmp, 3), Path(tmp) / "out")
+        names = [s["step"] for s in got["steps"]]
+        self.assertIn("длина", names)
+        self.assertLess(names.index("длина"), names.index("граф"),
+                        "проверка длины оплачивается после дорогих шагов")
+        step = next(s for s in got["steps"] if s["step"] == "длина")
+        self.assertEqual(step["outcome"], UNMEASURED)
+
+
+
 if __name__ == "__main__":
     unittest.main()

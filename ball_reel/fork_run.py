@@ -70,6 +70,43 @@ def seconds_for(frame_count: int, *, fps: float | None = None) -> float:
     return min(max(frame_count / fps, SECONDS_MIN), SECONDS_MAX)
 
 
+def length_fits_driving(frame_count: int, *, seconds: float | None = None,
+                        fps: int | None = None) -> dict:
+    """Хватит ли кадров драйвинга на заказанную длину. Три исхода.
+
+    НАЙДЕНО НА НАСТОЯЩЕМ МАТЕРИАЛЕ, а не рассуждением. В репозитории лежит
+    драйвинг из 96 кадров. `seconds_for(96)` даёт 3.2 с, ПРИЖИМАЕТ к полу 5 с
+    — и граф просит 149 кадров позы при наличии 96. Пол продукта («ролик не
+    короче пяти секунд») тихо превращался в требование к модели нарисовать 53
+    кадра, которых никто не снимал.
+
+    Модель потребляет кадры позы ОДИН К ОДНОМУ. Недостача не восполняется:
+    её либо не заметят и получат обрыв движения, либо обёртка повторит хвост.
+    И то и другое — брак, который видно только глазами на готовом ролике.
+
+    ПОЛ ЗДЕСЬ НЕ ОТМЕНЯЕТСЯ И НЕ ПОДГОНЯЕТСЯ. Продуктовое требование остаётся
+    требованием; отвечает прибор «не смогли» и называет, чего не хватает —
+    решает человек: снять длиннее или согласиться на короткий ролик явно.
+    """
+    fps = fork_comfy.WRAP_FPS if fps is None else fps
+    want = seconds_for(frame_count, fps=fps) if seconds is None else seconds
+    need = fork_comfy.frames_for_seconds(want, fps=fps)["frames"]
+    short = need - frame_count
+    return {
+        "outcome": PASS if short <= 0 else UNMEASURED,
+        "have": frame_count, "need": need, "short": max(0, short),
+        "seconds": want,
+        "note": (f"кадров драйвинга {frame_count}, на {want} с при {fps} к/с "
+                 f"нужно {need}"
+                 + (f" — НЕ ХВАТАЕТ {short}. Модель берёт кадры позы один к "
+                    f"одному и недостачу не восполняет: либо оборвётся "
+                    f"движение, либо повторится хвост, и видно это будет "
+                    f"только глазами. Снять длиннее либо заказать "
+                    f"{round(frame_count / fps, 2)} с явно"
+                    if short > 0 else ", хватает")),
+    }
+
+
 def conditions_verdict(cond: dict) -> str:
     """Исход шага условий. Три, а не два, и ноль из нуля — не успех.
 
@@ -170,6 +207,15 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         time.perf_counter() - t))
     if missing or unreadable or not frames:
         return _report(steps, out)
+
+    # ДЛИНА ПРОТИВ НАЛИЧИЯ — здесь же, на дешёвом шаге, а не после снятия
+    # условий по сотне кадров (П2). Нехватка кадров позы не мешает пути идти
+    # дальше — она мешает верить готовому ролику, поэтому исход «не смогли»,
+    # а не отказ.
+    t = time.perf_counter()
+    fits = length_fits_driving(len(frames), seconds=seconds)
+    steps.append(_step("длина", fits["outcome"], fits["note"],
+                       time.perf_counter() - t))
 
     # Корзина — сразу после входов и до всего дорогого: она решает, КАКОЙ
     # темплейт (и какая LoRA) поедет, а узнать это после снятия условий по
