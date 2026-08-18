@@ -210,6 +210,28 @@ class EveryForkFunctionTheSweepCallsActuallyExists(unittest.TestCase):
                       "тогда её в конвейере нет вовсе")
 
 
+def _frames(dir_path: Path, n: int = 3) -> list:
+    """Настоящие кадры драйвинга.
+
+    Понадобились всем проверкам графа после того, как шаг «входы» перестал
+    печатать «годно» на нуле кадров: путь теперь честно останавливается, и
+    дойти до графа на пустом списке нельзя. Это верное поведение — а прежние
+    проверки закрепляли дефектное.
+    """
+    import numpy as np
+    from PIL import Image
+
+    out = Path(dir_path) / "drv"
+    out.mkdir(parents=True, exist_ok=True)
+    made = []
+    for i in range(n):
+        f = out / f"{i:05d}.png"
+        Image.fromarray(
+            (np.random.rand(64, 64, 3) * 255).astype("uint8")).save(f)
+        made.append(f)
+    return made
+
+
 def _photo(dir_path: Path, name: str = "p.png") -> Path:
     import numpy as np
     from PIL import Image
@@ -231,12 +253,14 @@ class TheGraphStepProducesTheGraphThatWillActuallyRun(unittest.TestCase):
 
     def _graph_step(self, **kw):
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out", **kw)
+            got = fork_run.run(_photo(tmp), _frames(tmp), Path(tmp) / "out",
+                               seconds=5.0, **kw)
         return next(s for s in got["steps"] if s["step"] == "граф")
 
     def test_the_graph_is_the_wrapper_one(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fork_run.run(_photo(tmp), [], Path(tmp) / "out")
+            fork_run.run(_photo(tmp), _frames(tmp), Path(tmp) / "out",
+                         seconds=5.0)
             written = json.loads(
                 (Path(tmp) / "out" / "fork_graph.json").read_text(
                     encoding="utf-8"))
@@ -298,18 +322,27 @@ class ZeroChecksIsNotSuccess(unittest.TestCase):
     которой в проекте заведено правило про ноль проверок.
     """
 
-    def _step(self, name, frames):
+    def test_zero_driving_frames_stop_the_path_at_the_inputs(self):
+        """Р2 переехало ВЫШЕ: ноль кадров ловится на входах, а не на условиях.
+
+        Прежде путь шёл дальше и печатал «годно» на «снято 0 из 0». Теперь он
+        честно останавливается: карточка называет драйвинг видеофайлом, а
+        раскодировщика видео в форке нет, и пустой список означает, что
+        оператору нечем работать, а не что работа сделана.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.run(_photo(tmp), frames, Path(tmp) / "out")
-        return next((s for s in got["steps"] if s["step"] == name), None)
+            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out")
+        self.assertEqual(got["steps"][1]["step"], "входы")
+        self.assertEqual(got["steps"][1]["outcome"], UNMEASURED)
+        self.assertIn("подано 0", got["steps"][1]["note"])
+        self.assertEqual(len(got["steps"]), 2,
+                         "путь поехал дальше по нулевому драйвингу")
 
-    def test_no_driving_frames_makes_conditions_unmeasured(self):
-        got = self._step("условия", [])
-        self.assertEqual(got["outcome"], UNMEASURED,
-                         "ноль снятых условий прочтено как успех")
-
-    def test_the_note_says_the_zero_out_loud(self):
-        self.assertIn("0 из 0", self._step("условия", [])["note"])
+    def test_the_note_names_the_missing_decoder(self):
+        """Иначе оператор не поймёт, что делать с положенным им mp4."""
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out")
+        self.assertIn("раскодировщика видео", got["steps"][1]["note"])
 
 
 class InputsThatExistButCannotBeRead(unittest.TestCase):
@@ -344,7 +377,7 @@ class InputsThatExistButCannotBeRead(unittest.TestCase):
     def test_a_real_image_passes_the_same_step(self):
         """Негативный контроль (И5): проверка обязана уметь и пропускать."""
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out")
+            got = fork_run.run(_photo(tmp), _frames(tmp), Path(tmp) / "out")
         self.assertEqual(got["steps"][1]["outcome"], PASS)
 
 
@@ -406,7 +439,8 @@ class TheRenderStepClosesTheGapToTheServer(unittest.TestCase):
 
     def _render(self, **kw):
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.run(_photo(tmp), [], Path(tmp) / "out", **kw)
+            got = fork_run.run(_photo(tmp), _frames(tmp), Path(tmp) / "out",
+                               seconds=5.0, **kw)
         return next(s for s in got["steps"] if s["step"] == "рендер")
 
     def test_without_a_backend_it_is_unmeasured_not_a_pass(self):
@@ -441,12 +475,23 @@ class TheOperatorEntryPoint(unittest.TestCase):
         return fork_template.make_bench(Path(tmp) / "bench")
 
     def _bench_with_a_real_photo(self, tmp):
-        """Стенд кладёт заглушку `SYNTHETIC-NOT-A-PHOTO`, и путь честно на ней
-        останавливается. Чтобы дойти до масок, фотографию надо подменить
-        настоящей — заглушка тут не годится по построению, а не по недосмотру.
+        """Стенд кладёт заглушки, и путь честно на них останавливается.
+
+        Чтобы дойти до масок, нужны И настоящая фотография, И настоящие кадры
+        драйвинга. Стенд называет драйвинг файлом `driving.mp4` — так и
+        задумано, поле называется «драйвинг», — но раскодировщика видео в
+        форке нет, и `from_template` соберёт по нему пустой список. Здесь
+        драйвинг подменяется КАТАЛОГОМ кадров: заглушки не годятся по
+        построению, а не по недосмотру.
         """
+        import json
+
         card = self._bench(tmp)
         _photo(card.parent, "photo.png")
+        frames = _frames(card.parent, 3)
+        desc = json.loads(card.read_text(encoding="utf-8"))
+        desc["driving"] = frames[0].parent.name
+        card.write_text(json.dumps(desc, ensure_ascii=False), encoding="utf-8")
         return card
 
     def test_a_broken_description_comes_back_as_a_report_not_a_traceback(self):
@@ -465,8 +510,8 @@ class TheOperatorEntryPoint(unittest.TestCase):
     def test_the_arm_named_in_the_card_is_the_one_used(self):
         """Иначе в карточке стоит одно, а маску расширяет роутер по-своему."""
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.from_template(self._bench_with_a_real_photo(tmp),
-                                         Path(tmp) / "out")
+            got = fork_run.from_template(
+                self._bench_with_a_real_photo(tmp), Path(tmp) / "out")
         arm = next(s for s in got["steps"] if s["step"] == "плечо")
         self.assertEqual(arm["outcome"], PASS)
         self.assertIn("narrow", arm["note"])
@@ -488,10 +533,25 @@ class TheOperatorEntryPoint(unittest.TestCase):
         self.assertEqual(len(got["steps"]), 1,
                          "боевой прогон поехал по испытательному описанию")
 
-    def test_the_same_card_is_allowed_when_production_is_not_asked(self):
+    def test_the_check_verdict_is_the_one_the_step_prints(self):
+        """Исход берётся у проверяльщика описания, а не пишется литералом.
+
+        Прежде здесь стоял `PASS`, и вердикт `_check` до отчёта не доезжал:
+        ось, которую описание НЕ СМОГЛО проверить (частота драйвинга по
+        заглушке), читалась оператором как «описание годно». На стендовой
+        карточке проверяльщик отвечает «не смогли», и шаг обязан сказать
+        то же.
+        """
+        from ball_reel import fork_template
+
         with tempfile.TemporaryDirectory() as tmp:
-            got = fork_run.from_template(self._bench(tmp), Path(tmp) / "out")
-        self.assertEqual(got["steps"][0]["outcome"], PASS)
+            card = self._bench(tmp)
+            desc = fork_template.load(card)
+            got = fork_run.from_template(card, Path(tmp) / "out")
+        self.assertEqual(got["steps"][0]["outcome"],
+                         desc["_check"]["outcome"])
+        self.assertIn("проверено", got["steps"][0]["note"],
+                      "числа проверяльщика до отчёта не доехали")
 
 
 if __name__ == "__main__":

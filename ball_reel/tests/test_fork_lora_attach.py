@@ -395,7 +395,19 @@ class TheSweepRunsTheAdapterStep(unittest.TestCase):
         photo = Path(tmp) / "p.png"
         Image.fromarray(
             (np.random.rand(64, 64, 3) * 255).astype("uint8")).save(photo)
-        got = fork_run.run(photo, [], Path(tmp) / "out", **kw)
+        # КАДРЫ ДРАЙВИНГА НАСТОЯЩИЕ, а не пустой список: с 18.08 шаг «входы»
+        # честно останавливает путь на нуле поданных кадров (Р2 — «годно» на
+        # нуле было дефектом). Дойти до дальних шагов на пустом списке больше
+        # нельзя, и это верно.
+        drv = Path(tmp) / "drv"
+        drv.mkdir(parents=True, exist_ok=True)
+        frames = []
+        for i in range(2):
+            f = drv / f"{i:05d}.png"
+            Image.fromarray(
+                (np.random.rand(64, 64, 3) * 255).astype("uint8")).save(f)
+            frames.append(f)
+        got = fork_run.run(photo, frames, Path(tmp) / "out", **kw)
         return tmp, next(s for s in got["steps"] if s["step"] == "адаптер")
 
     def test_the_step_stands_after_the_graph_and_before_generation_axes(self):

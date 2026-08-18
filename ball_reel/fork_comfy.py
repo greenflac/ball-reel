@@ -2374,12 +2374,17 @@ def to_api(graph: dict) -> dict:
                          "Ноль ошибок при нуле переведённого — не успех (Р2)")}
 
     by_link = {l[0]: l for l in _links_of(graph) if len(l) > 4}
-    api, problems, dropped_all = {}, [], []
+    api, problems, unknown, dropped_all = {}, [], [], []
     for node in nodes:
         nid = str(node.get("id"))
         spec = api_widget_names(node)
         if spec["outcome"] != PASS:
-            problems.append(spec["note"])
+            # ОТДЕЛЬНЫЙ СПИСОК, а не общий: «имени в реестре нет» — это
+            # «не смогли перевести», а «значение не того типа» — «не годно».
+            # Свёрнутые вместе, они дают вердикт «граф НЕ ГОДЕН» на добавлении
+            # ноды из нового пака, и следующая смена идёт искать дефект в
+            # графе, которого там нет. Правильный ответ — пополнить реестр.
+            unknown.append(spec["note"])
             continue
         names, values = spec["names"], list(node.get("widgets_values") or [])
         values, dropped = _strip_ui_widgets(node, names, values)
@@ -2407,14 +2412,21 @@ def to_api(graph: dict) -> dict:
         api[nid] = {"class_type": node.get("type"), "inputs": inputs,
                     "_meta": {"title": node.get("title") or node.get("type")}}
 
+    outcome = (FAIL if problems else
+               UNMEASURED if unknown or not api else PASS)
     return {
-        "outcome": FAIL if problems else (PASS if api else UNMEASURED),
-        "api": api if not problems else None,
-        "problems": problems, "checked": len(nodes), "converted": len(api),
+        "outcome": outcome,
+        "api": api if outcome == PASS else None,
+        "problems": problems, "unknown_types": unknown,
+        "checked": len(nodes), "converted": len(api),
         "dropped_ui_widgets": dropped_all,
         "note": (f"узлов в графе {len(nodes)}, переведено {len(api)}, "
-                 f"не смогли {len(problems)}; выкинуто дорисованных "
-                 f"интерфейсом виджетов {len(dropped_all)}"
-                 + ("" if not problems else ": " + "; ".join(problems[:3]))
+                 f"негодных {len(problems)}, неизвестных типов "
+                 f"{len(unknown)}; выкинуто дорисованных интерфейсом "
+                 f"виджетов {len(dropped_all)}"
+                 + ("" if not problems else
+                    ". НЕ ГОДЕН: " + "; ".join(problems[:3]))
+                 + ("" if not unknown else
+                    ". НЕ СМОГЛИ ПЕРЕВЕСТИ: " + "; ".join(unknown[:3]))
                  + ". НЕПРОВЕРЕНО: настоящий ComfyUI этот перевод не принимал"),
     }

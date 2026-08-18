@@ -86,7 +86,8 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         adapter: str | Path | None = None,
         mask_model=None,
         seconds: float | None = None,
-        lock: dict | None = None) -> dict:
+        lock: dict | None = None,
+        wrap: dict | None = None) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
     `photo` — ЗАГРУЖЕННАЯ фотография, она же якорь оси личности. Медоид сюда
@@ -99,7 +100,14 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     frames = [Path(p) for p in driving_frames]
+    # ОСТАЛЬНЫЕ ПОЛЯ КАРТОЧКИ тоже доезжают до графа, а не только длина.
+    # Проверено прогоном: до 18.08 в граф уходила ПУСТАЯ строка промта при
+    # том, что `fork_template.check` требует его непустым. Описание было
+    # проверено на согласованность и после этого проигнорировано — это уже не
+    # «ролик короче», это генерация без условия.
+    wrap = dict(wrap or {})
     steps: list[dict] = []
+    derived = None
 
     # Предполёт первым: он самый дешёвый и решает, поедет ли вообще что-то.
     t = time.perf_counter()
@@ -124,14 +132,24 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
                     im.verify()
             except (UnidentifiedImageError, OSError, ValueError) as exc:
                 unreadable.append(f"{f.name}: {type(exc).__name__}")
+    # НОЛЬ КАДРОВ ДРАЙВИНГА — НЕ «все читаются» (Р2). Достижимо штатно:
+    # карточка называет драйвинг видеофайлом (`driving.mp4`), а раскодировщика
+    # видео в форке НЕТ, и сбор кадров идёт `glob`-ом по каталогу. Оператор,
+    # положивший mp4 — а поле так и называется, — получал три «годно» подряд и
+    # граф на 150 кадров при нуле поданных.
+    outcome = (FAIL if (missing or unreadable) else
+               UNMEASURED if not frames else PASS)
     steps.append(_step(
-        "входы", FAIL if (missing or unreadable) else PASS,
+        "входы", outcome,
         f"нет файлов: {missing}" if missing else
         f"файлы есть, но не читаются как изображения: {unreadable}"
         if unreadable else
+        "кадров драйвинга подано 0 — судить не о чем. Форк принимает драйвинг "
+        "КАДРАМИ В КАТАЛОГЕ; раскодировщика видео в нём нет, и поданный "
+        "видеофайл даёт пустой список молча" if not frames else
         f"фотография и {len(frames)} кадров драйвинга на месте, все читаются",
         time.perf_counter() - t))
-    if missing or unreadable:
+    if missing or unreadable or not frames:
         return _report(steps, out)
 
     # Корзина — сразу после входов и до всего дорогого: она решает, КАКОЙ
@@ -170,10 +188,25 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     from . import bodyparts
 
     if bodyparts.available():
-        masks = fork_mask.sequence(frames, out / "mask", grow_px=grow_px,
-                                   arm_name=arm_name, model=mask_model)
-        steps.append(_step("маски", masks["outcome"], masks["note"],
-                           time.perf_counter() - t))
+        if grow_px is None and arm_name is None:
+            # РОУТЕР СКАЗАЛ «не выбрано» — И МАСКА НЕ РАСШИРЯЕТСЯ МОЛЧА.
+            # `fork_mask.sequence` на двух None ставит `BLOCK` (32 px), то
+            # есть фактически плечо `wide`, и в отчёте его имени нет. Оператор
+            # читал «плечо не выбрано, выбирайте руками», получал `wide`,
+            # выбирал руками `narrow` и считал, что сравнил два плеча.
+            masks = None
+            steps.append(_step("маски", UNMEASURED,
+                               "плечо не выбрано роутером и не задано руками "
+                               "— расширять маску нечем. Это НЕ «плечо ноль»: "
+                               f"плечи {sorted(fork_mask.ARMS)} выбираются "
+                               f"явно, а умолчание здесь выдало бы `wide` под "
+                               f"именем «неизвестно»",
+                               time.perf_counter() - t))
+        else:
+            masks = fork_mask.sequence(frames, out / "mask", grow_px=grow_px,
+                                       arm_name=arm_name, model=mask_model)
+            steps.append(_step("маски", masks["outcome"], masks["note"],
+                               time.perf_counter() - t))
     else:
         masks = None
         steps.append(_step("маски", UNMEASURED,
@@ -238,8 +271,13 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         # лежало в документах, а конвейер ехал по старому. Два способа узнать
         # одно и то же — дефект (Е1); здесь остаётся один, и это тот, который
         # поедет на карте.
-        want = seconds_for(len(frames))
-        derived = fork_comfy.derive_wrapper(seconds=want, lock=lock)
+        # ДЛИНА БЕРЁТСЯ ИЗ КАРТОЧКИ, ЕСЛИ ОНА ТАМ НАЗВАНА, и только иначе —
+        # из числа поданных кадров. Прежде параметр `seconds` принимался и
+        # МОЛЧА ВЫБРАСЫВАЛСЯ: карточка с «10 секунд» давала граф на 5, шаг
+        # печатал «годно», и расхождение вдвое не называлось нигде. Оператор
+        # платил за прогон и получал ролик вдвое короче заказанного.
+        want = seconds_for(len(frames)) if seconds is None else float(seconds)
+        derived = fork_comfy.derive_wrapper(seconds=want, lock=lock, **wrap)
         # Один аудит вместо трёх ПОТОМУ, ЧТО он их в себя включает: внутри
         # `audit_wrapper` зовёт и `audit_weights` (имена файлов против лока), и
         # `audit_loader_formats` (прочитает ли загрузчик поданный ему формат).
@@ -303,6 +341,11 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
             time.perf_counter() - t))
     else:
         try:
+            if derived is None:
+                raise ValueError(
+                    "графа нет — переводить нечего. Причина названа шагом "
+                    "«граф» выше; здесь она не повторяется, чтобы отчёт не "
+                    "объявлял две разные беды")
             api = fork_comfy.to_api(derived)
             if api["outcome"] != PASS:
                 steps.append(_step("рендер", api["outcome"],
@@ -400,9 +443,15 @@ def from_template(path: str | Path, out_dir: str | Path, *,
         driving = root / desc["driving"]
         frames = (sorted(driving.glob("*.png")) + sorted(driving.glob("*.jpg"))
                   if driving.is_dir() else [])
-    steps = [_step("описание", PASS,
+    # ИСХОД БЕРЁТСЯ У САМОГО ПРОВЕРЯЛЬЩИКА, а не пишется литералом. Прежде
+    # здесь стоял `PASS`, и вердикт `_check` — вместе с его числами
+    # «проверено / нарушений / не смогли» — до отчёта не доезжал вовсе: ось,
+    # которую описание не смогло проверить, читалась оператором как «годно».
+    check = desc.get("_check") or {}
+    steps = [_step("описание", check.get("outcome", UNMEASURED),
                    f"{Path(path).name}: {desc.get('name')!r}, драйвинг "
-                   f"{desc['driving']}, кадров подано {len(frames)}",
+                   f"{desc['driving']}, кадров подано {len(frames)}. "
+                   f"{check.get('note', 'проверяльщик описания не отчитался')}",
                    time.perf_counter() - t)]
     # ПЛЕЧО БЕРЁТСЯ ИЗ КАРТОЧКИ, если оператор его назвал. Иначе получилось
     # бы, что в описании стоит `narrow`, а маску расширяет роутер по своему
@@ -411,9 +460,14 @@ def from_template(path: str | Path, out_dir: str | Path, *,
     # шаг «корзина» внутри `run`.
     armed = fork_template.resolve_arm(desc, root=root)
     steps.append(_step("плечо", armed["outcome"], armed["note"], 0.0))
+    # ПОЛЯ КАРТОЧКИ -> ПАРАМЕТРЫ ГРАФА. Имена сверены с сигнатурой
+    # `fork_comfy.derive_wrapper`; чего в ней нет, сюда не попадает, иначе
+    # вызов упал бы на неизвестном ключе вместо тихой потери значения.
+    wrap = {k: desc[k] for k in ("prompt", "negative", "width", "height",
+                                 "fps") if k in desc}
     inner = run(photo, frames, out,
                 grow_px=armed["grow_px"] if desc.get("arm") != "auto" else None,
-                seconds=desc.get("seconds"),
+                seconds=desc.get("seconds"), wrap=wrap,
                 props=(root / desc["props"]) if "props" in desc else None,
                 **kw)
     return _report(steps + inner["steps"], out)

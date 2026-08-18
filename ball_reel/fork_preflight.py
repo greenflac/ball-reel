@@ -738,6 +738,16 @@ def bus_share(*, seconds: float | None = None,
     blocks_to_swap = (fc.BLOCKS_TO_SWAP if blocks_to_swap is None
                       else blocks_to_swap)
     step_gb = STEPS_GB["Q4_K_M"] if step_gb is None else step_gb
+    # ДЛИНА РАЗРЕШАЕТСЯ ОДИН РАЗ И ПОДАЁТСЯ ОБОИМ. Прежде сюда уходил один и
+    # тот же `None`, а умолчания у приборов ПРОТИВОПОЛОЖНЫЕ: `blockswap_seconds`
+    # берёт худший случай (10 с), `render_seconds` — минимальный (5 с). Доля
+    # выходила ровно вдвое завышенной — 22.8% вместо 11.4%, — и именно в ту
+    # сторону, которая толкает менять `blocks_to_swap` на карте. Прибор,
+    # написанный против ошибки «отношение без знаменателя», сам считал
+    # числитель и знаменатель на разных роликах.
+    from . import fork_comfy as _fc
+
+    seconds = _fc.SECONDS_MAX if seconds is None else seconds
     bus = blockswap_seconds(step_gb, blocks_to_swap, seconds=seconds)
     calc = render_seconds(seconds=seconds, pass_s=pass_s)
     if bus.get("low_s") is None or not calc["compute_s"]:

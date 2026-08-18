@@ -2066,12 +2066,33 @@ class TheGraphIsTranslatedIntoWhatTheServerAccepts(unittest.TestCase):
         self.assertIn("batched_cfg", got["problems"][0])
 
     def test_an_unknown_node_type_is_unmeasured_not_guessed(self):
-        """Позиционная догадка стоит не ошибки сборки, а неверного ролика."""
+        """Позиционная догадка стоит не ошибки сборки, а неверного ролика.
+
+        ИМЯ ТЕСТА БЫЛО ПРАВИЛЬНЫМ, А ПРОВЕРКА — НЕТ: она требовала «не годно»
+        там, где по смыслу «не смогли перевести». Разница не словесная. Любая
+        нода из нового пака реестру неизвестна, и вердикт «граф НЕ ГОДЕН»
+        отправлял бы следующую смену искать дефект в графе, которого там нет,
+        — тогда как правильный ответ «пополнить реестр имён».
+        """
         graph = fk.derive_wrapper()
         graph["graph"]["nodes"][0]["type"] = "ЧегоТакогоНетВРеестре"
         got = fk.to_api(graph)
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+        self.assertIn("не разобран", got["unknown_types"][0])
+        self.assertEqual(got["problems"], [],
+                         "неизвестный тип попал в список НЕГОДНОГО — тогда он "
+                         "неотличим от значения не того типа")
+        self.assertIsNone(got["api"], "недопереведённый граф отдан наружу")
+
+    def test_a_bad_value_is_still_a_failure_not_an_unknown(self):
+        """Негативный контроль к предыдущему: два случая обязаны различаться."""
+        graph = fk.derive_wrapper()
+        node = next(n for n in graph["graph"]["nodes"]
+                    if n["type"] == "WanVideoDecode")
+        node["widgets_values"][1] = "не целое"
+        got = fk.to_api(graph)
         self.assertEqual(got["outcome"], fk.FAIL)
-        self.assertIn("не разобран", got["problems"][0])
+        self.assertEqual(got["unknown_types"], [])
 
     def test_too_many_values_are_refused_rather_than_truncated(self):
         graph = fk.derive_wrapper()
