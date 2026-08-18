@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ball_reel import fork_run
+from ball_reel import fork_comfy, fork_run
 from ball_reel.fork_identity import FAIL, PASS, UNMEASURED
 
 
@@ -214,7 +214,7 @@ class TheGraphStepJudgesWeightsAndStructureTogether(unittest.TestCase):
         return next(s for s in got["steps"] if s["step"] == "граф")
 
     def test_the_open_fork_makes_the_graph_step_fail(self):
-        self.assertEqual(self._graph_step(None)["outcome"], FAIL,
+        self.assertEqual(self._graph_step(fork_comfy.QUANT_TEMPLATE)["outcome"], FAIL,
                          "шаг «граф» зелен при графе, который просит не те "
                          "файлы, что качает лок")
 

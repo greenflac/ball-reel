@@ -266,13 +266,26 @@ class IntroducedTypesAreProvenByTheTemplateOrFlagged(unittest.TestCase):
         `character_mask` требует MASK, наши маски приезжают картинками, а
         преобразователя IMAGE->MASK в темплейте нет — там маску отдавал
         вырезанный `BlockifyMask`.
+
+        Ступень названа ЯВНО с 18.08.2026: умолчание переехало на `QUANT_GGUF`
+        (развилка §1 закрыта владельцем), и на нём вводятся ещё два типа —
+        загрузчики GGUF. Тест правлен, а не код: он про ШТАТНУЮ ступень, и
+        подставить ей чужой список значило бы измерить другое.
         """
-        derived = fk.derive(fk.load_upstream())
+        derived = fk.derive(fk.load_upstream(), quant=fk.QUANT_TEMPLATE)
         flagged = {i["type"] for i in derived["introduced"]}
         self.assertEqual(flagged, {"ImageToMask"},
                          f"список введённых извне типов изменился: {flagged}. "
                          f"Новое имя обязано быть либо доказано командой, "
                          f"либо помечено — молча вводить нельзя.")
+
+    def test_the_default_stage_introduces_exactly_three_named_types(self):
+        """Негативный контроль к предыдущему: на умолчании их три, и все три
+        названы поимённо. Иначе «ровно одно имя» читалось бы как «всегда одно»."""
+        flagged = {i["type"] for i in fk.derive(fk.load_upstream())["introduced"]}
+        self.assertEqual(flagged,
+                         {"ImageToMask", "UnetLoaderGGUF", "CLIPLoaderGGUF"},
+                         f"на умолчании введены другие типы: {flagged}")
 
     def test_imagetomask_is_now_proven_by_the_downloaded_source(self):
         """~~НЕПРОВЕРЕНО~~ закрыто 17.08.2026 загрузкой `nodes_mask.py`.
@@ -331,8 +344,11 @@ class IntroducedTypesAreProvenByTheTemplateOrFlagged(unittest.TestCase):
         self.assertIn("ВыдуманнаяНода", got["note"])
 
     def test_everything_else_we_add_is_proven_by_the_template(self):
+        # Ступень явно штатная: на умолчании (GGUF) добавляются ещё два типа,
+        # и они доказаны ИСХОДНИКОМ, а не темплейтом — это проверяет
+        # test_the_gguf_loaders_are_proven_by_downloaded_source.
         src = fk.load_upstream()
-        derived = fk.derive(src)
+        derived = fk.derive(src, quant=fk.QUANT_TEMPLATE)
         added = {n["type"] for n in derived["graph"]["nodes"]
                  if n.get("title")}
         proven = fk.known_types(src)
@@ -858,19 +874,30 @@ class TheLockFileIsCompleteAndEveryNumberHasACommand(unittest.TestCase):
                                          "лок-файла — а оно не закрыто")
         self.assertIn("UNETLoader", claims[0]["evidence"])
 
-    def test_that_discrepancy_is_still_true_of_the_graph_we_produce(self):
-        """Документ, разошедшийся с кодом, — дефект. Здесь он бы разошёлся
-        молча: кто-нибудь починит загрузчики и забудет строку в лок-файле."""
-        graph = fk.derive(fk.load_upstream())["graph"]
+    def test_that_discrepancy_is_now_true_only_of_the_template_stage(self):
+        """~~«расхождение всё ещё верно для графа, который мы производим»~~ —
+        18.08.2026 умолчание переведено на ступень из лока, и на умолчании
+        расхождения БОЛЬШЕ НЕТ.
+
+        # DEBT(2026-08-18): запись `contract_claims[...] status=РАСХОЖДЕНИЕ`
+        # в `workflows/fork_stack.lock.json` описывает теперь только штатную
+        # ступень. Лок-файл — не файл этой смены (Ц2), правку делает владелец.
+
+        Тест правлен, а не код: он сторожил, чтобы документ не разошёлся с
+        кодом молча, и ровно это и сработало — расхождение названо, а не
+        стёрто.
+        """
+        default = fk.derive(fk.load_upstream())["graph"]
+        by_type = {n["type"] for n in default["nodes"]}
+        self.assertNotIn("UNETLoader", by_type,
+                         "на умолчании снова стоит штатный загрузчик fp8 — "
+                         "решение владельца о Q4_K_M до кода не доехало")
+        template = fk.derive(fk.load_upstream(), quant=fk.QUANT_TEMPLATE)
         loaders = {n["type"]: n.get("widgets_values", [None])[0]
-                   for n in graph["nodes"]
+                   for n in template["graph"]["nodes"]
                    if n["type"] in ("UNETLoader", "CLIPLoader")}
-        self.assertIn("fp8", str(loaders.get("UNETLoader")),
-                      "загрузчик диффузии починили — снимите запись о "
-                      "расхождении из лок-файла")
-        self.assertIn("fp8", str(loaders.get("CLIPLoader")),
-                      "загрузчик энкодера починили — снимите запись о "
-                      "расхождении из лок-файла")
+        self.assertIn("fp8", str(loaders.get("UNETLoader")))
+        self.assertIn("fp8", str(loaders.get("CLIPLoader")))
 
     def test_a_missing_lock_file_says_which_file(self):
         with self.assertRaises(FileNotFoundError) as caught:
@@ -888,13 +915,20 @@ class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
     """
 
     def test_the_template_stage_is_red_because_the_fork_is_open(self):
-        got = fk.audit_weights(fk.derive())
+        """~~«развилка открыта»~~ — ЗАКРЫТА 18.08.2026, ступень Q4_K_M.
+
+        Тест оставлен и перенацелен на ЯВНУЮ штатную ступень: сторож обязан
+        иметь вход, на котором краснеет, иначе он украшение. Зелёное умолчание
+        сторожит соседний тест.
+        """
+        got = fk.audit_weights(fk.derive(quant=fk.QUANT_TEMPLATE))
         self.assertEqual(got["outcome"], fk.FAIL,
                          "расхождение графа с локом объявлено годным — тот же "
                          "дефект, что прошёл полный аудит")
 
     def test_it_names_both_directions_not_just_one(self):
-        problems = " ".join(fk.audit_weights(fk.derive())["problems"])
+        problems = " ".join(fk.audit_weights(
+            fk.derive(quant=fk.QUANT_TEMPLATE))["problems"])
         self.assertIn("а в локе такого файла нет", problems,
                       "не назван файл, который граф грузит помимо лока")
         self.assertIn("ни один загрузчик графа его не просит", problems,
@@ -906,8 +940,18 @@ class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
         self.assertEqual(got["outcome"], fk.PASS, got["note"])
         self.assertEqual(got["problems"], [])
 
-    def test_the_numbers_stand_next_to_the_verdict(self):
+    def test_the_default_stage_is_green_because_the_fork_is_closed(self):
+        """Дефект, ради которого правился код (записан в хэндофе как открытое
+        расхождение): умолчание производства осталось шаблонным fp8 после того,
+        как владелец выбрал Q4_K_M, и проверка была красной при закрытой
+        развилке. Красное «не решено» и красное «решение не доехало» — разное.
+        """
         got = fk.audit_weights(fk.derive())
+        self.assertEqual(got["outcome"], fk.PASS, got["note"])
+        self.assertIn("расхождений 0", got["note"])
+
+    def test_the_numbers_stand_next_to_the_verdict(self):
+        got = fk.audit_weights(fk.derive(quant=fk.QUANT_TEMPLATE))
         self.assertEqual(got["loaders_checked"], 6)
         self.assertEqual(got["declared"], 6)
         self.assertIn("разобрано загрузчиков 6", got["note"])
@@ -925,7 +969,8 @@ class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
     def test_only_loader_widgets_count_not_text_mentioned_in_notes(self):
         """Разбор по тексту вернул бы и bf16, и fp8 сразу: ссылки на оба лежат
         в записке темплейта. Мерить надо то, что Comfy пойдёт открывать."""
-        files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+        files = {r["file"] for r in fk.graph_weights(
+            fk.derive(quant=fk.QUANT_TEMPLATE)["graph"])}
         self.assertNotIn("wan2.2_animate_14B_bf16.safetensors", files,
                          "в веса графа попало имя из записки — разбор идёт по "
                          "тексту, а не по виджетам загрузчиков")
@@ -944,11 +989,14 @@ class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
         saved = dict(fk.WEIGHT_WIDGET)
         try:
             fk.WEIGHT_WIDGET["CLIPLoader"] = ("clip_name", 1)
-            got = fk.audit_weights(fk.derive())
+            # Ступень явно штатная: штатный `CLIPLoader` стоит в графе только
+            # на ней — на умолчании он уже переведён в `CLIPLoaderGGUF`.
+            got = fk.audit_weights(fk.derive(quant=fk.QUANT_TEMPLATE))
             self.assertEqual(len(got["unparsed"]), 1, got["note"])
             self.assertIn("реестр WEIGHT_WIDGET указывает не туда",
                           " ".join(got["problems"]))
-            files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+            files = {r["file"] for r in fk.graph_weights(
+                fk.derive(quant=fk.QUANT_TEMPLATE)["graph"])}
             self.assertNotIn("wan", files,
                              "тип энкодера принят за имя файла весов")
         finally:
@@ -958,7 +1006,7 @@ class TheGraphAndTheLockAreComparedByFileName(unittest.TestCase):
     def test_with_the_registry_right_nothing_is_unparsed(self):
         """Негативный контроль к предыдущему (И5): вход, где список обязан быть
         пустым. Без него проверка «нашлось неразобранное» зеленела бы всегда."""
-        for quant in (None, fk.QUANT_GGUF):
+        for quant in (None, fk.QUANT_GGUF, fk.QUANT_TEMPLATE):
             with self.subTest(quant=quant):
                 got = fk.audit_weights(fk.derive(quant=quant))
                 self.assertEqual(got["unparsed"], [], got["note"])
@@ -986,11 +1034,11 @@ class TheQuantStageIsAFlagNotARewrite(unittest.TestCase):
     def test_the_stage_is_recorded_inside_the_produced_file(self):
         """Файл уедет на машину без этого репозитория: чем он грузится, должно
         быть видно из него самого."""
-        for quant in (None, fk.QUANT_GGUF):
+        for quant in (None, fk.QUANT_GGUF, fk.QUANT_TEMPLATE):
             with self.subTest(quant=quant):
                 graph = fk.derive(quant=quant)["graph"]
                 self.assertEqual(graph["extra"]["fork"]["quant"],
-                                 fk.QUANT_TEMPLATE if quant is None else quant)
+                                 fk.QUANT_DEFAULT if quant is None else quant)
 
     def test_the_default_is_not_bound_in_the_signature(self):
         """И7: умолчание-константа в сигнатуре связывается на импорте, и
@@ -998,28 +1046,44 @@ class TheQuantStageIsAFlagNotARewrite(unittest.TestCase):
         местах — проверяется, что она не вернулась."""
         import inspect
 
-        default = inspect.signature(fk.derive).parameters["quant"].default
-        self.assertIsNone(default,
-                          "умолчание снова стоит в сигнатуре — подмена "
-                          "QUANT_TEMPLATE перестанет доходить до вызова")
+        for func, param in ((fk.derive, "quant"),
+                            (fk.derive_wrapper, "pose_strength"),
+                            (fk.derive_wrapper, "seconds"),
+                            (fk.derive_wrapper, "width"),
+                            (fk.derive_wrapper, "height"),
+                            (fk.derive_wrapper, "blocks_to_swap"),
+                            (fk.frames_for_seconds, "fps"),
+                            (fk.window_plan, "window")):
+            with self.subTest(func=func.__name__, param=param):
+                default = inspect.signature(func).parameters[param].default
+                self.assertIsNone(default,
+                                  "умолчание снова стоит в сигнатуре — подмена "
+                                  "константы перестанет доходить до вызова")
 
     def test_mutating_the_default_stage_reaches_the_call(self):
-        """Продолжение предыдущего: сторож проверяет не форму, а следствие."""
-        saved = fk.QUANT_TEMPLATE
+        """Продолжение предыдущего: сторож проверяет не форму, а следствие.
+
+        Мутируется `QUANT_DEFAULT`, а не `QUANT_TEMPLATE`. Прежняя редакция
+        подменяла `QUANT_TEMPLATE` на `QUANT_GGUF` и проверяла, что диффузия
+        стала GGUF — после переезда умолчания на GGUF она стала ПУСТОЙ:
+        зеленела бы и без всякой подмены. Мутационный тест, который зеленеет
+        на невыполненной мутации, — самый дорогой сорт украшения, и найден он
+        здесь ровно потому, что мутацию прогнали, а не вспомнили.
+        """
+        before = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
+        self.assertTrue(any(f.endswith(".gguf") for f in before), before)
+        saved = fk.QUANT_DEFAULT
         try:
-            fk.QUANT_TEMPLATE = fk.QUANT_GGUF
+            fk.QUANT_DEFAULT = fk.QUANT_TEMPLATE
             files = {r["file"] for r in fk.graph_weights(fk.derive()["graph"])}
-            # Проверяется СЛЕДСТВИЕ подмены, а не имя ступени: сторож про
-            # механизм, и привязка к конкретному файлу делала его хрупким к
-            # смене ступени владельцем (Q3_K_M -> Q4_K_M, 18.08.2026).
-            self.assertNotIn("Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
-                             files,
-                             "подмена константы умолчания не доехала до вызова")
-            self.assertTrue(any(f.endswith(".gguf") for f in files),
-                            f"после подмены умолчания диффузия всё ещё не "
-                            f"GGUF: {sorted(files)}")
+            self.assertIn("Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
+                          files,
+                          "подмена константы умолчания не доехала до вызова")
+            self.assertFalse(any(f.endswith(".gguf") for f in files),
+                             f"после подмены умолчания диффузия всё ещё "
+                             f"GGUF: {sorted(files)}")
         finally:
-            fk.QUANT_TEMPLATE = saved
+            fk.QUANT_DEFAULT = saved
 
     def test_the_gguf_loaders_are_proven_by_downloaded_source(self):
         """Ц10: ~20% предлагаемых моделью имён не существует. Оба имени взяты
@@ -1079,9 +1143,803 @@ class TheQuantStageIsAFlagNotARewrite(unittest.TestCase):
 
     def test_the_template_stage_requires_no_third_party_pack(self):
         """Негативный контроль (И5): вход, где та же проверка обязана молчать."""
-        got = fk.audit(fk.derive())
+        got = fk.audit(fk.derive(quant=fk.QUANT_TEMPLATE))
         self.assertEqual(got["packs_required"], [])
         self.assertIn("сторонних паков к установке 0", got["note"])
+
+
+# ===========================================================================
+# ЧАСТЬ II. ГРАФ НА ОБЁРТКЕ `kijai/ComfyUI-WanVideoWrapper`
+# ===========================================================================
+#
+# Что здесь НЕ проверяется (Ц4): граф обёртки не исполнялся ни разу. ComfyUI в
+# этой среде нет. Всё ниже — структура, арифметика и сверка с исходником,
+# скачанным командой.
+
+#: Геометрия для тестов адаптера обёртки. Маленькая по той же причине, что и в
+#: части I: 149 кадров по 480x832 в память класть незачем, а кратности
+#: настоящие — 32 и 48 кратны 16, (5-1) % 4 == 0. Продуктовая геометрия
+#: проверяется отдельно, на числах.
+WW, WH, WN = 32, 48, 5
+
+
+def wrapper_inputs(**over):
+    got = {
+        "ref_images": np.zeros((1, WH, WW, 3), np.uint8),
+        "pose_images": np.zeros((WN, WH, WW, 3), np.uint8),
+        "face_images": np.zeros((WN, fk.FACE_SIDE, fk.FACE_SIDE, 3), np.uint8),
+        "mask": np.zeros((WN, WH, WW), np.float32),
+        "width": WW, "height": WH, "num_frames": WN,
+    }
+    got.update(over)
+    return got
+
+
+class EveryWrapperNodeNameWasProvenByACommand(unittest.TestCase):
+    """Ц10: у моделей примерно пятая часть предлагаемых имён не существует.
+
+    Здесь имя ноды обёртки не может попасть в граф, не будучи доказанным
+    скачанным исходником: `derive_wrapper` спрашивает `provenance_of` про
+    КАЖДЫЙ вводимый тип, а аудит роняет вердикт, если хоть одно происхождение
+    начинается с НЕПРОВЕРЕНО.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.derived = fk.derive_wrapper()
+        cls.types = {n["type"] for n in cls.derived["graph"]["nodes"]}
+
+    def test_not_one_type_in_the_graph_is_unproven(self):
+        for node_type in sorted(self.types):
+            with self.subTest(node_type=node_type):
+                got = fk.provenance_of(node_type, fk.known_types(
+                    fk.load_upstream()))
+                self.assertNotIn("НЕПРОВЕРЕНО", got, node_type)
+
+    def test_every_wrapper_node_carries_url_hash_line_and_date(self):
+        """«Проверено» без URL, sha256 тела и номера строки через месяц
+        неотличимо от «вроде помню»."""
+        wrapper = [t for t in self.types if t.startswith("WanVideo")]
+        self.assertGreaterEqual(len(wrapper), 8, sorted(wrapper))
+        for node_type in sorted(wrapper):
+            with self.subTest(node_type=node_type):
+                src = fk.PROVEN_BY_SOURCE[node_type]
+                self.assertIn("ComfyUI-WanVideoWrapper", src["url"])
+                self.assertEqual(len(src["body_sha256"]), 64)
+                self.assertIsInstance(src["line"], int)
+                self.assertIsInstance(src["mapping_line"], int)
+                self.assertRegex(src["checked"], r"^20\d\d-\d\d-\d\d$")
+
+    def test_each_name_was_found_twice_class_and_mapping(self):
+        """Класса мало: незарегистрированного класса в графе не существует так
+        же, как несуществующего. Номера строк разные — значит смотрели оба."""
+        for node_type, src in fk.PROVEN_BY_SOURCE.items():
+            if "WanVideoWrapper" not in src["url"]:
+                continue
+            with self.subTest(node_type=node_type):
+                self.assertNotEqual(src["line"], src["mapping_line"])
+                self.assertGreater(src["mapping_line"], src["line"])
+
+    def test_the_three_downloaded_bodies_are_three_distinct_files(self):
+        hashes = {src["body_sha256"] for src in fk.PROVEN_BY_SOURCE.values()
+                  if "WanVideoWrapper" in src["url"]}
+        self.assertEqual(len(hashes), 3, hashes)
+
+    def test_a_plausible_but_fabricated_wrapper_name_is_still_unproven(self):
+        """Негативный контроль (И5). `WanVideoAnimateLoader` звучит ровно как
+        те, что существуют, — и его нет ни в одном из трёх файлов."""
+        got = fk.provenance_of("WanVideoAnimateLoader", fk.known_types(
+            fk.load_upstream()))
+        self.assertIn("НЕПРОВЕРЕНО", got)
+        self.assertNotIn(("WanVideoAnimateLoader"), fk.PROVEN_BY_SOURCE)
+
+    def test_the_cached_text_encoder_is_proven_and_deliberately_unused(self):
+        """Имя доказано, а узел отвергнут замером: его загрузчик T5 читает
+        `load_torch_file` и .gguf не понимает, а лок объявляет .gguf."""
+        self.assertIn("WanVideoTextEncodeCached", fk.PROVEN_BY_SOURCE)
+        self.assertNotIn("WanVideoTextEncodeCached", self.types)
+        self.assertIn("В ГРАФ НЕ СТАВИТСЯ",
+                      fk.PROVEN_BY_SOURCE["WanVideoTextEncodeCached"]["note"])
+        self.assertIn("WanVideoTextEmbedBridge", self.types)
+
+    def test_create_video_is_proven_by_the_template_though_not_at_top_level(self):
+        """Правка `known_types` 18.08.2026, и вот её негативный контроль:
+        типа НЕТ в списке верхнего уровня, но он есть в файле — значит
+        существует, и пометка «не подтверждён ничем» была бы ложной тревогой."""
+        src = fk.load_upstream()
+        self.assertNotIn("CreateVideo", {n["type"] for n in src["nodes"]})
+        self.assertIn("CreateVideo", fk.known_types(src))
+        self.assertIn("ДОКАЗАНО темплейтом",
+                      fk.provenance_of("CreateVideo", fk.known_types(src)))
+
+    def test_known_types_did_not_start_proving_everything(self):
+        """Негативный контроль к той же правке: обход стал глубже, но не
+        начал считать доказанным что попало."""
+        types = fk.known_types(fk.load_upstream())
+        self.assertNotIn("ImageToMask", types)
+        self.assertNotIn("WanVideoSampler", types)
+
+    def test_the_licence_of_the_wrapper_was_checked_before_it_was_used(self):
+        """Ц5: лицензия проверяется ДО встраивания, командой."""
+        self.assertEqual(fk.WRAP_LICENSE["license"], "apache-2.0")
+        self.assertIn("curl", fk.WRAP_LICENSE["checked_by"])
+        self.assertRegex(fk.WRAP_LICENSE["checked"], r"^20\d\d-\d\d-\d\d$")
+
+
+class TheWrapperGraphIsWiredAndTheAuditCanGoRed(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.derived = fk.derive_wrapper()
+        cls.report = fk.audit_wrapper(cls.derived)
+
+    def test_the_audit_is_green_and_prints_its_numbers(self):
+        self.assertEqual(self.report["outcome"], fk.PASS, self.report["note"])
+        self.assertIn("ЧИСТО", self.report["note"])
+        self.assertIn("входов без питания 0", self.report["note"])
+        self.assertIn("НЕПРОВЕРЕНО", self.report["note"])
+        self.assertIn("не исполнялся", self.report["note"])
+
+    def test_every_required_input_of_every_node_is_fed(self):
+        checked, bad = fk.wrap_unfed_inputs(self.derived["graph"])
+        self.assertEqual(bad, [], bad)
+        self.assertEqual(checked, len(fk.WRAP_REQUIRED),
+                         "проверено узлов меньше, чем в таблице обязательных — "
+                         "какой-то узел в граф не попал вовсе")
+
+    def test_cutting_one_feeding_link_goes_red_and_names_the_input(self):
+        """Сторож обязан уметь краснеть — иначе он украшение."""
+        derived = fk.derive_wrapper()
+        graph = derived["graph"]
+        node = next(n for n in graph["nodes"]
+                    if n["type"] == "WanVideoAnimateEmbeds")
+        slot = [i["name"] for i in node["inputs"]].index("mask")
+        graph["links"] = [l for l in graph["links"]
+                          if not (l[3] == node["id"] and l[4] == slot)]
+        checked, bad = fk.wrap_unfed_inputs(graph)
+        self.assertEqual(checked, len(fk.WRAP_REQUIRED))
+        self.assertEqual(len(bad), 1, bad)
+        self.assertIn("mask без питания", bad[0])
+        got = fk.audit_wrapper({"graph": graph})
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("входов без питания 1", got["note"])
+
+    def test_an_empty_graph_is_unmeasured_and_not_clean(self):
+        """Р2: ноль нарушений при нуле проверенных узлов — не успех."""
+        got = fk.audit_wrapper({"graph": {"nodes": [], "links": []}})
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+        self.assertNotEqual(got["outcome"], fk.PASS)
+        self.assertIn("не успех", got["note"])
+
+    def test_a_dangling_link_is_reported(self):
+        derived = fk.derive_wrapper()
+        derived["graph"]["links"].append([9999, 77777, 0, 88888, 0, "IMAGE"])
+        got = fk.audit_wrapper(derived)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("оборванных связей 1", got["note"])
+
+    def test_a_pack_the_owner_refused_is_caught_by_name_and_reason(self):
+        """Решение «KJNodes не берём» проверяется кодом, а не памятью."""
+        derived = fk.derive_wrapper()
+        derived["graph"]["nodes"].append(
+            {"id": 9998, "type": "ImageResizeKJv2",
+             "properties": {fk.PACK_KEY: "ComfyUI-KJNodes"},
+             "inputs": [], "outputs": [], "widgets_values": []})
+        got = fk.audit_wrapper(derived)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertEqual(len(got["forbidden"]), 1)
+        self.assertIn("GPL-3.0", " ".join(got["problems"]))
+
+    def test_the_clean_graph_carries_no_forbidden_pack(self):
+        """Негативный контроль к предыдущему: вход, где проверка молчит."""
+        self.assertEqual(self.report["forbidden"], [])
+        self.assertIn("запрещённых паков 0", self.report["note"])
+
+    def test_exactly_two_third_party_packs_are_named_out_loud(self):
+        """Расход, а не нарушение, — но он обязан быть НАЗВАН: обёртка и
+        GGUF-загрузчик энкодера. Всё остальное штатное."""
+        self.assertEqual(self.report["packs_required"],
+                         [fk.WRAP_PACK, fk.GGUF_PACK])
+
+    def test_the_refutation_and_the_resize_facts_travel_inside_the_file(self):
+        """Граф уедет на машину без этого репозитория и без хэндофа."""
+        fork = self.derived["graph"]["extra"]["fork"]
+        self.assertEqual(fork["no_composite"], fk.NO_COMPOSITE)
+        self.assertEqual(fork["resize_facts"], fk.WRAP_RESIZE_FACTS)
+        self.assertEqual(fork["license"], fk.WRAP_LICENSE)
+        self.assertTrue(any("DEBT" in d for d in fork["deferred"]))
+
+    def test_the_graph_survives_a_round_trip_through_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = fk.write(self.derived, Path(tmp) / "sub" / "wrap.json")
+            back = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(fk.audit_wrapper({"graph": back})["outcome"], fk.PASS)
+
+    def test_a_link_to_a_nonexistent_input_name_falls_over_at_build_time(self):
+        """Связи кладутся по ИМЕНИ входа: номер, выведенный из порядка, поедет
+        молча при первом же изменении чужой ноды."""
+        wire = fk._Wire(set())
+        a = wire.node("A", pack="p", outputs=[("out", "IMAGE")])
+        b = wire.node("B", pack="p", inputs=[("in", "IMAGE")])
+        wire.link(a, "out", b, "in")
+        with self.assertRaises(KeyError):
+            wire.link(a, "out", b, "нет-такого-входа")
+
+
+class TheGeometryAndTheLengthAreTheOnesTheOwnerChose(unittest.TestCase):
+    """480x832 вертикально, 30 к/с, 5-10 с. Числа — литералами (Т2)."""
+
+    def test_the_default_frame_is_vertical_four_eighty_by_eight_thirty_two(self):
+        params = fk.derive_wrapper()["params"]
+        self.assertEqual((params["width"], params["height"]), (480, 832))
+        self.assertLess(params["width"], params["height"],
+                        "кадр перестал быть вертикальным")
+
+    def test_the_widgets_of_the_graph_carry_that_geometry(self):
+        graph = fk.derive_wrapper()["graph"]
+        node = next(n for n in graph["nodes"]
+                    if n["type"] == "WanVideoAnimateEmbeds")
+        self.assertEqual(node["widgets_values"][:3], [480, 832, 149])
+        self.assertEqual(node["widgets_values"][4], 77)
+
+    def test_the_output_is_thirty_frames_per_second_not_the_template_sixteen(
+            self):
+        """Умолчание виджета CreateVideo в темплейте — 16, и его однажды уже
+        приняли за свойство модели. Здесь стоит решение владельца."""
+        graph = fk.derive_wrapper()["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "CreateVideo")
+        self.assertEqual(node["widgets_values"], [30])
+
+    def test_the_length_table_matches_the_one_counted_independently(self):
+        """Т2: ожидаемое — литералы, а не импорт из проверяемого модуля.
+        Числа сверены с таблицей хэндофа, посчитанной другим человеком."""
+        for seconds, frames, windows, generated in ((5, 149, 2, 153),
+                                                    (7, 209, 3, 229),
+                                                    (10, 297, 4, 305)):
+            with self.subTest(seconds=seconds):
+                got = fk.frames_for_seconds(seconds)
+                self.assertEqual(got["frames"], frames, got["note"])
+                plan = fk.window_plan(frames)
+                self.assertEqual(plan["windows"], windows, plan["note"])
+                self.assertEqual(plan["generated"], generated, plan["note"])
+
+    def test_the_length_band_is_refused_on_both_sides(self):
+        """Мутация порога в обе стороны (Т1): 5.0 и 10.0 годятся, 4.9 и 10.1 —
+        нет. Порог, у которого проверена одна сторона, сторожит половину."""
+        fk.frames_for_seconds(5.0)
+        fk.frames_for_seconds(10.0)
+        for bad in (4.9, 10.1):
+            with self.subTest(seconds=bad):
+                with self.assertRaises(ValueError) as caught:
+                    fk.frames_for_seconds(bad)
+                self.assertIn("вне полосы", str(caught.exception))
+
+    def test_the_snapping_of_the_length_is_computed_not_guessed(self):
+        """150 кадров молча становятся 149 внутри обёртки (nodes.py:1230).
+        Негативный контроль: на числе, уже стоящем на решётке, прибор молчит."""
+        self.assertEqual(fk.snap_frames(150), 149)
+        self.assertEqual(fk.snap_frames(149), 149)
+        self.assertEqual(fk.snap_frames(1), 1)
+        self.assertEqual(fk.frames_for_seconds(5)["snapped_away"], 1)
+        self.assertEqual(fk.frames_for_seconds(10)["snapped_away"], 3)
+
+    def test_a_shorter_clip_than_one_window_needs_one_window(self):
+        """Негативный контроль к плану окон: вход, где цикла нет вовсе."""
+        got = fk.window_plan(77)
+        self.assertEqual((got["windows"], got["discarded"]), (1, 0))
+        self.assertEqual(fk.window_plan(78)["windows"], 2)
+
+    def test_mutating_the_frame_rate_reaches_both_the_plan_and_the_widget(self):
+        """Т1: подмена константы-решения обязана доехать до вывода."""
+        saved = fk.WRAP_FPS
+        try:
+            fk.WRAP_FPS = 16
+            self.assertEqual(fk.frames_for_seconds(5)["frames"], 77)
+            graph = fk.derive_wrapper()["graph"]
+            node = next(n for n in graph["nodes"] if n["type"] == "CreateVideo")
+            self.assertEqual(node["widgets_values"], [16])
+        finally:
+            fk.WRAP_FPS = saved
+        self.assertEqual(fk.frames_for_seconds(5)["frames"], 149)
+
+    def test_mutating_the_window_reaches_the_plan_in_both_directions(self):
+        saved = fk.WRAP_WINDOW
+        try:
+            fk.WRAP_WINDOW = 41
+            self.assertEqual(fk.window_plan(149)["windows"], 4)
+            fk.WRAP_WINDOW = 149
+            self.assertEqual(fk.window_plan(149)["windows"], 1)
+        finally:
+            fk.WRAP_WINDOW = saved
+        self.assertEqual(fk.window_plan(149)["windows"], 2)
+
+    def test_mutating_the_frame_geometry_reaches_the_produced_graph(self):
+        saved_w, saved_h = fk.WRAP_WIDTH, fk.WRAP_HEIGHT
+        try:
+            fk.WRAP_WIDTH, fk.WRAP_HEIGHT = 832, 480
+            params = fk.derive_wrapper()["params"]
+            self.assertEqual((params["width"], params["height"]), (832, 480))
+        finally:
+            fk.WRAP_WIDTH, fk.WRAP_HEIGHT = saved_w, saved_h
+
+    def test_a_frame_side_off_the_grid_is_refused_on_both_sides(self):
+        """Обёртка округляет сторону ВНИЗ до 16 молча (nodes.py:1223), поэтому
+        480 годится, а 481 обязано падать при сборке, а не на карте."""
+        fk.derive_wrapper(width=480)
+        with self.assertRaises(ValueError) as caught:
+            fk.derive_wrapper(width=481)
+        self.assertIn("округлит вниз молча", str(caught.exception))
+
+    def test_the_block_swap_limit_is_the_one_the_node_declares(self):
+        """Т1 в обе стороны: 48 — предел ноды, 49 обязано падать."""
+        self.assertEqual(fk.BLOCKS_MAX, 48)
+        fk.derive_wrapper(blocks_to_swap=48)
+        with self.assertRaises(ValueError):
+            fk.derive_wrapper(blocks_to_swap=49)
+
+    def test_the_sampler_carries_the_settings_measured_in_the_workflow(self):
+        """Литералами (Т2), а не импортом из модуля: 3 шага, cfg 1, shift 5,
+        dpm++_sde — снято из узла 27 боевого воркфлоу владельца. Зерно у нас
+        фиксированное: `randomize` владельца делает два прогона несравнимыми,
+        а замеры нам нужнее удобства.
+        """
+        graph = fk.derive_wrapper()["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "WanVideoSampler")
+        self.assertEqual(node["widgets_values"][:4], [3, 1, 5, 0])
+        self.assertEqual(node["widgets_values"][6], "dpm++_sde")
+        self.assertEqual(node["widgets_values"][4], "fixed")
+
+    def test_the_block_swap_widget_carries_the_measured_thirty_eight(self):
+        graph = fk.derive_wrapper()["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "WanVideoBlockSwap")
+        self.assertEqual(node["widgets_values"][0], 38)
+        graph = fk.derive_wrapper(blocks_to_swap=20)["graph"]
+        node = next(n for n in graph["nodes"] if n["type"] == "WanVideoBlockSwap")
+        self.assertEqual(node["widgets_values"][0], 20)
+
+
+class PoseStrengthIsALeverAndItReachesTheGraph(unittest.TestCase):
+    """Рычаг синхронности: у владельца 1.1 против умолчания ноды 1.0."""
+
+    @staticmethod
+    def _embeds(**kw):
+        graph = fk.derive_wrapper(**kw)["graph"]
+        return next(n for n in graph["nodes"]
+                    if n["type"] == "WanVideoAnimateEmbeds")
+
+    def test_the_default_is_the_value_measured_in_the_owners_workflow(self):
+        self.assertEqual(fk.POSE_STRENGTH, 1.1)
+        self.assertEqual(self._embeds()["widgets_values"][6], 1.1)
+
+    def test_the_lever_can_actually_be_turned(self):
+        self.assertEqual(self._embeds(pose_strength=0.7)["widgets_values"][6],
+                         0.7)
+
+    def test_mutating_the_default_reaches_the_widget(self):
+        """Т1: умолчание разрешается в теле, значит мутация обязана доехать."""
+        saved = fk.POSE_STRENGTH
+        try:
+            fk.POSE_STRENGTH = 1.0
+            self.assertEqual(self._embeds()["widgets_values"][6], 1.0)
+        finally:
+            fk.POSE_STRENGTH = saved
+        self.assertEqual(self._embeds()["widgets_values"][6], 1.1)
+
+    def test_the_face_lever_is_separate_from_the_pose_one(self):
+        """Негативный контроль: подмена одного рычага не двигает другой.
+
+        Литерал 1.0, а не `fk.FACE_STRENGTH` (Т2): импортированное ожидание
+        поедет вместе с кодом и промолчит. Найдено прогоном мутаций —
+        подмена FACE_STRENGTH на 0.8 не роняла НИ ОДНОГО теста.
+        """
+        node = self._embeds(pose_strength=0.5)
+        self.assertEqual(node["widgets_values"][6], 0.5)
+        self.assertEqual(node["widgets_values"][7], 1.0,
+                         "сила лица уехала с силой позы или сменилась молча")
+        self.assertEqual(self._embeds(face_strength=0.4)["widgets_values"][7],
+                         0.4)
+
+    def test_colormatch_between_windows_is_off_as_measured(self):
+        self.assertEqual(self._embeds()["widgets_values"][5], "disabled")
+        self.assertEqual(self._embeds(colormatch="mkl")["widgets_values"][5],
+                         "mkl")
+
+
+class TheReferenceIsFittedByPaddingAndNothingIsCropped(unittest.TestCase):
+    """Дефект 17.08.2026: штатная нода режет референс `center` и срезает голову.
+
+    Обёртка вместо обрезки растягивает (nodes.py:1288) — то есть ни одно из
+    двух готовых поведений нам не годится, и референс приводится своей
+    функцией ДО графа.
+    """
+
+    @staticmethod
+    def _portrait(height=800, width=600):
+        """Портрет с меткой в самой верхней строке — это «голова»."""
+        img = np.zeros((height, width, 3), np.uint8)
+        img[0, :, 0] = 255
+        return img
+
+    @classmethod
+    def _tall(cls):
+        """Фото ВО ВЕСЬ РОСТ: 600x1600, то есть уже кадра по пропорции.
+
+        Фикстура выбрана не наугад, и первая редакция теста была на 600x800 —
+        там обрезка по центру голову НЕ трогает, потому что режет по бокам, и
+        негативный контроль краснел не по делу. Дефект (голова уезжает) живёт
+        ровно на снимках ВЫШЕ кадра по пропорции, а именно такие и приходят
+        при кадрировке во весь рост. Т3: край диапазона, а не середина.
+        """
+        return cls._portrait(height=1600, width=600)
+
+    @staticmethod
+    def _center_crop(img, width, height):
+        """Как режет штатная нода. Живёт в тесте, а не в модуле: это НЕ наш
+        способ, это то, с чем сравниваемся."""
+        scale = max(width / img.shape[1], height / img.shape[0])
+        new_h = max(1, int(round(img.shape[0] * scale)))
+        new_w = max(1, int(round(img.shape[1] * scale)))
+        ys = (np.arange(new_h) * (img.shape[0] / new_h)).astype(int)
+        xs = (np.arange(new_w) * (img.shape[1] / new_w)).astype(int)
+        scaled = img[ys.clip(0, img.shape[0] - 1)][:, xs.clip(
+            0, img.shape[1] - 1)]
+        top = (new_h - height) // 2
+        left = (new_w - width) // 2
+        return scaled[top:top + height, left:left + width]
+
+    def test_the_head_of_a_full_height_photo_survives_the_padding(self):
+        out, record = fk.pad_reference(self._tall())
+        self.assertEqual(out.shape, (1, 832, 480, 3))
+        row = out[0, 0, record["pad_left"]:480 - record["pad_right"], 0]
+        self.assertTrue((row == 255).all(),
+                        "верхняя строка референса не доехала до кадра")
+        self.assertEqual(record["pad_top"], 0)
+        self.assertEqual(record["rows_dropped"], 0)
+        self.assertGreater(record["pad_left"], 0)
+
+    def test_the_same_head_does_not_survive_the_center_crop(self):
+        """Негативный контроль к самому дефекту (И5): без него «голова цела»
+        доказывает, что мы вообще не трогали картинку."""
+        cropped = self._center_crop(self._tall(), 480, 832)
+        self.assertEqual(cropped.shape, (832, 480, 3))
+        self.assertFalse((cropped[0, :, 0] == 255).any(),
+                         "обрезка по центру сохранила верхнюю строку — тогда "
+                         "сравнивать не с чем, и дефект здесь не показан")
+
+    def test_a_photo_wider_than_the_frame_gets_its_padding_below(self):
+        """Второй край диапазона (Т3): 600x800 шире кадра по пропорции, и поля
+        ложатся вниз, а не по бокам."""
+        out, record = fk.pad_reference(self._portrait())
+        self.assertEqual(out.shape, (1, 832, 480, 3))
+        self.assertEqual((record["pad_top"], record["pad_left"]), (0, 0))
+        self.assertGreater(record["pad_bottom"], 0)
+        self.assertEqual(record["rows_dropped"], 0)
+
+    def test_an_image_already_in_the_frame_aspect_gets_no_padding_at_all(self):
+        """Прибор обязан уметь и НЕ ДЕЛАТЬ НИЧЕГО."""
+        out, record = fk.pad_reference(np.zeros((832, 480, 3), np.uint8))
+        self.assertEqual(out.shape, (1, 832, 480, 3))
+        self.assertEqual((record["pad_top"], record["pad_bottom"],
+                          record["pad_left"], record["pad_right"]),
+                         (0, 0, 0, 0))
+
+    def test_a_wide_photo_is_padded_left_and_right_and_still_not_cropped(self):
+        """Фикстура с другого края диапазона (Т3): не портрет, а панорама."""
+        wide = np.zeros((400, 1600, 3), np.uint8)
+        wide[:, 0, 1] = 255
+        out, record = fk.pad_reference(wide)
+        self.assertEqual(out.shape, (1, 832, 480, 3))
+        self.assertEqual(record["cols_dropped"], 0)
+        self.assertGreater(record["pad_bottom"], 0)
+
+    def test_the_alignment_is_a_real_choice_and_it_changes_the_output(self):
+        """Мутация константы-решения в обе стороны: `top` кладёт поля вниз,
+        `center` — поровну."""
+        top, rec_top = fk.pad_reference(self._portrait(), align="top")
+        mid, rec_mid = fk.pad_reference(self._portrait(), align="center")
+        self.assertEqual(rec_top["pad_top"], 0)
+        self.assertGreater(rec_mid["pad_top"], 0)
+        self.assertFalse(np.array_equal(top, mid))
+        with self.assertRaises(ValueError):
+            fk.pad_reference(self._portrait(), align="bottom")
+
+    def test_mutating_the_declared_alignment_reaches_the_call(self):
+        saved = dict(fk.REFERENCE_FIT)
+        try:
+            fk.REFERENCE_FIT["align"] = "center"
+            _, record = fk.pad_reference(self._portrait())
+            self.assertGreater(record["pad_top"], 0,
+                               "подмена объявленного выравнивания не доехала")
+        finally:
+            fk.REFERENCE_FIT.clear()
+            fk.REFERENCE_FIT.update(saved)
+
+    def test_the_padding_uses_the_edge_pixel_and_not_a_black_bar(self):
+        """Ровная чёрная полоса — сильный контур, модель вправе принять её за
+        часть сцены. У владельца стоит `pad_edge_pixel`, у нас то же."""
+        img = np.full((800, 600, 3), 200, np.uint8)
+        out, record = fk.pad_reference(img)
+        self.assertEqual(int(out[0, -1, 0, 0]), 200)
+
+    def test_the_produced_graph_says_how_the_reference_was_fitted(self):
+        fit = fk.derive_wrapper()["graph"]["extra"]["fork"]["reference_fit"]
+        self.assertEqual((fit["mode"], fit["align"]), ("pad", "top"))
+        self.assertIn("pad_reference", fit["by"])
+
+    def test_a_reference_not_in_frame_geometry_is_refused_by_the_input_check(
+            self):
+        """Иначе обёртка растянет его молча (nodes.py:1288)."""
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            ref_images=np.zeros((1, WH + 16, WW, 3), np.uint8)))
+        self.assertTrue(any("pad_reference" in p for p in bad), bad)
+
+    def test_a_padded_reference_passes(self):
+        """Негативный контроль: вход, где та же проверка обязана молчать."""
+        out, _ = fk.pad_reference(self._portrait(), width=WW, height=WH)
+        self.assertEqual(fk.check_wrapper_inputs(
+            wrapper_inputs(ref_images=out)), [])
+
+
+class TheWrapperInputCheckCatchesSilentCoercion(unittest.TestCase):
+    """Отличие от части I: обёртка на негодном входе не падает, а МОЛЧА
+    приводит. Разбираться пришлось бы по готовому ролику."""
+
+    def test_a_valid_input_passes(self):
+        self.assertEqual(fk.check_wrapper_inputs(wrapper_inputs()), [])
+
+    def test_the_shipped_geometry_passes_the_arithmetic(self):
+        self.assertEqual(480 % fk.SIDE_MULTIPLE, 0)
+        self.assertEqual(832 % fk.SIDE_MULTIPLE, 0)
+        self.assertEqual((149 - fk.LENGTH_BASE) % fk.LENGTH_STEP, 0)
+
+    def test_a_length_off_the_grid_is_named_with_the_number_it_becomes(self):
+        """Т1 в обе стороны: 5 годится, 6 — нет, и в сообщении стоит 5."""
+        self.assertEqual(fk.check_wrapper_inputs(wrapper_inputs()), [])
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            num_frames=WN + 1,
+            pose_images=np.zeros((WN + 1, WH, WW, 3), np.uint8),
+            face_images=np.zeros(
+                (WN + 1, fk.FACE_SIDE, fk.FACE_SIDE, 3), np.uint8),
+            mask=np.zeros((WN + 1, WH, WW), np.float32)))
+        self.assertTrue(any("прижмёт к 5 молча" in p for p in bad), bad)
+
+    def test_a_side_off_the_grid_is_refused(self):
+        bad = fk.check_wrapper_inputs(wrapper_inputs(width=WW + 1))
+        self.assertTrue(any("округлит вниз молча" in p for p in bad), bad)
+
+    def test_a_face_channel_that_is_not_512_is_refused(self):
+        """1324 в nodes.py режет лицо по центру до 512 — тот же дефект, что у
+        штатной ноды, и он молчит так же."""
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            face_images=np.zeros((WN, 256, 256, 3), np.uint8)))
+        self.assertTrue(any("дорежет по центру" in p for p in bad), bad)
+
+    def test_a_mask_with_a_channel_axis_is_refused(self):
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            mask=np.zeros((WN, WH, WW, 1), np.float32)))
+        self.assertTrue(any("без канала" in p for p in bad), bad)
+
+    def test_a_sequence_of_the_wrong_length_is_named(self):
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            pose_images=np.zeros((WN - 1, WH, WW, 3), np.uint8)))
+        self.assertTrue(any("pose_images: кадров 4" in p for p in bad), bad)
+
+    def test_a_missing_input_is_named(self):
+        got = wrapper_inputs()
+        del got["mask"]
+        bad = fk.check_wrapper_inputs(got)
+        self.assertTrue(any("mask" in p for p in bad), bad)
+
+    def test_all_violations_come_back_at_once(self):
+        bad = fk.check_wrapper_inputs(wrapper_inputs(
+            width=WW + 1, face_images=np.zeros((WN, 256, 256, 3), np.uint8)))
+        self.assertGreaterEqual(len(bad), 2, bad)
+
+    def test_mutating_the_face_side_reaches_the_check(self):
+        """Т1: константа-решение, которая ничего не сторожит, — украшение."""
+        # Вход строится ДО подмены: `wrapper_inputs` сам читает FACE_SIDE, и
+        # мутация, сдвинувшая заодно и фикстуру, не проверяла бы ничего.
+        got = wrapper_inputs()
+        saved = fk.FACE_SIDE
+        try:
+            fk.FACE_SIDE = 256
+            self.assertTrue(any("вместо 256x256" in p
+                                for p in fk.check_wrapper_inputs(got)),
+                            "мутация не доехала")
+        finally:
+            fk.FACE_SIDE = saved
+        self.assertEqual(fk.check_wrapper_inputs(got), [])
+
+    def test_mutating_the_length_step_reaches_the_check(self):
+        saved = fk.LENGTH_STEP
+        try:
+            fk.LENGTH_STEP = 2
+            self.assertEqual(fk.snap_frames(4), 3)
+            fk.LENGTH_STEP = 8
+            self.assertEqual(fk.snap_frames(4), 1)
+        finally:
+            fk.LENGTH_STEP = saved
+        self.assertEqual(fk.snap_frames(4), 1)
+        self.assertEqual(fk.snap_frames(5), 5)
+
+
+class TheWrapperWeightsComeFromTheLockAndTheLoaderCanReadThem(
+        unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.derived = fk.derive_wrapper()
+        cls.graph = cls.derived["graph"]
+
+    def test_the_graph_and_the_lock_agree_on_all_six_files(self):
+        got = fk.audit_weights({"graph": self.graph})
+        self.assertEqual(got["outcome"], fk.PASS, got["note"])
+        self.assertEqual(got["loaders_checked"], 6)
+        self.assertEqual(got["declared"], 6)
+
+    def test_the_diffusion_stage_is_the_one_the_owner_chose(self):
+        """Q4_K_M, и имя приходит из лока — в модуль оно не вписано (Е1)."""
+        files = {r["file"] for r in fk.graph_weights(self.graph)}
+        self.assertIn("Wan2.2-Animate-14B-Q4_K_M.gguf", files)
+        src = Path(fk.__file__).read_text(encoding="utf-8")
+        for name in ("Wan2.2-Animate-14B-Q4_K_M.gguf",
+                     "umt5-xxl-encoder-Q5_K_M.gguf",
+                     "WanAnimate_relight_lora_fp16.safetensors"):
+            with self.subTest(name=name):
+                self.assertNotIn(f'"{name}"', src,
+                                 "имя файла весов вписано в модуль строкой")
+
+    def test_a_lock_without_a_role_falls_over_instead_of_inventing_a_name(self):
+        """Ц10: придумать имя файла — ровно тот дефект, который на этом проекте
+        уже стоил кода против несуществующего репозитория."""
+        lock = json.loads(json.dumps(fk.load_lock()))
+        lock["weights"] = [w for w in lock["weights"]
+                           if w["role"] != "clip_vision"]
+        with self.assertRaises(KeyError) as caught:
+            fk.derive_wrapper(lock=lock)
+        self.assertIn("clip_vision", str(caught.exception))
+
+    def test_both_adapters_are_parsed_out_of_the_single_multi_node(self):
+        """Пять пар в одном узле: «один загрузчик — один файл» здесь неверно."""
+        loras = [r for r in fk.graph_weights(self.graph)
+                 if r["type"] == "WanVideoLoraSelectMulti"]
+        self.assertEqual(len(loras), 2, loras)
+        self.assertEqual({r["index"] for r in loras}, {0, 2})
+
+    def test_the_empty_adapter_slots_are_not_called_broken(self):
+        """Негативный контроль (И5): три слота `none` — исправное состояние,
+        и сторож, красный на каждом исправном графе, снимают целиком.
+
+        Слово `none` — ЛИТЕРАЛ (Т2), а не `fk.EMPTY_LORA_SLOT`. Прогон мутаций
+        показал, почему: подмена константы на «пусто» не роняла ничего —
+        и граф, и разбор читали одну и ту же константу, то есть сходились
+        между собой в чём угодно. Литерал взят из исходника ноды
+        (`lora_files = ["none"] + ...`, nodes_model_loading.py:507).
+        """
+        self.assertEqual(fk.unparsed_loaders(self.graph), [])
+        node = next(n for n in self.graph["nodes"]
+                    if n["type"] == "WanVideoLoraSelectMulti")
+        self.assertEqual(node["widgets_values"][4], "none")
+        self.assertEqual(node["widgets_values"][10:], [False, False],
+                         "merge_loras обязан быть False: WanVideoSetLoRAs "
+                         "иначе роняет прогон, а GGUF слить всё равно нельзя")
+
+    def test_garbage_in_an_adapter_slot_is_still_caught(self):
+        """А вот это уже поломка, и молчать про неё нельзя."""
+        graph = json.loads(json.dumps(self.graph))
+        node = next(n for n in graph["nodes"]
+                    if n["type"] == "WanVideoLoraSelectMulti")
+        node["widgets_values"][4] = "не файл"
+        got = fk.unparsed_loaders(graph)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["got"], "не файл")
+
+    def test_every_loader_can_read_the_format_it_is_handed(self):
+        got = fk.audit_loader_formats(self.graph)
+        self.assertEqual(got["outcome"], fk.PASS, got["note"])
+        self.assertEqual(got["checked"], 6)
+
+    def test_the_gguf_encoder_in_the_wrappers_own_node_is_caught(self):
+        """НАЙДЕНО ЧТЕНИЕМ ИСХОДНИКА, и без этой проверки уехало бы на карту.
+
+        `WanVideoTextEncodeCached` зовёт `LoadWanVideoT5TextEncoder`, а тот
+        читает `load_torch_file`. Лок объявляет энкодер в .gguf — узел упал бы
+        на загрузке, и `audit_weights` при этом был бы зелёным: имена-то
+        сходятся.
+        """
+        graph = json.loads(json.dumps(self.graph))
+        node = next(n for n in graph["nodes"] if n["type"] == "CLIPLoaderGGUF")
+        node["type"] = "WanVideoTextEncodeCached"
+        self.assertEqual(fk.audit_weights({"graph": graph})["outcome"], fk.PASS,
+                         "имена по-прежнему сходятся — значит конфликт формата "
+                         "ловит не эта проверка, и вторая нужна")
+        got = fk.audit_loader_formats(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("читать умеет только .safetensors", got["note"])
+        self.assertEqual(fk.audit_wrapper({"graph": graph})["outcome"], fk.FAIL)
+
+    def test_a_gguf_handed_to_the_vae_loader_is_caught_too(self):
+        """Второй вход того же сторожа, и он появился после прогона мутаций:
+        расширение списка форматов VAE до .gguf не роняло ничего, потому что
+        .gguf в VAE никто не подавал. Проверка, у которой нет входа, где она
+        краснеет, ничего не сторожит."""
+        graph = json.loads(json.dumps(self.graph))
+        node = next(n for n in graph["nodes"] if n["type"] == "WanVideoVAELoader")
+        node["widgets_values"][0] = "umt5-xxl-encoder-Q5_K_M.gguf"
+        got = fk.audit_loader_formats(graph)
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("WanVideoVAELoader", got["note"])
+
+    def test_a_graph_without_loaders_is_unmeasured_not_clean(self):
+        """Р2: ноль конфликтов при нуле проверенного — не успех."""
+        got = fk.audit_loader_formats({"nodes": []})
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+        self.assertEqual(got["checked"], 0)
+        self.assertIn("не успех", got["note"])
+
+    def test_the_gguf_diffusion_needs_no_third_party_unet_loader(self):
+        """Находка чтением: `WanVideoModelLoader` принимает .gguf сам
+        (nodes_model_loading.py:1131). На один сторонний пак меньше."""
+        types = {n["type"] for n in self.graph["nodes"]}
+        self.assertNotIn("UnetLoaderGGUF", types)
+        self.assertIn("WanVideoModelLoader", types)
+        self.assertIn(".gguf", fk.LOADER_FORMATS["WanVideoModelLoader"])
+
+
+class TheRenderPicksTheRulesInsteadOfBeingWrittenTwice(unittest.TestCase):
+    """Е1: три исхода происхождения, метка в пикселях и обратная проверка на
+    подлог у обоих производств одни и те же."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.graph = fk.derive_wrapper()["graph"]
+
+    def test_without_a_backend_the_wrapper_path_says_it_is_a_mock(self):
+        got = fk.render(self.graph, wrapper_inputs(), kind="wrapper")
+        self.assertEqual(got["source"], fk.MOCK)
+        self.assertEqual(got["outcome"], fk.UNMEASURED)
+        self.assertIn("ГЕНЕРАЦИИ НЕ БЫЛО", got["note"])
+        self.assertTrue(fk.is_mock(got["frames"]))
+
+    def test_a_backend_returning_marked_frames_is_still_caught(self):
+        def liar(graph, inputs):
+            return fk.mock_frames(inputs["num_frames"], inputs["height"],
+                                  inputs["width"])
+
+        got = fk.render(self.graph, wrapper_inputs(), backend=liar,
+                        kind="wrapper")
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertIn("подлог", got["note"])
+
+    def test_an_honest_backend_gets_pass_and_ran(self):
+        """НЕПРОВЕРЕНО: «настоящий» бэкенд подставной. На ComfyUI эта ветка не
+        исполнялась ни разу — его в этой среде нет."""
+        def honest(graph, inputs):
+            return np.full((inputs["num_frames"], inputs["height"],
+                            inputs["width"], 3), 7, np.uint8)
+
+        got = fk.render(self.graph, wrapper_inputs(), backend=honest,
+                        kind="wrapper")
+        self.assertEqual((got["source"], got["outcome"]), (fk.RAN, fk.PASS))
+
+    def test_bad_input_returns_no_frames_at_all(self):
+        got = fk.render(self.graph, wrapper_inputs(width=WW + 1),
+                        kind="wrapper")
+        self.assertEqual(got["source"], fk.NOTHING)
+        self.assertIsNone(got["frames"])
+
+    def test_the_two_rule_sets_are_not_interchangeable(self):
+        """Негативный контроль (И5): граф обёртки, проверенный правилами части
+        I, обязан провалиться — иначе `kind` ничего не выбирает."""
+        got = fk.render(self.graph, wrapper_inputs())
+        self.assertEqual(got["outcome"], fk.FAIL)
+        self.assertTrue(any("вход:" in p for p in got["problems"]),
+                        got["problems"])
+
+    def test_an_unknown_rule_set_falls_over_and_names_the_options(self):
+        with self.assertRaises(ValueError) as caught:
+            fk.render(self.graph, wrapper_inputs(), kind="выдумка")
+        self.assertIn("wrapper", str(caught.exception))
 
 
 if __name__ == "__main__":
