@@ -680,7 +680,7 @@ class AnInterruptedJobIsNotABadGraph(unittest.TestCase):
     def test_an_interrupted_job_is_unmeasured(self):
         got = fb.classify_history(
             self._entry("execution_interrupted", {"node_type": "WanVideoSampler"}))
-        self.assertEqual(got["outcome"], fb.UNMEASURED)
+        self.assertEqual(got["outcome"], "не смогли проверить")  # Т2: литерал, не импорт
         self.assertIn("СНЯЛИ снаружи", got["note"])
         self.assertIn("WanVideoSampler", got["note"])
 
@@ -689,14 +689,14 @@ class AnInterruptedJobIsNotABadGraph(unittest.TestCase):
         got = fb.classify_history(self._entry(
             "execution_error",
             {"node_type": "WanVideoSampler", "exception_message": "OOM"}))
-        self.assertEqual(got["outcome"], fb.FAIL)
+        self.assertEqual(got["outcome"], "не годно")  # Т2: литерал, не импорт
         self.assertIn("OOM", got["note"])
 
     def test_completed_with_no_files_stays_a_failure(self):
         """Третий случай не должен был поехать вслед за первыми двумя."""
         got = fb.classify_history(
             {"status": {"completed": True, "messages": []}, "outputs": {}})
-        self.assertEqual(got["outcome"], fb.FAIL)
+        self.assertEqual(got["outcome"], "не годно")  # Т2: литерал, не импорт
 
     def test_the_interrupt_event_name_is_the_one_the_server_sends(self):
         # Литерал (Т2): так это поле зовётся в execution.py, переименовать его
