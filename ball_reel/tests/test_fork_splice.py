@@ -486,6 +486,109 @@ class TheEntryPoint(unittest.TestCase):
         self.assertEqual(sorted(fs.EXIT_BY_OUTCOME.values()), [0, 1, 2])
 
 
+class TheCycleLayoutPlaysTheIntroOnceAndTheLoopForever(unittest.TestCase):
+    """Продуктовая раскладка: подводка один раз, дальше круг бесконечно.
+
+    Решение владельца 20.08. Подводка — кадры НЕПОСРЕДСТВЕННО перед петлёй,
+    поэтому стык «подводка -> круг» бесшовен по построению: в снятом
+    материале эти кадры идут подряд. Мост во всём ролике ОДИН, в конце круга.
+
+    Числа боевые: петля 114..162 в ролике из 362 кадров, мост 4 кадра.
+    Ожидаемое написано литералами (Т2): 101, 49, 52 — цифрами, не формулой.
+    """
+
+    def test_the_battle_layout_is_a_hundred_and_one_frames(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["total"], 101)
+
+    def test_the_loop_starts_where_the_intro_ends(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["loop_start"], 49)
+        self.assertEqual(got["frames"][49], ("кадр", 114))
+
+    def test_the_intro_is_the_frames_immediately_before_the_loop(self):
+        # Ради этого всё и затевалось: 113 и 114 идут подряд в материале,
+        # поэтому лечить стык подводки не надо.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["frames"][0], ("кадр", 65))
+        self.assertEqual(got["frames"][48], ("кадр", 113))
+
+    def test_the_joint_frame_is_never_laid_down(self):
+        # Кадр j — тот же момент, что кадр i. Положить оба значит получить
+        # два одинаковых кадра подряд на КАЖДОМ круге.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        real = [n for kind, n in got["frames"] if kind == "кадр"]
+        self.assertNotIn(162, real)
+        self.assertEqual(max(real), 161)
+
+    def test_the_bridge_frames_come_last_and_are_counted(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["frames"][-4:],
+                         [("мост", 1), ("мост", 2), ("мост", 3), ("мост", 4)])
+
+    def test_the_length_always_lands_on_the_wrapper_step(self):
+        # Обёртка прижимает длину ВНИЗ молча, и прижатый круг обрывается
+        # посередине движения. Проверяется на всей полосе мостов, а не в точке.
+        for bridge in range(0, 14):
+            with self.subTest(bridge=bridge):
+                got = fs.cycle_plan(114, 162, bridge=bridge, n_frames=362)
+                self.assertEqual(got["outcome"], "годно")
+                self.assertEqual(got["total"] % 4, 1)
+
+    def test_a_loop_too_close_to_the_start_has_no_intro(self):
+        # Третий исход, и он не отказ: круг без подводки — годный товар.
+        got = fs.cycle_plan(10, 58, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIn("10", got["note"])
+
+    def test_a_much_shorter_intro_is_never_silently_substituted(self):
+        """Мутация `INTRO_SNAP_REACH = 20` пережила первый заход сьюта.
+
+        Смысл дефекта: материала перед петлёй 35 кадров при заказе 49, и при
+        широком поиске модуль ТИХО отдаёт подводку в 33 кадра — то есть другой
+        товар под именем заказанного. Подгонка на шаг обёртки и «взять что
+        найдётся» — разные вещи, и вторая здесь запрещена.
+        """
+        got = fs.cycle_plan(35, 83, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertEqual(got["loop_start"], 0)
+
+    def test_a_cut_inside_the_intro_is_a_finding(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362, cuts=[80])
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertIn("рез", got["note"])
+
+    def test_a_cut_outside_the_intro_is_not(self):
+        # Негативный контроль (И5): прибор обязан молчать, когда рез не мешает.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362, cuts=[20, 300])
+        self.assertEqual(got["outcome"], "годно")
+
+    def test_a_loop_of_one_frame_is_refused(self):
+        got = fs.cycle_plan(114, 114, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_a_loop_outside_the_material_is_refused(self):
+        got = fs.cycle_plan(114, 400, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_the_cycle_is_the_body_plus_the_bridge(self):
+        # Литералы (Т2): петля 114..162 — это 49 кадров, тело 48, мост 4.
+        self.assertEqual(fs.cycle_frames(49, 4), 52)
+        self.assertEqual(fs.cycle_frames(49, 0), 48)
+
+    def test_the_intro_never_shrinks_the_loop_to_fit_the_step(self):
+        # Подгоняется ПОДВОДКА, не петля и не мост: петлю выбрал прибор,
+        # мост продиктован измеренным стыком.
+        for bridge in range(0, 14):
+            with self.subTest(bridge=bridge):
+                got = fs.cycle_plan(114, 162, bridge=bridge, n_frames=362)
+                self.assertEqual(got["cycle"], 48 + bridge)
+                self.assertEqual(
+                    sum(1 for kind, _ in got["frames"] if kind == "мост"),
+                    bridge)
+
+
 class TheKeyNeverOverridesWhatWasMeasured(unittest.TestCase):
     """Е2: при расхождении ключа и файла верим файлу, и это «не годно».
 

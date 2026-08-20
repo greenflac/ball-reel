@@ -130,6 +130,27 @@ MIN_LOOP_FRAMES = 2
 LINK_HARD, LINK_SYM, LINK_COPY = "жёсткая ссылка", "символическая", "копия"
 LINK_ORDER = (LINK_HARD, LINK_SYM, LINK_COPY)
 
+#: ВЫБРАНО (кем: владелец, 20.08; из чего: продуктовая логика выдачи).
+#: Подводка — кадры НЕПОСРЕДСТВЕННО ПЕРЕД петлёй, длиной примерно с саму
+#: петлю. Проигрывается один раз, дальше петля крутится плеером бесконечно.
+#:
+#: ПОЧЕМУ ИМЕННО «ПЕРЕД», А НЕ ЛЮБОЙ КУСОК: кадры i-1 и i идут подряд в снятом
+#: материале, поэтому стык «подводка -> петля» не надо ничем лечить — он
+#: бесшовен по построению, а не по починке. Мост во всём ролике остаётся ОДИН,
+#: в конце петли.
+INTRO_MATCHES_CYCLE = 1.0
+
+#: РАСЧЁТ (по `fork_comfy.snap_frames`): на сколько кадров разрешено подвинуть
+#: подводку, чтобы ВЕСЬ прогон лёг на шаг обёртки. Шаг равен 4, значит
+#: подходящая длина найдётся не дальше трёх кадров — искать шире незачем.
+#:
+#: ПОДГОНЯЕТСЯ ИМЕННО ПОДВОДКА, И ЭТО НЕ ПРОИЗВОЛ. Петля выбрана прибором, её
+#: трогать нельзя; длина моста продиктована измеренным стыком, её тоже. А
+#: подводка — это «сколько снятого материала показать до круга», и один кадр
+#: туда-сюда не меняет в ней ничего. Прижимать вместо неё петлю значило бы
+#: испортить ровно то, ради чего всё делалось.
+INTRO_SNAP_REACH = fork_comfy.LENGTH_STEP - 1
+
 EXIT_BY_OUTCOME = {PASS: 0, FAIL: 1, UNMEASURED: 2}
 
 
@@ -354,6 +375,145 @@ def choose_repeats(length: int, seconds: float, *, fps) -> dict:
 # ---------------------------------------------------------------------------
 # Запись на диск
 # ---------------------------------------------------------------------------
+
+def cycle_frames(loop_len: int, bridge: int) -> int:
+    """Сколько кадров в ОДНОМ круге: тело петли плюс мост.
+
+    Тело петли — [i..j-1], а НЕ [i..j]: кадр j это тот же момент движения, что
+    кадр i (ровно поэтому пара и выбрана петлёй), и положить оба значит
+    получить два одинаковых кадра подряд. Дальше идёт мост, по которому тело
+    доходит от последнего кадра тела обратно к позе i.
+    """
+    for name, v in (("loop_len", loop_len), ("bridge", bridge)):
+        if not isinstance(v, int) or isinstance(v, bool):
+            raise TypeError(f"{name}={v!r}: ожидалось целое")
+    if loop_len < MIN_LOOP_FRAMES:
+        raise ValueError(
+            f"петля {loop_len} кадр(ов): шаг склейки {loop_len - 1}, "
+            f"крутить нечего")
+    if bridge < 0:
+        raise ValueError(f"мост {bridge} кадров: отрицательным он не бывает")
+    return loop_len - 1 + bridge
+
+
+def intro_length(loop_len: int, bridge: int, *, before: int) -> dict:
+    """Сколько кадров подводки взять. Три исхода, и третий здесь частый.
+
+    `before` — сколько кадров снятого материала лежит ПЕРЕД началом петли.
+
+    ЗАЧЕМ ПОДГОНКА. Обёртка прижимает длину прогона вниз к шагу
+    `fork_comfy.LENGTH_STEP` МОЛЧА, и прижатый на кадр прогон обрывает круг
+    посередине движения — то есть портит ровно тот стык, ради которого всё
+    затевалось. Поэтому длина подбирается ДО прогона и проверяется не
+    рассуждением, а вызовом `snap_frames`.
+
+    ТРИ ИСХОДА (Р1):
+        годно      подводка нужной длины набирается и весь прогон ложится
+                   на шаг обёртки;
+        не смогли  материала перед петлёй не хватает — сказано, сколько есть
+                   и сколько было нужно. Это НЕ отказ: круг без подводки
+                   остаётся годным товаром, решает вызывающий;
+        не годно   петля короче двух кадров либо мост отрицательный — здесь
+                   считать нечего вовсе.
+    """
+    cycle = cycle_frames(loop_len, bridge)
+    if not isinstance(before, int) or isinstance(before, bool):
+        raise TypeError(f"before={before!r}: ожидалось целое")
+    if before < 0:
+        raise ValueError(f"before={before}: кадров перед петлёй не бывает "
+                         f"отрицательное число")
+    want = int(round(loop_len * INTRO_MATCHES_CYCLE))
+    # Ближайшая к заказу длина, при которой обёртка НИЧЕГО не прижмёт.
+    # Ничья решается в пользу БОЛЬШЕЙ: лишний кадр подводки — это лишний кадр
+    # настоящего снятого движения, а меньшая — минус кадр материала.
+    fits = [m for m in range(max(0, want - INTRO_SNAP_REACH),
+                             want + INTRO_SNAP_REACH + 1)
+            if m <= before and fork_comfy.snap_frames(m + cycle) == m + cycle]
+    if not fits:
+        reachable = [m for m in range(max(0, want - INTRO_SNAP_REACH),
+                                      want + INTRO_SNAP_REACH + 1)
+                     if fork_comfy.snap_frames(m + cycle) == m + cycle]
+        return {"outcome": UNMEASURED, "intro": 0, "cycle": cycle, "total": 0,
+                "note": (f"подводка длиной около {want} кадров не набирается: "
+                         f"перед петлёй лежит {before} кадр(ов). На шаг "
+                         f"обёртки {fork_comfy.LENGTH_STEP} при круге в "
+                         f"{cycle} кадров ложатся подводки {reachable or '—'}, "
+                         f"и все они длиннее того, что есть. Круг без "
+                         f"подводки остаётся годным — решает вызывающий")}
+    intro = min(fits, key=lambda m: (abs(m - want), -m))
+    return {"outcome": PASS, "intro": intro, "cycle": cycle,
+            "total": intro + cycle,
+            "note": (f"подводка {intro} кадр(ов) (заказ {want}), круг {cycle} "
+                     f"= тело {loop_len - 1} плюс мост {bridge}; всего "
+                     f"{intro + cycle} кадров, обёртка не прижмёт. Круг "
+                     f"начинается с кадра {intro} (счёт с нуля)")}
+
+
+def cut_inside(start: int, stop: int, cuts) -> list:
+    """Монтажные резы, попавшие в полуинтервал [start, stop). Вынесено (Т5).
+
+    Рез внутри подводки — это смена плана на ровном месте: зритель видит, как
+    кадр меняется до того, как начался круг. Стоит отдельно от проверки длины,
+    потому что это РАЗНЫЕ находки и лечатся они по-разному.
+    """
+    return sorted(c for c in cuts if start <= c < stop)
+
+
+def cycle_plan(i: int, j: int, *, bridge: int, n_frames: int, cuts=(),
+               intro: bool = True) -> dict:
+    """Раскладка прогона: подводка один раз, дальше круг бесконечно.
+
+    Возвращает `frames` — список того, ЧТО кладётся по порядку:
+        ("кадр", n)   настоящий кадр драйвинга с номером n
+        ("мост", t)   t-й кадр моста, t от 1 до `bridge`; пикселей у него нет,
+                      их производит `fork_channels` по интерполированным точкам
+
+    и `loop_start` — с какого места в этом списке начинается круг. Всё, что
+    до него, играется один раз.
+
+    ПОЧЕМУ РАСКЛАДКА, А НЕ СРАЗУ ФАЙЛЫ: кадров моста на диске ещё нет, и
+    выдумывать их здесь нельзя — этот модуль кладёт снятое, а не рисует.
+    """
+    if j <= i:
+        return {"outcome": FAIL, "frames": [], "loop_start": None,
+                "note": f"петля [{i}..{j}]: конец не позже начала"}
+    if i < 0 or j >= n_frames:
+        return {"outcome": FAIL, "frames": [], "loop_start": None,
+                "note": (f"петля [{i}..{j}] выходит за материал из "
+                         f"{n_frames} кадров")}
+    loop_len = j - i + 1
+    if loop_len < MIN_LOOP_FRAMES:
+        return {"outcome": FAIL, "frames": [], "loop_start": None,
+                "note": (f"петля {loop_len} кадр(ов): шаг склейки "
+                         f"{loop_len - 1}, крутить нечего")}
+    got = intro_length(loop_len, bridge, before=i) if intro else {
+        "outcome": UNMEASURED, "intro": 0, "cycle": cycle_frames(loop_len, bridge),
+        "total": cycle_frames(loop_len, bridge),
+        "note": "подводка не запрошена"}
+    head = got["intro"]
+    bad = cut_inside(i - head, i, cuts)
+    if bad:
+        return {"outcome": FAIL, "frames": [], "loop_start": None,
+                "intro": head, "cycle": got["cycle"],
+                "note": (f"в подводке [{i - head}..{i - 1}] лежит монтажный "
+                         f"рез: {bad}. Это смена плана до начала круга — "
+                         f"взять подводку короче либо другую петлю")}
+    frames = ([("кадр", n) for n in range(i - head, i)]
+              + [("кадр", n) for n in range(i, j)]
+              + [("мост", t) for t in range(1, bridge + 1)])
+    total = len(frames)
+    if fork_comfy.snap_frames(total) != total and intro and got["outcome"] == PASS:
+        # Сторож своей же арифметики (Е1): расхождение ловит машина, а не глаз.
+        raise AssertionError(
+            f"раскладка дала {total} кадров, обёртка прижмёт к "
+            f"{fork_comfy.snap_frames(total)} — арифметика подводки разъехалась")
+    return {"outcome": got["outcome"], "frames": frames, "loop_start": head,
+            "intro": head, "cycle": got["cycle"], "bridge": bridge,
+            "total": total,
+            "note": (f"{got['note']} Раскладка: кадров {total}, из них "
+                     f"снятых {total - bridge}, кадров моста {bridge}; "
+                     f"круг с {head}-го по {total - 1}-й")}
+
 
 def place(src: Path, dst: Path, *, prefer=None) -> str:
     """Положить кадр, не копируя байты, если это возможно. Возвращает — ЧЕМ.
