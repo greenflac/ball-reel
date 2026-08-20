@@ -1300,6 +1300,572 @@ class TheSequenceFeedsRealPixelsToTheFaceChannel(unittest.TestCase):
         self.assertEqual(got["outcome"], fi.PASS)
 
 
+# --------------------------------------------------------------------------
+# МОСТ МЕЖДУ КОНЦОМ И НАЧАЛОМ ПЕТЛИ (2026-08-20)
+#
+# ЧЕГО ЭТИ ТЕСТЫ НЕ ДОКАЗЫВАЮТ (Ц4, наверх): что мост незаметен глазу на
+# сгенерированном ролике. Ролика не существовало ни разу; здесь проверяется
+# арифметика моста, три исхода на точку и происхождение пикселей лица.
+# Глазами мост открыт на боевом материале отдельно — полосы кадров
+# `bridge_strip_*.png`, и найденное там записано в отчёт смены.
+#
+# ТЕСТЫ НЕ ЗОВУТ ДЕТЕКТОР 133 ТОЧЕК И НЕ ХОДЯТ В СЕТЬ (Т4): точки — литеральные
+# фикстуры, лицевые кропы — ровные квадраты нужного размера.
+# --------------------------------------------------------------------------
+
+
+def _chain(n: int = fc.WHOLEBODY_JOINTS, x: float = 0.0, y: float = 0.0,
+           score: float = 0.9) -> list:
+    """133 точки, все в одной названной позиции. Мост между двумя такими —
+    чистая арифметика, и любой сдвиг виден литералом, а не «примерно»."""
+    return [(x, y, score)] * n
+
+
+def _square(side: int | None = None, colour=(7, 8, 9)):
+    """Кроп лицевого канала нужного размера. Цвет опознаваемый: перепутанного
+    донора видно по пикселю, а не по размеру."""
+    from PIL import Image
+
+    return Image.new("RGB", (side or fc.FACE_SIDE, side or fc.FACE_SIDE), colour)
+
+
+class TheBridgeTimingIsLinearBecauseThatIsWhatWasMeasured(unittest.TestCase):
+    """Раскладка моста по времени. Ожидаемое — ЛИТЕРАЛЫ (Т2), не пересчёт формулы."""
+
+    def test_a_bridge_of_four_is_the_four_quarters_and_not_the_ends(self):
+        self.assertEqual(fc.bridge_weights(4), (0.2, 0.4, 0.6, 0.8))
+
+    def test_a_bridge_of_one_sits_exactly_in_the_middle(self):
+        self.assertEqual(fc.bridge_weights(1), (0.5,))
+
+    def test_a_bridge_of_thirteen_starts_and_ends_inside_the_gap(self):
+        """Т3, дальний край диапазона: 13 кадров, концы НЕ входят."""
+        got = fc.bridge_weights(13)
+        self.assertEqual(len(got), 13)
+        self.assertGreater(got[0], 0.0)
+        self.assertLess(got[-1], 1.0)
+        self.assertAlmostEqual(got[0], 1 / 14)
+        self.assertAlmostEqual(got[-1], 13 / 14)
+
+    def test_zero_frames_is_a_refusal_and_not_an_empty_bridge(self):
+        """«Ноль кадров = годно» прорастало на этом проекте в четыре файла."""
+        with self.assertRaises(ValueError) as caught:
+            fc.bridge_weights(0)
+        self.assertIn("не строится", str(caught.exception))
+
+    def test_a_negative_bridge_is_refused_too(self):
+        with self.assertRaises(ValueError):
+            fc.bridge_weights(-3)
+
+    def test_a_fractional_length_is_refused_rather_than_rounded(self):
+        with self.assertRaises(ValueError):
+            fc.bridge_weights(2.5)
+
+    def test_the_minimum_is_guarded_in_both_directions(self):
+        """Т1 по `BRIDGE_MIN_FRAMES`: строже — отказ на 1, слабее — 0 проходит."""
+        original = fc.BRIDGE_MIN_FRAMES
+        try:
+            fc.BRIDGE_MIN_FRAMES = 2
+            with self.assertRaises(ValueError):
+                fc.bridge_weights(1)
+            fc.BRIDGE_MIN_FRAMES = 0
+            self.assertEqual(fc.bridge_weights(0), ())
+        finally:
+            fc.BRIDGE_MIN_FRAMES = original
+
+    def test_the_shipped_layout_is_linear_and_the_literal_says_so(self):
+        """Б2: сторож на ОТГРУЖАЕМОЕ значение, отдельно от тех, кто его подменяет."""
+        self.assertEqual(fc.BRIDGE_EASING, "линейно")
+        self.assertEqual(fc.BRIDGE_LINEAR, "линейно")
+        self.assertEqual(fc.BRIDGE_SMOOTH, "со сглаживанием")
+
+    def test_the_smooth_layout_bunches_the_middle_and_that_is_why_it_lost(self):
+        """Негативный контроль к выбору (И5): прибор обязан различать раскладки.
+
+        При k=4 сглаживание даёт шаги 0.16 / 0.38 / 0.45 / 0.38 / 0.16 от стыка,
+        то есть макс/мин 2.85 — ровно тот рывок скорости, ради снятия которого
+        мост и строится. Линейная даёт 1.00.
+        """
+        smooth = fc.bridge_weights(4, easing=fc.BRIDGE_SMOOTH)
+        self.assertNotEqual(smooth, fc.bridge_weights(4))
+        self.assertAlmostEqual(smooth[0], 0.104, places=3)
+        self.assertAlmostEqual(smooth[1], 0.352, places=3)
+
+    def test_at_one_frame_the_two_layouts_coincide_and_that_is_not_a_bug(self):
+        """И5 с другой стороны: вход, на котором прибор ОБЯЗАН молчать."""
+        self.assertEqual(fc.bridge_weights(1, easing=fc.BRIDGE_SMOOTH),
+                         fc.bridge_weights(1, easing=fc.BRIDGE_LINEAR))
+
+    def test_an_unknown_layout_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as caught:
+            fc.bridge_weights(4, easing="как-нибудь")
+        self.assertIn("нет такой раскладки", str(caught.exception))
+
+    def test_the_shipped_default_is_the_one_that_decides(self):
+        """Т1 по `BRIDGE_EASING`: умолчание не в сигнатуре, подмена доезжает."""
+        original = fc.BRIDGE_EASING
+        try:
+            fc.BRIDGE_EASING = fc.BRIDGE_SMOOTH
+            self.assertNotEqual(fc.bridge_weights(4), (0.2, 0.4, 0.6, 0.8))
+        finally:
+            fc.BRIDGE_EASING = original
+        self.assertEqual(fc.bridge_weights(4), (0.2, 0.4, 0.6, 0.8))
+
+
+class TheThirdOutcomeOfAPointIsNotHalfDrawn(unittest.TestCase):
+    """Р1 на каждой из 133 точек, и третий исход здесь содержательный."""
+
+    def setUp(self):
+        self.hi = fc.MIN_SCORE + 0.1
+        self.lo = fc.MIN_SCORE - 0.1
+
+    def test_seen_at_both_ends_is_interpolated(self):
+        self.assertEqual(fc.bridge_point_kind((0, 0, self.hi), (9, 9, self.hi)),
+                         "видна на обоих концах")
+
+    def test_seen_at_neither_end_is_absent_from_the_bridge(self):
+        self.assertEqual(fc.bridge_point_kind((0, 0, self.lo), (9, 9, self.lo)),
+                         "не видна ни на одном конце")
+
+    def test_seen_at_exactly_one_end_is_the_third_outcome_both_ways(self):
+        self.assertEqual(fc.bridge_point_kind((0, 0, self.hi), (9, 9, self.lo)),
+                         "видна только на одном конце")
+        self.assertEqual(fc.bridge_point_kind((0, 0, self.lo), (9, 9, self.hi)),
+                         "видна только на одном конце")
+
+    def test_the_bar_is_inclusive_here_too(self):
+        """Порог тот же, что у `render`; разъехавшись, они дали бы точку,
+        посчитанную видимой и не нарисованную."""
+        self.assertEqual(
+            fc.bridge_point_kind((0, 0, fc.MIN_SCORE), (9, 9, fc.MIN_SCORE)),
+            "видна на обоих концах")
+
+    def test_the_three_kinds_are_three_different_strings(self):
+        self.assertEqual(len(set(fc.BRIDGE_KINDS)), 3)
+
+    def test_a_one_sided_point_is_not_drawn_on_any_bridge_frame(self):
+        """ГЛАВНОЕ УТВЕРЖДЕНИЕ третьего исхода: точки нет, а не «есть наполовину».
+
+        Проверяется не баллом, а ЧЕРНИЛАМИ: балл — наше внутреннее решение,
+        а модель увидит пиксели.
+        """
+        a = [(50.0, 50.0, self.hi)] * fc.WHOLEBODY_JOINTS
+        b = [(50.0, 50.0, self.lo)] * fc.WHOLEBODY_JOINTS
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(got["one_sided"], 133)
+        for frame in got["frames"]:
+            img = fc.render(frame, fc.BODY_CHANNEL, 120, 120)
+            self.assertEqual(img.getbbox(), None,
+                             "точка, видимая только на одном конце, всё-таки "
+                             "нарисована — это «дорисовать наполовину»")
+
+    def test_the_drop_score_is_below_the_bar_and_that_is_the_whole_point(self):
+        self.assertLess(fc.BRIDGE_DROP_SCORE, fc.MIN_SCORE)
+
+    def test_the_drop_score_is_guarded_in_both_directions(self):
+        """Т1: поднять балл выпавшей точки выше порога — и она рисуется."""
+        a = [(50.0, 50.0, self.hi)] * fc.WHOLEBODY_JOINTS
+        b = [(50.0, 50.0, self.lo)] * fc.WHOLEBODY_JOINTS
+        original = fc.BRIDGE_DROP_SCORE
+        try:
+            fc.BRIDGE_DROP_SCORE = 0.99
+            got = fc.bridge_points(a, b, 4)
+            self.assertNotEqual(
+                fc.render(got["frames"][0], fc.BODY_CHANNEL, 120, 120).getbbox(),
+                None)
+        finally:
+            fc.BRIDGE_DROP_SCORE = original
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(
+            fc.render(got["frames"][0], fc.BODY_CHANNEL, 120, 120).getbbox(),
+            None)
+
+
+class TheBridgeWalksTheBodyFromJToI(unittest.TestCase):
+    """Ядро задачи: k наборов из 133 точек, ожидаемое литералами."""
+
+    def test_four_frames_walk_the_fifths_of_the_way(self):
+        a = _chain(x=0.0, y=0.0)
+        b = _chain(x=100.0, y=50.0)
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(len(got["frames"]), 4)
+        self.assertEqual([round(f[0][0], 6) for f in got["frames"]],
+                         [20.0, 40.0, 60.0, 80.0])
+        self.assertEqual([round(f[0][1], 6) for f in got["frames"]],
+                         [10.0, 20.0, 30.0, 40.0])
+
+    def test_one_frame_lands_in_the_middle(self):
+        got = fc.bridge_points(_chain(x=0.0), _chain(x=100.0), 1)
+        self.assertEqual(round(got["frames"][0][0][0], 6), 50.0)
+
+    def test_thirteen_frames_never_repeat_an_end(self):
+        """Т3, дальний край: мост, включивший свои концы, продублировал бы два
+        настоящих кадра — то есть остановил бы тело ровно там, где её убирают."""
+        a, b = _chain(x=0.0), _chain(x=140.0)
+        got = fc.bridge_points(a, b, 13)
+        self.assertEqual(len(got["frames"]), 13)
+        self.assertEqual(round(got["frames"][0][0][0], 6), 10.0)
+        self.assertEqual(round(got["frames"][-1][0][0], 6), 130.0)
+
+    def test_every_frame_keeps_all_one_hundred_thirty_three_slots(self):
+        """Мост, отдавший меньше точек, сдвинул бы всю раскладку индексов."""
+        got = fc.bridge_points(_chain(), _chain(x=10.0), 4)
+        for frame in got["frames"]:
+            self.assertEqual(len(frame), 133)
+
+    def test_the_score_is_the_lower_of_the_two_ends_and_not_the_average(self):
+        a = [(0.0, 0.0, 0.9)] * fc.WHOLEBODY_JOINTS
+        b = [(10.0, 0.0, 0.5)] * fc.WHOLEBODY_JOINTS
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(got["frames"][0][0][2], 0.5)
+        self.assertNotEqual(got["frames"][0][0][2], 0.7)
+
+    def test_mismatched_skeletons_are_refused_rather_than_zipped_short(self):
+        with self.assertRaises(ValueError) as caught:
+            fc.bridge_points(_chain(133), _chain(17), 4)
+        self.assertIn("не один и тот же скелет", str(caught.exception))
+
+    def test_empty_ends_are_refused(self):
+        with self.assertRaises(ValueError):
+            fc.bridge_points([], [], 4)
+
+    def test_the_direction_is_from_j_to_i_and_swapping_is_observable(self):
+        """Негативный контроль порядка (И5): мост наоборот обязан отличаться."""
+        a, b = _chain(x=0.0), _chain(x=100.0)
+        forward = fc.bridge_points(a, b, 4)["frames"][0][0][0]
+        back = fc.bridge_points(b, a, 4)["frames"][0][0][0]
+        self.assertEqual(round(forward, 6), 20.0)
+        self.assertEqual(round(back, 6), 80.0)
+
+
+class TheBridgeSpeedIsPrintedAsANumber(unittest.TestCase):
+    """П1: канал воздействия не добавляется без метрики, что воздействие доехало."""
+
+    def test_the_step_is_the_gap_split_evenly(self):
+        a, b = _chain(x=0.0), _chain(x=100.0)
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(round(got["gap"], 6), 100.0)
+        self.assertEqual([round(s, 6) for s in got["steps"]],
+                         [20.0, 20.0, 20.0, 20.0, 20.0])
+        self.assertEqual(round(got["step_ratio"], 6), 1.0)
+
+    def test_the_chain_has_one_more_step_than_the_bridge_has_frames(self):
+        """Шагов k+1, а не k: считаются и вход в мост, и выход из него — рывок
+        живёт именно на этих двух, а не внутри."""
+        self.assertEqual(len(fc.bridge_points(_chain(), _chain(x=10.0), 13)["steps"]),
+                         14)
+
+    def test_the_smooth_layout_shows_its_jerk_in_that_very_number(self):
+        """Число, по которому сглаживание и проиграло. Литерал, а не пересчёт."""
+        got = fc.bridge_points(_chain(x=0.0), _chain(x=100.0), 4,
+                               easing=fc.BRIDGE_SMOOTH)
+        self.assertAlmostEqual(got["step_ratio"], 2.846, places=3)
+
+    def test_pose_step_prints_its_denominator(self):
+        """В2: прибор, печатающий среднее, обязан печатать и по скольким точкам."""
+        a = [(0.0, 0.0, 0.9), (0.0, 0.0, 0.9), (0.0, 0.0, 0.0)]
+        b = [(3.0, 4.0, 0.9), (0.0, 0.0, 0.9), (9.0, 9.0, 0.9)]
+        got = fc.pose_step(a, b)
+        self.assertEqual(got["measured"], 2)
+        self.assertEqual(got["total"], 3)
+        self.assertEqual(round(got["mean"], 6), 2.5)
+
+    def test_nothing_visible_is_unmeasured_and_not_zero_step(self):
+        """Р1/Р2: ноль нарушений при нуле проверок — не успех."""
+        a = [(0.0, 0.0, 0.0)] * 5
+        got = fc.pose_step(a, a)
+        self.assertIsNone(got["mean"])
+        self.assertEqual(got["measured"], 0)
+        self.assertIn("НЕ ИЗМЕРЕН", got["note"])
+
+    def test_a_bridge_of_a_still_body_has_zero_step_and_no_ratio(self):
+        """И5: вход, на котором прибор обязан молчать. Ноль пути — деления нет."""
+        got = fc.bridge_points(_chain(x=5.0), _chain(x=5.0), 4)
+        self.assertEqual(got["gap"], 0.0)
+        self.assertIsNone(got["step_ratio"])
+
+
+class TheBridgeReportsThreeOutcomesWithNumbers(unittest.TestCase):
+    """Р2/Е3: частичный результат — числами, вердикт — общий словарь исходов."""
+
+    def _mixed(self):
+        hi, lo = fc.MIN_SCORE + 0.1, fc.MIN_SCORE - 0.1
+        a = [(0.0, 0.0, hi)] * 133
+        b = [(9.0, 9.0, hi)] * 133
+        for n in range(0, 3):
+            b[n] = (9.0, 9.0, lo)
+        for n in range(3, 10):
+            a[n] = (0.0, 0.0, lo)
+            b[n] = (9.0, 9.0, lo)
+        return a, b
+
+    def test_a_clean_bridge_is_pass_with_every_point_interpolated(self):
+        got = fc.bridge_points(_chain(), _chain(x=9.0), 4)
+        self.assertEqual(got["outcome"], fi.PASS)
+        self.assertEqual(got["both"], 133)
+        self.assertEqual(got["one_sided"], 0)
+        self.assertEqual(got["neither"], 0)
+
+    def test_a_one_sided_point_makes_the_whole_bridge_fail(self):
+        a, b = self._mixed()
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(got["outcome"], fi.FAIL)
+        self.assertEqual(got["one_sided"], 3)
+        self.assertEqual(got["neither"], 7)
+        self.assertEqual(got["both"], 123)
+        self.assertEqual(got["both"] + got["one_sided"] + got["neither"], 133)
+
+    def test_a_point_missing_on_both_ends_alone_is_still_pass(self):
+        """Не видно нигде — это не дырка моста, а отсутствие точки в материале."""
+        lo = fc.MIN_SCORE - 0.1
+        a = [(0.0, 0.0, 0.9)] * 133
+        b = [(9.0, 9.0, 0.9)] * 133
+        for n in range(5):
+            a[n] = (0.0, 0.0, lo)
+            b[n] = (9.0, 9.0, lo)
+        got = fc.bridge_points(a, b, 4)
+        self.assertEqual(got["outcome"], fi.PASS)
+        self.assertEqual(got["neither"], 5)
+
+    def test_nothing_visible_anywhere_is_unmeasured_and_not_fail(self):
+        """Прибор не увидел позы, а не увидел плохую позу."""
+        lo = fc.MIN_SCORE - 0.1
+        got = fc.bridge_points([(0.0, 0.0, lo)] * 133, [(9.0, 9.0, lo)] * 133, 4)
+        self.assertEqual(got["outcome"], fi.UNMEASURED)
+        self.assertEqual(got["both"], 0)
+
+    def test_the_outcomes_are_the_shared_ones_and_not_local_strings(self):
+        got = fc.bridge_points(_chain(), _chain(x=9.0), 4)
+        self.assertIn(got["outcome"], (fi.PASS, fi.FAIL, fi.UNMEASURED))
+        self.assertEqual(fi.PASS, "годно")
+
+    def test_the_note_says_the_step_is_unmeasured_rather_than_zero(self):
+        """Р1 в отчёте: «не смогли измерить» не сворачивается в «шаг 0»."""
+        lo = fc.MIN_SCORE - 0.1
+        note = fc.bridge_points([(0.0, 0.0, lo)] * 133,
+                                [(9.0, 9.0, lo)] * 133, 4)["note"]
+        self.assertIn("шаг НЕ ИЗМЕРЕН", note)
+
+    def test_the_note_names_all_three_numbers(self):
+        a, b = self._mixed()
+        note = fc.bridge_points(a, b, 4)["note"]
+        self.assertIn("интерполировано 123", note)
+        self.assertIn("нет ни на одном конце 7", note)
+        self.assertIn("видно только на одном конце 3", note)
+
+
+class TheBridgeFaceIsBorrowedAndNeverInvented(unittest.TestCase):
+    """РАСШИРЕНИЕ СТОРОЖА ПРОИСХОЖДЕНИЯ ПИКСЕЛЕЙ на кадры, которых не снимали."""
+
+    def test_the_first_half_takes_j_and_the_second_takes_i(self):
+        self.assertEqual(fc.bridge_face_plan(4),
+                         ["лицо кадра j", "лицо кадра j",
+                          "лицо кадра i", "лицо кадра i"])
+
+    def test_the_exact_middle_goes_to_i_and_this_is_stated_not_implied(self):
+        self.assertEqual(fc.bridge_face_plan(1), ["лицо кадра i"])
+        self.assertEqual(fc.bridge_face_plan(3),
+                         ["лицо кадра j", "лицо кадра i", "лицо кадра i"])
+
+    def test_thirteen_frames_split_six_to_seven(self):
+        """Т3, дальний край диапазона."""
+        plan = fc.bridge_face_plan(13)
+        self.assertEqual(plan.count("лицо кадра j"), 6)
+        self.assertEqual(plan.count("лицо кадра i"), 7)
+
+    def test_the_split_is_guarded_in_both_directions(self):
+        """Т1 по `BRIDGE_FACE_SPLIT`: 0.0 отдаёт всё i, 1.0 — всё j."""
+        original = fc.BRIDGE_FACE_SPLIT
+        try:
+            fc.BRIDGE_FACE_SPLIT = 0.0
+            self.assertEqual(set(fc.bridge_face_plan(4)), {"лицо кадра i"})
+            fc.BRIDGE_FACE_SPLIT = 1.0
+            self.assertEqual(set(fc.bridge_face_plan(4)), {"лицо кадра j"})
+        finally:
+            fc.BRIDGE_FACE_SPLIT = original
+        self.assertEqual(fc.bridge_face_plan(4).count("лицо кадра j"), 2)
+
+    def test_the_shipped_split_is_the_middle_and_the_literal_says_so(self):
+        """Б2: сторож на отгружаемое значение, отдельно от подменяющих."""
+        self.assertEqual(fc.BRIDGE_FACE_SPLIT, 0.5)
+
+    def test_the_pixels_are_the_donors_pixels_and_not_a_blend(self):
+        """ГЛАВНОЕ: ни один пиксель кадра моста не вычислен.
+
+        Доноры разного цвета: смесь дала бы третий цвет, и его видно.
+        """
+        got = fc.bridge_faces(_square(colour=(200, 30, 40)),
+                              _square(colour=(10, 60, 220)), 4)
+        colours = [img.load()[256, 256] for img in got["frames"]]
+        self.assertEqual(colours, [(200, 30, 40), (200, 30, 40),
+                                   (10, 60, 220), (10, 60, 220)])
+
+    def test_a_crossfade_would_make_that_check_red(self):
+        """И5 к предыдущему: вход, на котором сторож ОБЯЗАН покраснеть.
+
+        Ровно вариант (б), отвергнутый замером просадки границ на 11.0..15.1%.
+        """
+        from PIL import Image
+
+        blend = Image.blend(_square(colour=(200, 30, 40)),
+                            _square(colour=(10, 60, 220)), 0.5)
+        with self.assertRaises(AssertionError):
+            self.assertIn(blend.load()[256, 256],
+                          ((200, 30, 40), (10, 60, 220)))
+
+    def test_the_origins_say_borrowed_and_synthesised_is_zero(self):
+        got = fc.bridge_faces(_square(), _square(colour=(1, 2, 3)), 4)
+        self.assertEqual(got["origins"]["пиксели соседнего настоящего кадра"], 4)
+        self.assertEqual(got["origins"]["синтез"], 0)
+        self.assertEqual(got["origins"]["пиксели своего кадра"], 0)
+        self.assertEqual(sum(got["origins"].values()), 4)
+
+    def test_the_counts_split_the_bridge_and_add_up(self):
+        got = fc.bridge_faces(_square(), _square(colour=(1, 2, 3)), 13)
+        self.assertEqual(got["from_j"], 6)
+        self.assertEqual(got["from_i"], 7)
+        self.assertEqual(got["from_j"] + got["from_i"], 13)
+
+    def test_a_body_render_handed_in_as_a_face_is_refused(self):
+        """Отказ, а не тихая подгонка: 832x480 в лицевом канале — чужая картинка."""
+        with self.assertRaises(ValueError) as caught:
+            fc.bridge_faces(_square(), fc.render(_points(), fc.BODY_CHANNEL,
+                                                 832, 480), 4)
+        self.assertIn("crop_face", str(caught.exception))
+
+    def test_the_frames_are_copies_so_one_cannot_smear_the_others(self):
+        got = fc.bridge_faces(_square(colour=(200, 30, 40)),
+                              _square(colour=(10, 60, 220)), 4)
+        got["frames"][0].putpixel((0, 0), (0, 255, 0))
+        self.assertEqual(got["frames"][1].load()[0, 0], (200, 30, 40))
+
+    def test_the_face_side_is_the_shipped_one_in_both_directions(self):
+        """Т1 по `FACE_SIDE` на пути моста, отдельно от пути настоящих кадров."""
+        original = fc.FACE_SIDE
+        try:
+            fc.FACE_SIDE = 1024
+            with self.assertRaises(ValueError):
+                fc.bridge_faces(_square(512), _square(512), 4)
+            self.assertEqual(
+                len(fc.bridge_faces(_square(1024), _square(1024), 4)["frames"]), 4)
+        finally:
+            fc.FACE_SIDE = original
+
+
+class TheBridgeGivesBothChannelsLikeARealFrame(unittest.TestCase):
+    """Кадры моста обязаны ложиться рядом с настоящими и не отличаться формой."""
+
+    def _run(self, k: int = 4):
+        return fc.render_bridge(_chain(x=10.0, y=10.0), _chain(x=110.0, y=60.0),
+                                k, 832, 480,
+                                face_j=_square(colour=(200, 30, 40)),
+                                face_i=_square(colour=(10, 60, 220)))
+
+    def test_each_bridge_frame_has_the_same_two_keys_as_render_pair(self):
+        got = self._run()
+        self.assertEqual(len(got["frames"]), 4)
+        for frame in got["frames"]:
+            self.assertEqual(set(frame), set(fc.CHANNELS))
+
+    def test_the_face_is_five_twelve_and_the_body_is_the_frame_size(self):
+        frame = self._run()["frames"][0]
+        self.assertEqual(frame["face"].size, (512, 512))
+        self.assertEqual(frame["body"].size, (832, 480))
+
+    def test_the_body_is_drawn_and_the_face_is_not(self):
+        """Каналы разной ПРИРОДЫ и на мосту: тело рисуется, лицо копируется."""
+        frame = self._run()["frames"][0]
+        self.assertEqual(frame["face"].load()[256, 256], (200, 30, 40))
+        self.assertNotEqual(frame["body"].getbbox(), None)
+
+    def test_the_report_carries_the_point_numbers_through(self):
+        got = self._run()
+        self.assertEqual(got["points"]["both"], 133)
+        self.assertEqual(got["outcome"], fi.PASS)
+
+    def test_the_provenance_reaches_the_top_of_the_report(self):
+        got = self._run()
+        self.assertEqual(got["face_origins"]["синтез"], 0)
+        self.assertEqual(got["face_origins"]["пиксели соседнего настоящего кадра"], 4)
+
+    def test_a_bridge_of_one_and_of_thirteen_both_work(self):
+        """Т3: оба края диапазона и середина проходят один и тот же путь."""
+        self.assertEqual(len(self._run(1)["frames"]), 1)
+        self.assertEqual(len(self._run(13)["frames"]), 13)
+
+    def test_zero_frames_is_refused_here_too_and_not_an_empty_list(self):
+        with self.assertRaises(ValueError):
+            self._run(0)
+
+
+class TheSequenceNamesWhereItsFacePixelsCameFrom(unittest.TestCase):
+    """Сторож происхождения, расширенный с УТВЕРЖДЕНИЯ до раскладки числами.
+
+    Прежде отчёт `render_sequence` говорил про пиксели одной строкой, то есть
+    обещанием. У кадров моста своих пикселей нет вовсе, и молчаливое умолчание
+    «раз канал снят, значит пиксели настоящие» сломалось бы именно на них.
+    """
+
+    def _run(self, tmp: str, points_per_frame):
+        from unittest import mock
+
+        paths = []
+        for n in range(len(points_per_frame)):
+            p = Path(tmp) / f"{n:03d}.png"
+            _solid(320, 240, (200, 30, 40)).save(p)
+            paths.append(p)
+        with mock.patch.object(fc, "wholebody_points",
+                               side_effect=list(points_per_frame)):
+            return fc.render_sequence(paths, Path(tmp) / "out")
+
+    def test_a_clean_run_says_every_face_is_its_own_frames_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [_face_at(100, 200, 100, 200)] * 3)
+        self.assertEqual(got["face_origins"]["пиксели своего кадра"], 3)
+        self.assertEqual(got["face_origins"]["чёрный кадр"], 0)
+
+    def test_a_frame_without_a_person_is_a_black_frame_and_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [None, _face_at(100, 200, 100, 200)])
+        self.assertEqual(got["face_origins"]["чёрный кадр"], 1)
+        self.assertEqual(got["face_origins"]["пиксели своего кадра"], 1)
+
+    def test_a_person_whose_face_is_unreadable_gets_a_black_frame_not_his_own(self):
+        """МУТАНТ, ВЫЖИВШИЙ В ПЕРВОЙ СЕРИИ, и он же самый интересный случай.
+
+        Человек в кадре ЕСТЬ, а лица не видно: рамки нет, `crop_face` отдаёт
+        чёрный кадр — но происхождение при этом читалось бы как «пиксели своего
+        кадра», то есть отчёт сказал бы «лицо снято» там, где лица нет.
+        Ветка `no_person` эту подмену не ловит: она идёт другой дорогой.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [_face_at(100, 200, 100, 200, seen=0)])
+        self.assertEqual(got["face_origins"]["чёрный кадр"], 1)
+        self.assertEqual(got["face_origins"]["пиксели своего кадра"], 0)
+
+    def test_synthesised_is_zero_and_the_zero_is_observable(self):
+        """Величина, которой нет в отчёте, не может быть проверена на ноль."""
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [_face_at(100, 200, 100, 200)] * 2)
+        self.assertIn("синтез", got["face_origins"])
+        self.assertEqual(got["face_origins"]["синтез"], 0)
+
+    def test_the_origins_add_up_to_the_frame_count(self):
+        """Раскладка, не сходящаяся с total, — это флаг, а не числа (Е3)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [None, _face_at(100, 200, 100, 200), None])
+        self.assertEqual(sum(got["face_origins"].values()), got["total"])
+        self.assertEqual(got["total"], 3)
+
+    def test_the_vocabulary_is_shared_between_the_sequence_and_the_bridge(self):
+        """Е1: два имени одного происхождения разъехались бы при первой правке."""
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._run(tmp, [_face_at(100, 200, 100, 200)])
+        bridge = fc.bridge_faces(_square(), _square(), 4)
+        self.assertEqual(set(got["face_origins"]), set(bridge["origins"]))
+        self.assertEqual(len(fc.FACE_ORIGINS), 4)
+
+
 def fork_sequence_empty(tmp: str) -> dict:
     """Прогон на пустом списке кадров: весов не требует, ветку отчёта проверяет."""
     return fc.render_sequence([], tmp)
