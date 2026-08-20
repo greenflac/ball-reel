@@ -195,7 +195,14 @@ def playback_fps(frames_fps) -> dict:
     `fork_video`, и делать вторую его копию значит завести второе место для
     одного знания.
     """
-    rate = fork_comfy.output_fps(frames_fps)
+    # Негодная частота — ОТЧЁТ, а не трассировка: проверка существует, чтобы
+    # собрать находки, а падение на первой посылает чинить окружение там, где
+    # негоден вход. Тот же класс дефекта уже чинился в `fork_comfy.check`.
+    try:
+        rate = fork_comfy.output_fps(frames_fps)
+    except (TypeError, ValueError) as exc:
+        return {"outcome": FAIL, "fps": None,
+                "note": f"частота {frames_fps!r} не принята: {exc}"}
     if rate["outcome"] != PASS:
         return {"outcome": UNMEASURED, "fps": None, "note": rate["note"]}
     if rate["fps"] != frames_fps:
