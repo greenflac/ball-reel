@@ -643,11 +643,12 @@ class WritingNeverEatsTheSource(unittest.TestCase):
 
     def test_the_source_frames_are_still_on_disk_and_readable(self):
         src = make_frames(self.root / "src", 6)
-        before = [Path(p).read_text() for p in src]
+        before = [Path(p).read_text(encoding="utf-8") for p in src]
         fs.write_sequence(src, [0, 1, 2, 0], self.root / "src", overwrite=True)
         after = sorted((self.root / "src").glob("*.png"))
         self.assertEqual(len(after), 6)
-        self.assertEqual([p.read_text() for p in after], before)
+        self.assertEqual([p.read_text(encoding="utf-8") for p in after],
+                         before)
 
     def test_the_refusal_names_how_many_frames_clashed(self):
         src = make_frames(self.root / "src", 6)

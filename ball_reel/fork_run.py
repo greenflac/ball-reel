@@ -242,7 +242,15 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     # дальше — она мешает верить готовому ролику, поэтому исход «не смогли»,
     # а не отказ.
     t = time.perf_counter()
-    fits = length_fits_driving(len(frames), seconds=seconds, bench=bench)
+    # ЧАСТОТА ДРАЙВИНГА ПЕРЕДАЁТСЯ ЯВНО. Тот же дефект, что уже чинился в
+    # `seconds_for`, жил здесь ВТОРЫМ местом (И7: чинить по месту — чинить
+    # половину). Без неё шаг считал по нашей WRAP_FPS = 30, и на боевом
+    # материале это ложная тревога ровно на продуктовом пути: склейка петли
+    # 114..162 x3 даёт 145 кадров, драйвинг снят на 24 к/с, заказ 6.04 с —
+    #   без частоты: «нужно 181 — НЕ ХВАТАЕТ 36»
+    #   с частотой:  «нужно 145, хватает»
+    fits = length_fits_driving(len(frames), seconds=seconds, fps=driving_fps,
+                               bench=bench)
     steps.append(_step("длина", fits["outcome"], fits["note"],
                        time.perf_counter() - t))
 

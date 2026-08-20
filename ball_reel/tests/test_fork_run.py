@@ -807,6 +807,52 @@ class TheCommandThatActuallyRunsThePipeline(unittest.TestCase):
 
 
 
+class TheLengthStepUsesTheDrivingFrequency(unittest.TestCase):
+    """И7: тот же дефект, что чинился в `seconds_for`, жил вторым местом.
+
+    Шаг «длина» считал по нашей WRAP_FPS = 30, хотя частота драйвинга была
+    известна и лежала в том же вызове. НАЙДЕНО ЖИВЫМ ВЫВОДОМ на боевом
+    прогоне: драйвинг 24 к/с, а строка ступени говорила «при 30 к/с».
+    """
+
+    def test_the_driving_frequency_changes_the_answer(self):
+        # Склейка петли 114..162 x3 даёт ровно 145 кадров, драйвинг 24 к/с.
+        by_driving = fork_run.length_fits_driving(145, seconds=6.04, fps=24)
+        self.assertEqual(by_driving["outcome"], PASS)
+        self.assertEqual(by_driving["need"], 145)
+
+    def test_our_own_frequency_would_raise_a_false_alarm(self):
+        # Негативный контроль (И5): прибор обязан РАЗЛИЧАТЬ две частоты,
+        # иначе тест выше проходил бы и на модуле, который частоту не читает.
+        by_ours = fork_run.length_fits_driving(145, seconds=6.04, fps=30)
+        self.assertEqual(by_ours["outcome"], UNMEASURED)
+        self.assertEqual(by_ours["need"], 181)
+        self.assertEqual(by_ours["short"], 36)
+
+    def test_the_step_is_given_the_driving_frequency_not_ours(self):
+        # Сторож САМОГО ВЫЗОВА, а не функции: дефект был именно в том, что
+        # известную частоту не передали. Читаем строку ступени боевого пути.
+        seen = {}
+
+        def spy(frame_count, **kw):
+            seen.update(kw)
+            return {"outcome": PASS, "have": frame_count, "need": frame_count,
+                    "short": 0, "seconds": 6.04, "note": "подставной"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = _frames(root / "frames", 6)
+            photo = _photo(root)
+            old = fork_run.length_fits_driving
+            fork_run.length_fits_driving = spy
+            try:
+                fork_run.run(photo, frames, root / "out",
+                             seconds=6.04, driving_fps=24)
+            finally:
+                fork_run.length_fits_driving = old
+        self.assertEqual(seen.get("fps"), 24)
+
+
 class TheRunSpeaksWhileItWorks(unittest.TestCase):
     """П2: длительность ступеней печатается ПО ХОДУ, а не только в конце.
 
