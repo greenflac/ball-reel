@@ -310,6 +310,49 @@ class FrameNames(unittest.TestCase):
         with self.assertRaises(ValueError):
             fv.frame_name(-1)
 
+    def test_frame_name_has_no_start_of_its_own(self):
+        """Начало нумерации выбирает ВЫЗЫВАЮЩИЙ, а не эта функция.
+
+        Их двое и они разные: `decode_argv` просит у ffmpeg
+        `-start_number 0`, `fork_splice.write_sequence` зовёт
+        `frame_name(k + 1)`. Ожидаемое здесь — литералы (Т2): собери имя
+        любым вторым способом — и он разъедется молча.
+        """
+        self.assertEqual(fv.frame_name(0), "00000.png")
+        self.assertEqual(fv.frame_name(1), "00001.png")
+        self.assertEqual(fv.frame_name(361), "00361.png")
+        self.assertEqual(fv.frame_name(362), "00362.png")
+
+    def test_both_starts_sort_into_the_same_order(self):
+        """ЗАМЕР, вынесенный в сторож: раскладка с нуля и с единицы дают
+        ОДИН порядок у потребителя, который собирает кадры
+        `sorted(glob('*.png'))`.
+
+        Точки взяты на переходах разрядности (9/10, 99/100, 999/1000) и на
+        длине боевого ролика (362). Если начало нумерации когда-нибудь
+        станет расхождением по существу — покраснеет здесь, а не на монтаже.
+        """
+        for n in (9, 10, 99, 100, 362, 999, 1000):
+            with self.subTest(n=n):
+                zero = sorted(fv.frame_name(k) for k in range(n))
+                one = sorted(fv.frame_name(k + 1) for k in range(n))
+                # позиция в отсортованном списке -> номер кадра источника
+                self.assertEqual([int(x[:-4]) for x in zero], list(range(n)))
+                self.assertEqual([int(x[:-4]) - 1 for x in one], list(range(n)))
+                self.assertEqual(len(set(len(x) for x in zero + one)), 1)
+
+    def test_the_order_would_break_without_the_padding(self):
+        """НЕГАТИВНЫЙ КОНТРОЛЬ к предыдущему (И5): без дополнения нулями
+        порядок ЛОМАЕТСЯ на обоих началах — значит предыдущий тест меряет
+        дополнение, а не молчит всегда.
+        """
+        for n in (100, 1000):
+            for start in (0, 1):
+                with self.subTest(n=n, start=start):
+                    bad = sorted(f"{k + start}.png" for k in range(n))
+                    self.assertNotEqual([int(x[:-4]) - start for x in bad],
+                                        list(range(n)))
+
 
 class DecodeCommand(unittest.TestCase):
     """Состав команды — тоже решение, и он краснеет в тесте, а не в прогоне."""
@@ -585,6 +628,67 @@ class Frames(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.out.iterdir()),
                          ["00000.png", "00001.png", "00002.png"])
 
+    def test_a_second_run_reports_the_frames_that_lie_there_not_a_zero(self):
+        """ДЕФЕКТ, ради которого писан этот сторож: итоговая строка печатала
+        «записано 0, байт 0» поверх каталога с 60 чужими кадрами, то есть
+        читалась как «каталог пуст». Исход был верный, врал ОТЧЁТ (Е2/Е3).
+        """
+        first, _, _ = self._run(n=60)
+        self.assertEqual(first["outcome"], PASS)
+        rep, _, decoder = self._run(n=3)
+        self.assertEqual(rep["outcome"], UNMEASURED)
+        self.assertEqual(decoder.calls, 0)
+        # записали МЫ — ноль, и это правда; лежит там — 60, и это тоже факт.
+        self.assertEqual(rep["written"], 0)
+        self.assertEqual(rep["bytes"], 0)
+        self.assertEqual(rep["present"], 60)
+        self.assertEqual(rep["present_bytes"], 60 * len(ONE_PIXEL_PNG))
+        self.assertIn("до нас в каталоге лежало кадров 60", rep["note"])
+        self.assertIn("записано нами 0", rep["note"])
+        self.assertNotIn("каталог назначения был пуст", rep["note"])
+
+    def test_a_second_run_still_names_the_expectation_it_already_knew(self):
+        """Метаданные разобрались до отказа — значит «ожидалось» ИЗВЕСТНО.
+        Печатать «неизвестно» рядом с разобранными метаданными значит
+        отчитываться беднее того, что исполнилось.
+        """
+        self._run(n=60)
+        rep, _, _ = self._run(n=3)
+        self.assertEqual(rep["expected"], 60)
+        self.assertIn("Ожидалось кадров 60", rep["note"])
+
+    def test_a_clean_directory_is_reported_as_looked_at_and_empty(self):
+        """Негативный контроль с другой стороны (И5): пусто — это ОТВЕТ."""
+        rep, _, _ = self._run(n=60)
+        self.assertEqual(rep["outcome"], PASS)
+        self.assertEqual(rep["present"], 0)
+        self.assertEqual(rep["present_bytes"], 0)
+        self.assertIn("каталог назначения был пуст", rep["note"])
+
+    def test_an_overwrite_says_what_it_wiped(self):
+        self._run(n=60)
+        rep, _, _ = self._run(n=3, overwrite=True,
+                              probe_kw={"nb": '"nb_frames": "3",',
+                                        "dur": "0.100000"})
+        self.assertEqual(rep["outcome"], PASS)
+        self.assertEqual(rep["written"], 3)
+        self.assertEqual(rep["present"], 60)
+        self.assertIn("до нас в каталоге лежало кадров 60", rep["note"])
+
+    def test_a_refusal_before_the_look_never_claims_an_empty_directory(self):
+        """Третий исход не сворачивается в первые два (Р1): отказ случился
+        ДО осмотра каталога — значит про каталог сказать нечего, и это не
+        то же самое, что «пусто».
+        """
+        prober = _Prober(code=1, out=PROBE_STDOUT_BROKEN,
+                         err=PROBE_STDERR_BROKEN)
+        rep = fv.frames(self.src, self.out, prober=prober, decoder=_Decoder(60))
+        self.assertEqual(rep["outcome"], FAIL)
+        self.assertIsNone(rep["present"])
+        self.assertIsNone(rep["present_bytes"])
+        self.assertIn("каталог назначения не осматривали", rep["note"])
+        self.assertNotIn("каталог назначения был пуст", rep["note"])
+
     def test_every_step_reports_its_own_outcome_and_duration(self):
         rep, _, _ = self._run(n=60)
         steps = [s["step"] for s in rep["steps"]]
@@ -594,6 +698,34 @@ class Frames(unittest.TestCase):
             with self.subTest(step=s["step"]):
                 self.assertIn(s["outcome"], (PASS, FAIL, UNMEASURED))
                 self.assertGreaterEqual(s["seconds"], 0.0)
+
+
+class DirectoryFact(unittest.TestCase):
+    """Три состояния каталога назначения — три РАЗНЫЕ фразы, литералами.
+
+    Отдельно от тестов выше нарочно: те гоняют `frames` и могли бы зеленеть
+    на любых словах, лишь бы они совпадали сами с собой. Здесь сторожится
+    ОТГРУЖАЕМОЕ значение — то, что прочтёт оператор.
+    """
+
+    def test_the_three_phrases_are_the_ones_the_operator_will_read(self):
+        self.assertEqual(fv.DIR_UNSEEN, "каталог назначения не осматривали")
+        self.assertEqual(fv.DIR_EMPTY, "каталог назначения был пуст")
+        self.assertEqual(fv._dir_fact(3, 99),
+                         "до нас в каталоге лежало кадров 3, байт 99")
+
+    def test_not_looked_at_and_empty_are_not_the_same_phrase(self):
+        self.assertNotEqual(fv._dir_fact(None, None), fv._dir_fact(0, 0))
+        self.assertEqual(fv._dir_fact(None, None),
+                         "каталог назначения не осматривали")
+        self.assertEqual(fv._dir_fact(0, 0), "каталог назначения был пуст")
+
+    def test_frames_lying_there_are_never_swallowed_into_a_zero(self):
+        # 60 кадров и «пусто» обязаны читаться по-разному — ровно этого
+        # различия не было в отчёте до починки.
+        self.assertNotEqual(fv._dir_fact(60, 189567), fv._dir_fact(0, 0))
+        self.assertIn("60", fv._dir_fact(60, 189567))
+        self.assertIn("189567", fv._dir_fact(60, 189567))
 
 
 class PlanForSeconds(unittest.TestCase):

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from . import (fork_backend, fork_build_route, fork_channels, fork_comfy,
@@ -129,9 +130,36 @@ def conditions_verdict(cond: dict) -> str:
     return UNMEASURED if cond["rendered"] else FAIL
 
 
+#: ВЫБРАНО (кем: эта смена; из чего: из наблюдения за настоящим прогоном).
+#: Куда идёт живая строка о завершённой ступени. stderr, а не stdout: на
+#: stdout лежит отчёт, в том числе `--json`, и подмешивать в него прогресс
+#: значит ломать разбор машиной.
+LIVE_STREAM = sys.stderr
+
+#: Печатать ли ступени по ходу. Выключается тестами и `--json` не трогает.
+LIVE_STEPS = True
+
+
 def _step(name: str, outcome: str, note: str, seconds: float) -> dict:
-    return {"step": name, "outcome": outcome, "note": note,
-            "seconds": round(seconds, 3)}
+    """Запись о ступени. Печатается СРАЗУ, а не только в конце (П2).
+
+    НАЙДЕНО ПРОГОНОМ, а не рассуждением: сквозной прогон на боевом материале
+    шёл 25 минут и не напечатал НИ ОДНОЙ строки — отчёт собирался целиком и
+    выводился в конце. Прогон уперся в потолок времени (код 124), и всё
+    измеренное пропало вместе с ним. На арендованной карте это оплаченный
+    час, в течение которого «работает» и «повисло» неразличимы.
+    """
+    rec = {"step": name, "outcome": outcome, "note": note,
+           "seconds": round(seconds, 3)}
+    if LIVE_STEPS:
+        try:
+            print(f"  [{outcome:>18}] {name:<11} {rec['seconds']:>8.3f} с  "
+                  f"{note}", file=LIVE_STREAM, flush=True)
+        except (OSError, ValueError):
+            # Поток закрыт (перенаправление оборвалось) — это не повод ронять
+            # прогон, который уже посчитан. Молча продолжаем.
+            pass
+    return rec
 
 
 def run(photo: str | Path, driving_frames, out_dir: str | Path, *,

@@ -133,6 +133,13 @@
 список: сегодня в проекте уже находился дефект недетерминированного обхода
 (`rglob` в `fork_stand`), и повторять его не будем.
 
+«С нуля» — про ЭТОТ модуль (`-start_number 0` в `decode_argv`), а не про
+`frame_name`: у неё начала нет вовсе, она форматирует поданное число, и второй
+её вызывающий (`fork_splice.write_sequence`) нумерует с ЕДИНИЦЫ. Порядок от
+этого не расходится — замерено, числа и негативный контроль в докстринге
+`frame_name`; расходятся только имена, и номер из имени сегодня не читает
+никто.
+
 ИДЕМПОТЕНТНОСТЬ. Непустой каталог назначения — исход «не смогли проверить» и
 отказ работать, а не тихая перезапись. Кадры предыдущего прогона (или чужой
 смены) внешне неотличимы от наших, и раскодировав поверх 320 кадров 60 новых,
@@ -291,7 +298,29 @@ def run_decode(argv) -> dict:
 # --------------------------------------------------------------------------
 
 def frame_name(index: int) -> str:
-    """Имя кадра. Ширина поля — константа, а не литерал в двух местах."""
+    """Имя кадра. Ширина поля — константа, а не литерал в двух местах.
+
+    НАЧАЛА НУМЕРАЦИИ ЗДЕСЬ НЕТ, и это решение, а не упущение: функция
+    форматирует ТОТ номер, который ей дали. Начало выбирает вызывающий, и
+    вызывающих сейчас двое:
+
+        `decode_argv` (этот модуль)  `-start_number 0` -> 00000.png ...
+        `fork_splice.write_sequence` `frame_name(k + 1)` -> 00001.png ...
+
+    ЗАМЕРЕНО (чем: `sorted(glob('*.png'))` на настоящих файлах; на чём: N =
+    9, 10, 99, 100, 362, 999, 1000 — переходы разрядности и длина боевого
+    ролика): ПОРЯДОК у обеих раскладок ОДИН И ТОТ ЖЕ, расхождений 0 из 7.
+    Причина — дополнение нулями до `NAME_DIGITS`: при фиксированной ширине
+    сортировка строк совпадает с сортировкой чисел при любом начале.
+    Негативный контроль (И5): без дополнения нулями порядок ломается на 5
+    раскладках из 6 — то есть замер умеет увидеть поломку, а не молчит всегда.
+    Сторожа обоих утверждений — `FrameNames` в тестах этого модуля.
+
+    Расходятся при этом ИМЕНА: первый кадр — `00000.png` у раскодировщика и
+    `00001.png` у склейки, и потребитель, который однажды начнёт читать НОМЕР
+    из имени (а не брать порядок), получит сдвиг на единицу. Сегодня таких
+    потребителей нет: ни один модуль не разбирает номер из имени кадра.
+    """
     if not isinstance(index, int) or isinstance(index, bool) or index < 0:
         raise ValueError(f"номер кадра {index!r}: ожидалось целое от нуля")
     return f"{index:0{NAME_DIGITS}d}{FRAME_SUFFIX}"
@@ -615,27 +644,43 @@ def frames(video_path, out_dir, *, fps=None, limit=None, overwrite=False,
         return _frames_report(plan["outcome"], plan["note"], t, steps, meta=meta,
                               plan=plan)
 
+    # Ожидаемое число кадров считается ЗДЕСЬ, один раз, и едет во ВСЕ отчёты
+    # ниже (Е1): раньше оно считалось только перед вердиктом, и отказы до
+    # раскодирования печатали «ожидалось неизвестно» при полностью разобранных
+    # метаданных — то есть отчёт был беднее того, что уже было известно.
+    want = plan["fps"] if plan["mode"] == DROP else None
+    expected = expected_frames(meta["frames"], source_fps=meta["fps"],
+                               out_fps=want, limit=limit)
+
     # 3. Идемпотентность: чужие кадры не перетираются молча.
     out = Path(out_dir)
     if out.exists() and not out.is_dir():
         return _frames_report(FAIL, f"{out} — не каталог", t, steps, meta=meta,
-                              plan=plan)
+                              plan=plan, expected=expected)
     already = sorted(out.glob(f"*{FRAME_SUFFIX}")) if out.is_dir() else []
+    # Смотрели — значит числа известны, и в отчёт едут они, а не умолчание
+    # `не осматривали` (Е2: отчёт о том, что ИСПОЛНИЛОСЬ). Ноль здесь — это
+    # ответ «каталог пуст», а не отсутствие ответа.
+    present = len(already)
+    present_bytes = sum(f.stat().st_size for f in already)
     if already and not overwrite:
-        note = (f"в {out} уже лежит кадров: {len(already)} (первый "
-                f"{already[0].name}, последний {already[-1].name}). Молча "
-                f"поверх не пишем: раскодировав 60 кадров поверх 320, мы "
-                f"получили бы каталог из 260 чужих и 60 своих — отсортованный "
-                f"и правдоподобный. Задайте overwrite=True или другой каталог")
+        note = (f"в {out} уже лежит кадров: {present} (первый "
+                f"{already[0].name}, последний {already[-1].name}, байт "
+                f"{present_bytes}). Молча поверх не пишем: раскодировав 60 "
+                f"кадров поверх 320, мы получили бы каталог из 260 чужих и 60 "
+                f"своих — отсортованный и правдоподобный. Мы НЕ ПИСАЛИ ни "
+                f"одного кадра: эти {present} — чужие. Задайте overwrite=True "
+                f"или другой каталог")
         steps.append(("каталог", UNMEASURED, note, 0.0))
-        return _frames_report(UNMEASURED, note, t, steps, meta=meta, plan=plan)
+        return _frames_report(UNMEASURED, note, t, steps, meta=meta, plan=plan,
+                              expected=expected, present=present,
+                              present_bytes=present_bytes)
     if already and overwrite:
         for f in already:
             f.unlink()
     out.mkdir(parents=True, exist_ok=True)
 
     # 4. Раскодирование.
-    want = plan["fps"] if plan["mode"] == DROP else None
     argv = decode_argv(video_path, out, out_fps=want, limit=limit)
     t_dec = time.perf_counter()
     got = decoder(argv)
@@ -643,8 +688,6 @@ def frames(video_path, out_dir, *, fps=None, limit=None, overwrite=False,
     written_paths = sorted(out.glob(f"*{FRAME_SUFFIX}"))
     written = len(written_paths)
     size = sum(p.stat().st_size for p in written_paths)
-    expected = expected_frames(meta["frames"], source_fps=meta["fps"],
-                               out_fps=want, limit=limit)
 
     if not got.get("ran"):
         note = (f"{got.get('why') or 'раскодировать нечем'}. Успело лечь "
@@ -652,7 +695,8 @@ def frames(video_path, out_dir, *, fps=None, limit=None, overwrite=False,
         steps.append(("раскодирование", UNMEASURED, note, dec_elapsed))
         return _frames_report(UNMEASURED, note, t, steps, meta=meta, plan=plan,
                               expected=expected, written=written, nbytes=size,
-                              paths=written_paths)
+                              paths=written_paths, present=present,
+                              present_bytes=present_bytes)
     if got.get("code"):
         note = (f"{FFMPEG_BIN} вернул {got['code']}: "
                 f"{(got.get('err') or '').strip()[:200] or 'без объяснения'}. "
@@ -660,7 +704,8 @@ def frames(video_path, out_dir, *, fps=None, limit=None, overwrite=False,
         steps.append(("раскодирование", FAIL, note, dec_elapsed))
         return _frames_report(FAIL, note, t, steps, meta=meta, plan=plan,
                               expected=expected, written=written, nbytes=size,
-                              paths=written_paths)
+                              paths=written_paths, present=present,
+                              present_bytes=present_bytes)
     steps.append(("раскодирование", PASS,
                   f"{FFMPEG_BIN} отработал, код 0", dec_elapsed))
 
@@ -670,17 +715,45 @@ def frames(video_path, out_dir, *, fps=None, limit=None, overwrite=False,
     steps.append(("кадры", verdict["outcome"], verdict["note"], 0.0))
     return _frames_report(verdict["outcome"], verdict["note"], t, steps,
                           meta=meta, plan=plan, expected=expected,
-                          written=written, nbytes=size, paths=written_paths)
+                          written=written, nbytes=size, paths=written_paths,
+                          present=present, present_bytes=present_bytes)
+
+
+#: Как отчёт называет каталог назначения. Три состояния, и третье не
+#: сворачивается ни в одно из первых двух (Р1): `present=None` означает «мы
+#: туда НЕ СМОТРЕЛИ» (отказ случился раньше осмотра), `present=0` — «смотрели,
+#: пусто», `present>0` — «смотрели, лежит столько-то». Раньше все три
+#: печатались одинаково — «записано 0, байт 0», — и повторный прогон поверх 60
+#: чужих кадров читался как пустой каталог.
+DIR_UNSEEN = "каталог назначения не осматривали"
+DIR_EMPTY = "каталог назначения был пуст"
+
+
+def _dir_fact(present, present_bytes) -> str:
+    """Фраза про каталог назначения. Выведена из того, что ИСПОЛНИЛОСЬ (Е2)."""
+    if present is None:
+        return DIR_UNSEEN
+    if present == 0:
+        return DIR_EMPTY
+    return (f"до нас в каталоге лежало кадров {present}, "
+            f"байт {0 if present_bytes is None else present_bytes}")
 
 
 def _frames_report(outcome: str, note: str, t0: float, steps, *, meta=None,
                    plan=None, expected=None, written=0, nbytes=0,
-                   paths=None) -> dict:
+                   paths=None, present=None, present_bytes=None) -> dict:
+    """Один отчёт на все исходы.
+
+    `written` — сколько кадров записали МЫ этим прогоном, и ноль здесь значит
+    ровно это, а не «в каталоге пусто»: про каталог отвечает `present`
+    (см. `_dir_fact`), и итоговая строка называет оба числа раздельно (Е3).
+    """
     elapsed = round(time.perf_counter() - t0, 4)
     paths = list(paths or [])
     return {
         "outcome": outcome,
         "expected": expected, "written": written, "bytes": nbytes,
+        "present": present, "present_bytes": present_bytes,
         "elapsed": elapsed,
         "fps_in": (meta or {}).get("fps"), "fps_out": (plan or {}).get("fps"),
         "mode": (plan or {}).get("mode"),
@@ -689,7 +762,8 @@ def _frames_report(outcome: str, note: str, t0: float, steps, *, meta=None,
                   for s, o, n, e in steps],
         "note": (f"{outcome}: {note}. Ожидалось кадров "
                  f"{'неизвестно' if expected is None else expected}, записано "
-                 f"{written}, байт {nbytes}, за {elapsed} с"),
+                 f"нами {written}, байт {nbytes}, "
+                 f"{_dir_fact(present, present_bytes)}, за {elapsed} с"),
     }
 
 

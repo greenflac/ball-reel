@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -803,6 +805,75 @@ class TheCommandThatActuallyRunsThePipeline(unittest.TestCase):
         self.assertIn("outcome", got)
         self.assertIn("steps", got)
 
+
+
+class TheRunSpeaksWhileItWorks(unittest.TestCase):
+    """П2: длительность ступеней печатается ПО ХОДУ, а не только в конце.
+
+    НАЙДЕНО ПРОГОНОМ: сквозной прогон на боевом материале шёл 25 минут молча
+    и упёрся в потолок времени (код 124) — всё измеренное пропало вместе с
+    ним, и «работает» было неотличимо от «повисло».
+    """
+
+    def test_a_finished_step_prints_at_once(self):
+        buf = io.StringIO()
+        old = fork_run.LIVE_STREAM
+        fork_run.LIVE_STREAM = buf
+        try:
+            fork_run._step("маски", "годно", "снято 96 из 96", 12.5)
+        finally:
+            fork_run.LIVE_STREAM = old
+        printed = buf.getvalue()
+        self.assertIn("маски", printed)
+        self.assertIn("12.5", printed)
+        self.assertIn("снято 96 из 96", printed)
+
+    def test_the_shipped_stream_is_stderr(self):
+        # Сторож ОТГРУЖАЕМОГО значения, а не подставленного: тест ниже
+        # подменяет поток и потому не заметил бы, уехало ли умолчание на
+        # stdout. Мутация `sys.stderr -> sys.stdout` его пережила, пока
+        # этого сторожа не было — ровно класс Б2.
+        import sys as _sys
+        self.assertIs(fork_run.LIVE_STREAM, _sys.stderr)
+
+    def test_the_live_output_is_on_by_default(self):
+        self.assertTrue(fork_run.LIVE_STEPS)
+
+    def test_the_live_line_never_lands_on_stdout(self):
+        # На stdout лежит отчёт, в том числе --json: подмешанный туда прогресс
+        # ломает разбор машиной.
+        out = io.StringIO()
+        old = fork_run.LIVE_STREAM
+        fork_run.LIVE_STREAM = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                fork_run._step("маски", "годно", "снято 96 из 96", 12.5)
+        finally:
+            fork_run.LIVE_STREAM = old
+        self.assertEqual(out.getvalue(), "")
+
+    def test_the_switch_can_silence_it(self):
+        # Негативный контроль (И5): выключатель обязан выключать, иначе тест
+        # выше проходил бы и на константе, которую никто не читает.
+        buf = io.StringIO()
+        old_s, old_f = fork_run.LIVE_STREAM, fork_run.LIVE_STEPS
+        fork_run.LIVE_STREAM, fork_run.LIVE_STEPS = buf, False
+        try:
+            fork_run._step("маски", "годно", "снято 96 из 96", 12.5)
+        finally:
+            fork_run.LIVE_STREAM, fork_run.LIVE_STEPS = old_s, old_f
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_a_closed_stream_does_not_kill_a_counted_run(self):
+        buf = io.StringIO()
+        buf.close()
+        old = fork_run.LIVE_STREAM
+        fork_run.LIVE_STREAM = buf
+        try:
+            rec = fork_run._step("маски", "годно", "снято 96 из 96", 12.5)
+        finally:
+            fork_run.LIVE_STREAM = old
+        self.assertEqual(rec["seconds"], 12.5)
 
 
 if __name__ == "__main__":

@@ -337,6 +337,50 @@ class WhatIsOnDiskAndWhatHasToBeFetched(unittest.TestCase):
         self.assertEqual(got["todo_bytes"], 0)
         self.assertIn("КАЧАТЬ НЕЧЕГО", got["note"])
 
+    def test_a_weight_with_no_reference_size_is_no_size_even_with_no_file(self):
+        """ДЕФЕКТ, ЗАКРЫТЫЙ ЗДЕСЬ: `no_size` присваивался ТОЛЬКО найденному
+        файлу. У отсутствующего размер терялся молча — запись уходила в
+        `missing` с `todo_bytes = None`, сумма читала `None` как ноль, и шесть
+        весов к загрузке печатались как «без эталона размера 0» и
+        «К загрузке 0.0 ГиБ». Наблюдалось прогоном до починки."""
+        e = {**self.entry, "bytes": None, "sha256": None}
+        got = fi.survey([e], self.models)
+        self.assertEqual(got["rows"][0]["state"], "no_size")
+        self.assertEqual(got["no_size"], 1)
+        self.assertEqual(got["missing"], 0,
+                         "запись без эталона размера сосчитана как «качать с "
+                         "нуля» — тогда объём к загрузке заведомо неверен")
+        self.assertEqual(got["outcome"], "не смогли проверить")
+
+    def test_the_unknown_volume_is_counted_and_never_read_as_nothing(self):
+        """Е3: рядом с объёмом — сколько записей в него НЕ ВОШЛИ."""
+        e = {**self.entry, "bytes": None, "sha256": None}
+        got = fi.survey([e, e, e], self.models)
+        self.assertEqual(got["todo_bytes"], 0)
+        self.assertEqual(got["todo_unknown"], 3)
+        self.assertEqual(got["todo_known"], 0)
+        self.assertIn("ОБЪЁМ НЕИЗВЕСТЕН", got["note"])
+        self.assertIn("без эталона размера 3", got["note"])
+
+    def test_a_part_file_without_a_reference_size_is_no_size_too(self):
+        """Т3, середина диапазона: файл частично есть, эталона нет. Докачивать
+        не с чем сверяться, и `download` такую запись не качает вовсе."""
+        (self.models / "vae" / "a.safetensors.part").write_bytes(self.body[:63])
+        e = {**self.entry, "bytes": None, "sha256": None}
+        got = fi.survey([e], self.models)
+        self.assertEqual(got["rows"][0]["state"], "no_size")
+        self.assertIsNone(got["rows"][0]["todo_bytes"])
+
+    def test_when_every_size_is_known_nothing_is_called_unknown(self):
+        """И5, негативный контроль: вход, на котором счётчик обязан смолчать.
+        Без него «неизвестно» печаталось бы всегда и не значило бы ничего."""
+        got = fi.survey([self.entry], self.models)
+        self.assertEqual(got["todo_unknown"], 0)
+        self.assertEqual(got["todo_known"], 1)
+        self.assertEqual(got["todo_bytes"], 64)
+        self.assertNotIn("ОБЪЁМ НЕИЗВЕСТЕН", got["note"])
+        self.assertIn("по 1 весам из 1", got["note"])
+
     def test_zero_entries_is_not_nothing_to_fetch(self):
         """Р2: пустой список — «неизвестно, что качать»."""
         self.assertEqual(fi.survey([], self.models)["outcome"],
@@ -617,18 +661,89 @@ class DependenciesUseTheSameInjectedRunner(unittest.TestCase):
         self.assertEqual(run.calls, [])
         self.assertIn("СУХОЙ ПРОГОН", got["note"])
 
+    def test_the_shipped_pip_command_is_a_requirements_install(self):
+        """Б2: у отгружаемого значения обязан быть сторож ЛИТЕРАЛОМ (Т2),
+        отдельно от тестов, которые константу подменяют.
+
+        МУТАЦИЯ ВЫЖИВАЛА: `("-m","pip","install","-r")` -> `("-m","pip",
+        "install")`, 96 тестов, упало 0. Без `-r` команда становится
+        `pip install /путь/requirements.txt` — pip читает путь как ИМЯ ПАКЕТА,
+        и установки не происходит вовсе.
+        """
+        self.assertEqual(list(fi.PIP_ARGS), ["-m", "pip", "install", "-r"])
+        self.assertEqual(fi.REQUIREMENTS_NAME, "requirements.txt")
+
     def test_a_real_run_installs_and_reads_as_good(self):
+        """СРЕЗ УБРАН НАМЕРЕННО (Б3). Здесь стояло `run.calls[0][:4]`, то есть
+        сравнение обрывалось РОВНО ПЕРЕД `-r` — последний элемент константы не
+        сторожил никто. Сравнивается ВСЯ команда целиком."""
         (self.tmp / "requirements.txt").write_text("gguf\n", encoding="utf-8")
         run = Runner()
         got = fi.deps(self.installed, dry_run=False, runner=run, python="/py")
         self.assertEqual(got["outcome"], "годно")
-        self.assertEqual(run.calls[0][:4],
-                         ["/py", "-m", "pip", "install"])
+        self.assertEqual(run.calls[0],
+                         ["/py", "-m", "pip", "install", "-r",
+                          str(self.tmp / "requirements.txt")])
+
+    def test_the_flag_stands_immediately_before_the_requirements_path(self):
+        """Порядок — часть значения: `-r` после пути pip прочитает иначе."""
+        (self.tmp / "requirements.txt").write_text("gguf\n", encoding="utf-8")
+        run = Runner()
+        fi.deps(self.installed, dry_run=False, runner=run, python="/py")
+        argv = run.calls[0]
+        self.assertEqual(argv[-2], "-r")
+        self.assertEqual(argv[-1], str(self.tmp / "requirements.txt"))
 
     def test_a_pack_without_a_requirements_file_is_unmeasured_not_broken(self):
+        """И5, негативный контроль к соседнему тесту: каталог ЕСТЬ, файла в
+        нём нет. Здесь строка «без файла зависимостей» законна, и проверка
+        обязана смолчать про несклонированный пак."""
         got = fi.deps(self.installed, dry_run=False, runner=Runner())
         self.assertEqual(got["outcome"], "не смогли проверить")
         self.assertIn("без файла зависимостей 1", got["note"])
+        self.assertEqual(got["no_requirements"], 1)
+        self.assertEqual(got["unmeasured"], 0)
+        self.assertNotIn("каталога пака нет", got["note"])
+
+    def test_a_pack_that_was_never_cloned_is_unmeasured_and_not_file_less(self):
+        """ДЕФЕКТ, ЗАКРЫТЫЙ ЗДЕСЬ: каталога пака нет вовсе, а состояние было
+        «нет requirements.txt» — то, которое докстринг объявляет безобидным.
+        Два разных исхода («пак не встал» и «у пака нет файла зависимостей»)
+        схлопывались в безобидный, и сухой прогон докладывал «без файла
+        зависимостей 3» про три несуществующих каталога. Наблюдалось прогоном
+        до починки."""
+        gone = {"repos": [{"repo": "П", "dest": str(self.tmp / "нет-такого")}]}
+        got = fi.deps(gone, dry_run=False, runner=Runner())
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertEqual(got["rows"][0]["state"][:10], "не смогли:")
+        self.assertEqual(got["unmeasured"], 1)
+        self.assertEqual(got["no_requirements"], 0,
+                         "несклонированный пак сосчитан как «у пака нет файла "
+                         "зависимостей» — это разные исходы (Р1)")
+        self.assertIn("без файла зависимостей 0", got["note"])
+
+    def test_a_dry_run_does_not_call_a_missing_directory_file_less_either(self):
+        """Сухой прогон не клонировал НИЧЕГО, значит про файл зависимостей он
+        не знает. «Не смогли», а не «нет файла» (Р1, третий исход)."""
+        gone = {"repos": [{"repo": "П", "dest": str(self.tmp / "нет-такого")}]}
+        run = Runner()
+        got = fi.deps(gone, dry_run=True, runner=run)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertEqual(got["unmeasured"], 1)
+        self.assertEqual(got["no_requirements"], 0)
+        self.assertIn("НЕИЗВЕСТНО", got["note"])
+
+    def test_the_counts_are_a_fraction_and_not_a_bare_number(self):
+        """Е3: «поставлено 1 из 2» читается иначе, чем «поставлено 1»."""
+        (self.tmp / "requirements.txt").write_text("gguf\n", encoding="utf-8")
+        two = {"repos": [{"repo": "П", "dest": str(self.tmp)},
+                         {"repo": "Р", "dest": str(self.tmp / "нет-такого")}]}
+        got = fi.deps(two, dry_run=False, runner=Runner(), python="/py")
+        self.assertEqual((got["installed"], got["unmeasured"],
+                          got["no_requirements"], got["total"]), (1, 1, 0, 2))
+        self.assertIn("поставлено 1 из 2", got["note"])
+        self.assertEqual(got["outcome"], "не смогли проверить")
 
     def test_pip_that_fails_is_unmeasured(self):
         (self.tmp / "requirements.txt").write_text("gguf\n", encoding="utf-8")
@@ -1008,6 +1123,41 @@ class TheShippedTransportIsCoveredWithoutAnyNetwork(unittest.TestCase):
         fi.HttpFetcher(timeout=3.5).open("http://х/у")
         self.assertEqual(self.seen[0]["timeout"], 3.5)
 
+    def test_the_shipped_chunk_is_one_mebibyte(self):
+        """Литерал (Т2): 1 МиБ = 1048576. МУТАЦИЯ ВЫЖИВАЛА — `CHUNK_BYTES`
+        подменялся на 4096 при 96 зелёных тестах: во всех прогонах размер
+        куска задавался ПАРАМЕТРОМ (`HttpFetcher(chunk=2)`), а отгружаемое
+        умолчание не сторожил никто (тот же класс, что Б2)."""
+        self.assertEqual(fi.HttpFetcher().chunk, 1048576)
+
+    def test_the_shipped_chunk_actually_reaches_the_reader(self):
+        """Объявлена — не значит доезжает: у `CONNECT_TIMEOUT_S` этот второй
+        тест уже ловил разрыв между объявлением и вызовом."""
+        seen = []
+
+        class Resp:
+            status = 200
+            headers = {"Content-Length": "3"}
+
+            def __init__(self):
+                self.left = b"abc"
+
+            def read(self, n):
+                seen.append(n)
+                out, self.left = self.left[:n], self.left[n:]
+                return out
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        self._patch(Resp)
+        list(fi.HttpFetcher().open("http://х/у")["chunks"])
+        self.assertEqual(seen[0], 1048576,
+                         "константа объявлена и до чтения не доезжает")
+
     def test_a_nonzero_offset_asks_for_an_open_range(self):
         self._patch(lambda: (_ for _ in ()).throw(
             fi.urllib.error.URLError("нет сети")))
@@ -1104,6 +1254,57 @@ class TheRunnerGuaranteesNoNetwork(unittest.TestCase):
         self.assertTrue(self._functions_calling("Path"))
         self.assertEqual(self._functions_calling("совершенно_несуществующее"),
                          set())
+
+
+class NoAssertionComparesATruncatedCommand(unittest.TestCase):
+    """И7: чинить по месту — чинить пятую часть. Сгрепано по форме дефекта.
+
+    Дефект был один: `self.assertEqual(run.calls[0][:4], [...])` — срез
+    обрывал сравнение РОВНО ПЕРЕД последним элементом `PIP_ARGS`, и мутация
+    `("-m","pip","install","-r")` -> `("-m","pip","install")` выживала на 96
+    зелёных тестах. Форма дефекта — СРАВНЕНИЕ СРЕЗА ЗАПИСАННОЙ КОМАНДЫ: всё,
+    что за срезом, не сторожит никто.
+
+    Найдено этой формой в `test_fork_install.py`: 1 место, оно и починено.
+    Соседние файлы не правились (Ц2, один писатель на модуль); что найдено в
+    них — в отчёте смены.
+
+    # DEBT(2026-08-20): связь `fork_video.PROBE_TIMEOUT_S = 20` с литералом
+    # `timeout=20` в `fork_template._ffprobe_fps` (Е1) НЕ ЗАСТОРОЖЕНА. Тест на
+    # равенство двух модулей здесь написать нечем: в `fork_template` это голый
+    # литерал, а не константа, и сторож пришлось бы ставить в чужие файлы.
+    """
+
+    def _sliced_command_comparisons(self, src: str) -> list:
+        """Срез записанной команды внутри сравнения. Возвращает номера строк."""
+        out = []
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            if not ast.unparse(node.func).endswith(("assertEqual", "assertIn",
+                                                    "assertNotEqual")):
+                continue
+            for arg in node.args:
+                text = ast.unparse(arg)
+                if ".calls[" in text and text.endswith("]") and ":" in \
+                        text.rsplit("[", 1)[-1]:
+                    out.append(node.lineno)
+        return sorted(set(out))
+
+    def test_this_file_compares_commands_whole(self):
+        src = (REPO_ROOT / "ball_reel" / "tests"
+               / "test_fork_install.py").read_text(encoding="utf-8")
+        self.assertEqual(self._sliced_command_comparisons(src), [],
+                         "сравнение среза записанной команды: всё, что за "
+                         "срезом, не сторожит никто")
+
+    def test_the_detector_can_find_the_defect_it_was_written_for(self):
+        """И5: вход, на котором сторож ОБЯЗАН сработать, и вход, на котором он
+        обязан смолчать. Без первого сторож утверждает «чисто» ни о чём."""
+        bad = "self.assertEqual(run.calls[0][:4], ['/py', '-m', 'pip'])\n"
+        good = "self.assertEqual(run.calls[0], ['/py', '-m', 'pip', '-r'])\n"
+        self.assertEqual(self._sliced_command_comparisons(bad), [1])
+        self.assertEqual(self._sliced_command_comparisons(good), [])
 
 
 if __name__ == "__main__":

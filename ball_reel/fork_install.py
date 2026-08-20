@@ -430,7 +430,7 @@ def target_for(entry: dict, models_dir: Path) -> Path:
 
 
 def survey(entries: list, models_dir: str | Path) -> dict:
-    """Что уже на месте, что докачивается, что качать с нуля. Пять состояний.
+    """Что уже на месте, что докачивается, что качать с нуля. ШЕСТЬ состояний.
 
         ok          файл есть, размер сошёлся байт в байт — трогать нечего
         partial     лежит `.part`, докачиваем с его длины (HTTP Range)
@@ -440,6 +440,11 @@ def survey(entries: list, models_dir: str | Path) -> dict:
                     а дописать в конец чужого файла — способ получить мусор
                     правильной длины. Качаем заново во временный
         no_url      в реестре нет адреса — качать нечем, «не смогли»
+        no_size     в реестре нет эталонного размера — сверять нечем, и
+                    `download` такую запись НЕ КАЧАЕТ. Состояние не зависит от
+                    того, лежит ли файл на диске: пока размера нет, объём к
+                    загрузке НЕИЗВЕСТЕН, и ноль здесь означал бы «качать
+                    нечего», то есть ровно противоположное
 
     `partial` отдельно от `missing` потому, что это разные ДЕНЬГИ: у 10.7 ГиБ
     файла, оборвавшегося на девяти, разница между докачкой и перезакачкой —
@@ -454,18 +459,25 @@ def survey(entries: list, models_dir: str | Path) -> dict:
         have_part = part.stat().st_size if part.is_file() else 0
         if not e.get("url"):
             state, todo = "no_url", None
-        elif found is not None and e["bytes"] is not None:
+        elif e["bytes"] is None:
+            # ЭТАЛОНА РАЗМЕРА НЕТ — И ЭТО НЕ ЗАВИСИТ ОТ ТОГО, ЛЕЖИТ ЛИ ФАЙЛ.
+            # Первая редакция ставила `no_size` ТОЛЬКО НАЙДЕННОМУ файлу, а у
+            # отсутствующего размер терялся молча: запись уходила в `missing`
+            # с `todo_bytes = None`, сумма читала `None` как ноль, и шесть
+            # весов к загрузке печатались как «К загрузке 0.0 ГиБ» при
+            # «без эталона размера 0». Скачать такую запись всё равно нельзя —
+            # `download` отказывается ровно по этому основанию, — значит и
+            # осмотр обязан говорить о ней одно и то же, лежит файл или нет.
+            state, todo = "no_size", None
+        elif found is not None:
             got = dest.stat().st_size
             if got == e["bytes"]:
                 state, todo = "ok", 0
             else:
                 state, todo = "wrong_size", e["bytes"]
-        elif found is not None:
-            state, todo = "no_size", None
         elif have_part:
             state = "partial"
-            todo = (max(e["bytes"] - have_part, 0)
-                    if e["bytes"] is not None else None)
+            todo = max(e["bytes"] - have_part, 0)
         else:
             state = "missing"
             todo = e["bytes"]
@@ -477,6 +489,12 @@ def survey(entries: list, models_dir: str | Path) -> dict:
               for s in ("ok", "partial", "missing", "wrong_size", "no_url",
                         "no_size")}
     todo = sum(r["todo_bytes"] or 0 for r in rows)
+    # Е3: частичный результат — числами. Сумма ЗНАЕМЫХ остатков и отдельно
+    # СКОЛЬКО ЗАПИСЕЙ в неё не вошли. Без второго числа `todo_bytes` читается
+    # как полный объём работы, и «0.0 ГиБ» при шести весах к загрузке — это
+    # уже случившийся дефект, а не опасение.
+    todo_unknown = sum(1 for r in rows if r["todo_bytes"] is None)
+    todo_known = len(rows) - todo_unknown
     # ЧТО ЗДЕСЬ «НЕ ГОДНО», А ЧТО ПРОСТО РАБОТА. Отсутствующий вес — НОРМАЛЬНОЕ
     # состояние голой машины, ради него установщик и написан; объявить его
     # провалом значило бы, что сухой прогон на пустой машине всегда красный, то
@@ -496,12 +514,18 @@ def survey(entries: list, models_dir: str | Path) -> dict:
         outcome = UNMEASURED
     return {
         "outcome": outcome, "rows": rows, "models_dir": str(base),
-        "todo_bytes": todo, **counts,
+        "todo_bytes": todo, "todo_unknown": todo_unknown,
+        "todo_known": todo_known, **counts,
         "note": (f"весов в реестре {len(rows)}: на месте {counts['ok']}, "
                  f"докачать {counts['partial']}, качать с нуля "
                  f"{counts['missing']}, неверный размер {counts['wrong_size']}, "
                  f"без адреса {counts['no_url']}, без эталона размера "
-                 f"{counts['no_size']}. К загрузке {_gib(todo)} ГиБ"
+                 f"{counts['no_size']}. К загрузке {_gib(todo)} ГиБ "
+                 f"по {todo_known} весам из {len(rows)}"
+                 + (f"; У {todo_unknown} ОБЪЁМ НЕИЗВЕСТЕН (без эталона "
+                    f"размера {counts['no_size']}, без адреса "
+                    f"{counts['no_url']}) — ноль здесь НЕ значит «качать "
+                    f"нечего»" if todo_unknown else "")
                  + (" — КАЧАТЬ НЕЧЕГО" if outcome == PASS else "")
                  + (". ПРАВИЛЬНОЕ ИМЯ ПРИ НЕПРАВИЛЬНОМ РАЗМЕРЕ: "
                     + ", ".join(f"{r['name']} ({r['have_bytes']} вместо "
@@ -815,16 +839,41 @@ def deps(installed: dict, *, dry_run: bool = True, runner=run_git,
     точка внедрения, а не две. Пака без `requirements.txt` не бывает ошибкой:
     у части паков зависимости объявлены только в `pyproject.toml`, и молча
     считать это провалом значило бы браковать годную установку.
+
+    НО «НЕТ ФАЙЛА ЗАВИСИМОСТЕЙ» И «ПАКА НЕТ ВОВСЕ» — ЭТО ДВА РАЗНЫХ ИСХОДА, И
+    ПЕРВАЯ РЕДАКЦИЯ СХЛОПЫВАЛА ИХ В БЕЗОБИДНЫЙ. Проверялось только
+    `req.is_file()`, а `False` он даёт одинаково и когда пак склонирован без
+    `requirements.txt`, и когда каталога пака НЕТ НА ДИСКЕ — то есть клон не
+    состоялся. Несклонированный пак печатался строкой, которую докстринг сам
+    объявляет нормой, и сухой прогон на голой машине докладывал «без файла
+    зависимостей 3» про три несуществующих каталога. Поэтому:
+
+        поставлено   `pip` отработал с нулевым кодом
+        не смогли    каталога пака нет (клон не состоялся или ещё не был),
+                     либо `pip` вернул ненулевой код, либо не запустился
+        нет файла    каталог ЕСТЬ, `requirements.txt` в нём нет — это норма
+
+    Проверка каталога стоит ПЕРВОЙ (П2) и по существу: пока каталога нет,
+    вопрос «есть ли в нём файл зависимостей» не измерен, а не отвечен «нет».
     """
     import sys
     python = sys.executable if python is None else python
     rows = []
     for r in installed["repos"]:
-        req = Path(r["dest"]) / REQUIREMENTS_NAME
+        dest = Path(r["dest"])
+        req = dest / REQUIREMENTS_NAME
         cmd = [python, *PIP_ARGS, str(req)]
         row = {"repo": r["repo"], "requirements": str(req),
                "command": " ".join(cmd)}
-        if not req.is_file():
+        if not dest.is_dir():
+            row["state"] = ("не смогли: каталога пака нет ("
+                            + str(dest)
+                            + (") — сухой прогон ещё не клонировал, есть ли "
+                               "у него файл зависимостей, НЕИЗВЕСТНО"
+                               if dry_run else
+                               ") — пак не склонирован; это НЕ «у пака нет "
+                               "файла зависимостей»"))
+        elif not req.is_file():
             row["state"] = "нет requirements.txt"
         elif dry_run:
             row["state"] = "поставить (сухой прогон: не выполнено)"
@@ -838,16 +887,21 @@ def deps(installed: dict, *, dry_run: bool = True, runner=run_git,
         rows.append(row)
     done = [r for r in rows if r["state"] == "поставлено"]
     bad = [r for r in rows if r["state"].startswith("не смогли")]
+    no_file = [r for r in rows if r["state"] == "нет requirements.txt"]
     if bad or not done:
         outcome = UNMEASURED
     else:
         outcome = PASS
     return {
         "outcome": outcome, "rows": rows,
+        # Числа рядом с вердиктом (Р2) и частичный итог числами (Е3):
+        # «поставлено 1 из 3» читается иначе, чем «поставлено 1».
+        "installed": len(done), "unmeasured": len(bad),
+        "no_requirements": len(no_file), "total": len(rows),
         "note": (("СУХОЙ ПРОГОН: pip не запускался. " if dry_run else "")
-                 + f"паков {len(rows)}: поставлено {len(done)}, не смогли "
-                 f"{len(bad)}, без файла зависимостей "
-                 f"{sum(1 for r in rows if r['state'] == 'нет requirements.txt')}"
+                 + f"паков {len(rows)}: поставлено {len(done)} из {len(rows)}, "
+                 f"не смогли {len(bad)}, без файла зависимостей "
+                 f"{len(no_file)}"
                  + (". " + "; ".join(f"{r['repo']}: {r['state']}" for r in bad)
                     if bad else "")),
     }
@@ -1194,6 +1248,10 @@ def report(*, root: str = ".", models_dir=None, comfy_root=None,
         "passed_names": passed, "failed_names": failed,
         "unmeasured_names": unmeasured,
         "todo_gib": _gib(sur.get("todo_bytes") or 0),
+        # Рядом с объёмом — СКОЛЬКО ЗАПИСЕЙ в него не вошли (Е3, Р2). Одно
+        # число «к загрузке» без второго уже читалось как «качать нечего» при
+        # шести весах, у которых просто нет эталона размера.
+        "todo_unknown": sur.get("todo_unknown") or 0,
         "seconds": round(sum(s["seconds"] for s in steps), 3),
         "note": (("СУХОЙ ПРОГОН (ничего не тронуто). " if dry_run else "")
                  + f"шагов {len(steps)}: пройдено {len(passed)}, провалено "
@@ -1218,7 +1276,10 @@ def render(rep: dict) -> str:
     lines = [head, "",
              f"  ComfyUI: {rep['comfy_dir']}",
              f"  веса:    {rep['models_dir']}",
-             f"  к загрузке: {rep['todo_gib']} ГиБ", ""]
+             (f"  к загрузке: {rep['todo_gib']} ГиБ"
+              + (f" — И ЭТО НЕ ВСЁ: у {rep['todo_unknown']} весов объём "
+                 f"неизвестен (нет эталона размера или адреса)"
+                 if rep.get("todo_unknown") else "")), ""]
     for s in rep["steps"]:
         lines.append(f"  {s['name']:<{width}}  {s['seconds']:>8.3f} с  "
                      f"{s['outcome']}")
