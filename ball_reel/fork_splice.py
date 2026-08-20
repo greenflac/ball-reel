@@ -98,14 +98,25 @@ from .fork_identity import FAIL, PASS, UNMEASURED
 # КОНСТАНТЫ-РЕШЕНИЯ. У каждой помечено происхождение (И4).
 # ---------------------------------------------------------------------------
 
-#: РАСЧЁТ (по `fork_comfy.snap_frames`, не с прогона): насколько заказ вправе
-#: разойтись с тем, что набирается из петли, и всё ещё считаться выполненным.
-#: Не выдумано: обёртка САМА прижимает любую длину вниз к шагу
-#: `LENGTH_STEP`, то есть молча теряет до `LENGTH_STEP - 1` кадров у ЛЮБОГО
-#: заказа. Требовать от склейки точности выше, чем у самой обёртки, — значит
-#: отказывать по разнице, которой на выходе всё равно не будет. Разошлось
-#: сильнее — это уже не округление, а другая длина, и ответ «не смогли».
-LENGTH_SLACK = fork_comfy.LENGTH_STEP
+#: ДОПУСК АСИММЕТРИЧЕН, И ЭТО НЕ ВКУСОВЩИНА. Кадров МЕНЬШЕ заказанного —
+#: недостача, кадров БОЛЬШЕ — ролик чуть длиннее просимого. Следующий по
+#: конвейеру прибор `fork_run.length_fits_driving` устроен ровно так же:
+#: `PASS если need - have <= 0`, то есть избыток пропускает, а недостачу —
+#: никогда.
+#:
+#: ВЫБРАНО (кем: эта смена; из чего: из согласия двух приборов). Было
+#: `LENGTH_SLACK = LENGTH_STEP` в обе стороны, и это ДВОЙНОЙ СЧЁТ: `want`
+#: приходит из `frames_for_seconds` УЖЕ прижатым к шагу, поэтому скидка на
+#: прижатие в допуске учтена второй раз. ИЗМЕРЕНО сторонним прогоном по 323
+#: планам (частоты 24/25/30, длины петли 2..119, шесть заказов): по плановым
+#: секундам расхождений с `length_fits_driving` — 0, по ЗАКАЗАННЫМ — 93 из
+#: 323, и каждое это «склейка: годно» против «сводящий проход: не смогли».
+LENGTH_SHORT_MAX = 0
+
+#: РАСЧЁТ (по `fork_comfy.snap_frames`): наверх допуск остаётся шагом обёртки
+#: — набрать РОВНО заказ удаётся не всегда, а лишние кадры ролик не ломают.
+#: Без верхней границы вовсе заказ 5 с мог бы честно закрыться десятью.
+LENGTH_OVER_MAX = fork_comfy.LENGTH_STEP
 
 #: ВЫБРАНО (кем: эта смена; из чего: из устройства склейки). Петля из одного
 #: кадра — не петля: шаг склейки L-1 равен нулю, и сколько её ни повторяй,
@@ -215,6 +226,41 @@ def playback_fps(frames_fps) -> dict:
     return {"outcome": PASS, "fps": rate["fps"], "note": rate["note"]}
 
 
+def source_fps(claimed, measured) -> dict:
+    """Какая частота у источника: СНЯТАЯ с файла или названная ключом.
+
+    Е2 — при расхождении флага и свидетельства верят свидетельству. Ключ
+    `--fps` — это НАМЕРЕНИЕ оператора, а `measured` снято с самого файла
+    `ffprobe`. Раньше ключ молча перебивал снятое, и ВОСПРОИЗВЕДЕНО на
+    настоящем mp4 60 к/с с `--fps 30`: заказ 5.4 с отдавался как «годно,
+    161 кадр = 5.37 с», а движения в этих кадрах 2.68 с — ошибка ровно вдвое,
+    и отчёт при этом сходился сам с собой.
+
+    Расхождение — «не годно» с ОБОИМИ числами, а не тихий выбор одного из
+    них: оператор, попросивший 30 на шестидесяти, либо ошибся файлом, либо
+    хотел прореживание, которое склейка не делает (его делает `fork_video`).
+    """
+    if measured is None:
+        # Каталог кадров: снимать частоту не с чего, остаётся названное.
+        return {"outcome": PASS, "fps": claimed, "measured": None,
+                "note": (f"частота названа ключом: {claimed}"
+                         if claimed is not None else
+                         "частота источника не названа и снять её не с чего")}
+    if claimed is None:
+        return {"outcome": PASS, "fps": measured, "measured": measured,
+                "note": f"частота снята с файла: {measured} к/с"}
+    if claimed != measured:
+        return {"outcome": FAIL, "fps": None, "measured": measured,
+                "note": (f"ключ говорит {claimed} к/с, а с файла снято "
+                         f"{measured} к/с. Верим снятому (Е2) и не гадаем: "
+                         f"взяв {claimed}, склейка назвала бы длину ролика с "
+                         f"ошибкой в {measured / claimed:.2f} раза. Уберите "
+                         f"ключ либо прорядите файл заранее "
+                         f"(`fork_video.frames` с fps={claimed})")}
+    return {"outcome": PASS, "fps": measured, "measured": measured,
+            "note": f"частота {measured} к/с — ключ и файл сошлись"}
+
+
 def admissible_plans(length: int, *, fps) -> dict:
     """Склейки петли длины `length`, которые обёртка НЕ прижмёт.
 
@@ -267,27 +313,42 @@ def choose_repeats(length: int, seconds: float, *, fps) -> dict:
                          f"шаг склейки {length - 1} кадров "
                          f"({(length - 1) / fps:.2f} с)." + step_note)}
 
-    best = min(kept, key=lambda p: (abs(p["frames"] - want["frames"]),
-                                    p["frames"]))
-    miss = best["frames"] - want["frames"]
     achievable = ", ".join(f"{p['repeats']}x={p['frames']}к/{p['seconds']}с"
                            for p in kept)
-    if abs(miss) > LENGTH_SLACK:
+    # Ищем среди тех, что НЕ КОРОЧЕ заказа, и берём самый близкий сверху.
+    # Просто «ближайший по модулю» выбирал бы недостачу там, где рядом лежит
+    # годный избыток, и отказывал бы на ровном месте.
+    enough = [p for p in kept
+              if want["frames"] - p["frames"] <= LENGTH_SHORT_MAX]
+    if not enough:
+        best = max(kept, key=lambda p: p["frames"])
+        return {"outcome": UNMEASURED, "plan": None, "plans": kept,
+                "dropped": len(dropped),
+                "note": (f"заказ {seconds} с = {want['frames']} кадров из "
+                         f"петли в {length} кадров НЕ НАБИРАЕТСЯ: самое "
+                         f"длинное {best['repeats']}x = {best['frames']} "
+                         f"кадров ({best['seconds']} с), НЕ ХВАТАЕТ "
+                         f"{want['frames'] - best['frames']} кадров. "
+                         f"Набирается: {achievable}." + step_note)}
+    best = min(enough, key=lambda p: p["frames"])
+    miss = best["frames"] - want["frames"]
+    if miss > LENGTH_OVER_MAX:
         return {"outcome": UNMEASURED, "plan": None, "plans": kept,
                 "dropped": len(dropped),
                 "note": (f"заказ {seconds} с = {want['frames']} кадров из "
                          f"петли в {length} кадров НЕ НАБИРАЕТСЯ: ближайшее "
-                         f"{best['repeats']}x = {best['frames']} кадров "
-                         f"({best['seconds']} с), промах {miss:+d} кадров при "
-                         f"допуске {LENGTH_SLACK}. Набирается: {achievable}."
-                         + step_note)}
+                         f"сверху {best['repeats']}x = {best['frames']} "
+                         f"кадров ({best['seconds']} с), промах {miss:+d} "
+                         f"кадров при допуске сверху {LENGTH_OVER_MAX}. "
+                         f"Набирается: {achievable}." + step_note)}
     return {"outcome": PASS, "plan": best, "plans": kept,
             "dropped": len(dropped),
             "note": (f"заказ {seconds} с = {want['frames']} кадров; берём "
                      f"{best['repeats']} повтора(ов) петли в {length} кадров = "
                      f"{best['frames']} кадров = {best['seconds']} с при "
-                     f"{fps} к/с (промах {miss:+d} кадров, допуск "
-                     f"{LENGTH_SLACK}). Набиралось: {achievable}." + step_note)}
+                     f"{fps} к/с (промах {miss:+d} кадров, допуск сверху "
+                     f"{LENGTH_OVER_MAX}, недостача не допускается). "
+                     f"Набиралось: {achievable}." + step_note)}
 
 
 # ---------------------------------------------------------------------------
@@ -406,23 +467,62 @@ def _report(outcome, note, t0, steps, **extra) -> dict:
 
 
 def splice(source, loop, seconds, out_dir, *, fps=None, decode=None,
-           prefer=None, overwrite=False) -> dict:
+           prober=None, prefer=None, overwrite=False) -> dict:
     """Собрать кадры драйвинга из петли. Дешёвое раньше дорогого (П2).
 
     `source` — каталог кадров или видеофайл (раскодирует `fork_video`, Е1).
     `loop` — пара (i, j) НОМЕРОВ В ОТСОРТИРОВАННОМ СПИСКЕ кадров: те же номера,
     что печатает `fork_looper`. `seconds` — заказанная длина ролика.
+
+    ВНЕШНИХ ИНСТРУМЕНТА ДВА, И ТОЧЕК ВНЕДРЕНИЯ ТОЖЕ ДВЕ: `decode` (ffmpeg) и
+    `prober` (ffprobe). Пока частота бралась из отчёта раскодировщика, хватало
+    одной — но частота теперь снимается ДО раскодирования, и подставной
+    раскодировщик без подставного щупа оставлял бы тест ходить в настоящий
+    ffprobe (Т4).
     """
     t = time.perf_counter()
     steps = []
     i, j = loop
     src = Path(source)
 
-    # 1. Кадры. Миллисекунды на каталоге, и без них незачем считать план.
+    # 1. Частота — ПЕРВОЙ, и это не косметика (П2). Раскодирование боевого
+    #    ролика — минуты и гигабайты в out/src; отказ по частоте, поставленный
+    #    после него, эти гигабайты уже потратил и оставил лежать. ИЗМЕРЕНО на
+    #    mp4 60 к/с: отказ печатался после 180 распакованных кадров, 728 КБ.
+    #    `ffprobe` отвечает за миллисекунды и знает частоту целиком.
+    t0 = time.perf_counter()
+    measured = None
+    if src.is_file():
+        seen = fork_video.probe(str(src), prober=prober)
+        if seen["outcome"] != PASS:
+            steps.append(("частота", seen["outcome"], seen["note"],
+                          time.perf_counter() - t0))
+            return _report(seen["outcome"], seen["note"], t, steps)
+        measured = seen["fps"]
+    elif not src.is_dir():
+        note = f"{src} — не каталог кадров и не файл"
+        steps.append(("источник", UNMEASURED, note, time.perf_counter() - t0))
+        return _report(UNMEASURED, note, t, steps)
+
+    agreed = source_fps(fps, measured)
+    if agreed["outcome"] != PASS:
+        steps.append(("частота", agreed["outcome"], agreed["note"],
+                      time.perf_counter() - t0))
+        return _report(agreed["outcome"], agreed["note"], t, steps)
+    rate = playback_fps(agreed["fps"])
+    steps.append(("частота", rate["outcome"],
+                  f"{agreed['note']}; {rate['note']}",
+                  time.perf_counter() - t0))
+    if rate["outcome"] == FAIL:
+        return _report(FAIL, rate["note"], t, steps)
+    fps_out = rate["fps"]
+
+    # 2. Кадры. Миллисекунды на каталоге; на файле это самый дорогой шаг после
+    #    записи, и до него мы уже знаем, что частота годна.
     t0 = time.perf_counter()
     if src.is_dir():
         paths = fork_looper.frame_paths(src)
-    elif src.is_file():
+    else:
         decode = fork_video.frames if decode is None else decode
         got = decode(str(src), str(Path(out_dir) / "src"), overwrite=True)
         if got.get("outcome") != PASS:
@@ -430,12 +530,6 @@ def splice(source, loop, seconds, out_dir, *, fps=None, decode=None,
                           time.perf_counter() - t0))
             return _report(got["outcome"], got["note"], t, steps)
         paths = [Path(p) for p in got["paths"]]
-        if fps is None:
-            fps = got.get("fps_out") or got.get("fps_in")
-    else:
-        note = f"{src} — не каталог кадров и не файл"
-        steps.append(("кадры", UNMEASURED, note, time.perf_counter() - t0))
-        return _report(UNMEASURED, note, t, steps)
     n = len(paths)
     if not n:
         note = f"в {src} нет кадров"
@@ -443,15 +537,6 @@ def splice(source, loop, seconds, out_dir, *, fps=None, decode=None,
         return _report(FAIL, note, t, steps)
     steps.append(("кадры", PASS, f"кадров подано {n}",
                   time.perf_counter() - t0))
-
-    # 2. Частота. Отказ по ней не должен стоить ни одной ссылки на диске.
-    t0 = time.perf_counter()
-    rate = playback_fps(fps)
-    steps.append(("частота", rate["outcome"], rate["note"],
-                  time.perf_counter() - t0))
-    if rate["outcome"] == FAIL:
-        return _report(FAIL, rate["note"], t, steps)
-    fps_out = rate["fps"]
 
     # 3. Петля внутри материала.
     t0 = time.perf_counter()

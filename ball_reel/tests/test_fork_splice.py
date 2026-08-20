@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -33,6 +34,19 @@ from .. import fork_splice as fs
 DRIVING_FPS = 24
 DRIVING_FRAMES = 362
 LOOP_I, LOOP_J = 114, 162
+
+
+
+def fake_prober(fps, *, frames=DRIVING_FRAMES, w=720, h=1278):
+    """Подставной ffprobe: тест не имеет права звать настоящий (Т4)."""
+    payload = json.dumps({"streams": [{"codec_type": "video",
+                                       "r_frame_rate": f"{int(fps)}/1",
+                                       "nb_frames": str(frames),
+                                       "width": w, "height": h,
+                                       "codec_name": "h264"}],
+                          "format": {"duration": str(frames / fps)}})
+    return lambda path: {"ran": True, "code": 0, "out": payload, "err": "",
+                         "why": ""}
 
 
 def make_frames(root, n, *, start=0):
@@ -357,8 +371,11 @@ class TheWholeSpliceOnADirectoryOfFrames(unittest.TestCase):
 
     def test_the_steps_are_named_and_ordered_cheap_first(self):
         rep = self.splice()
+        # Частота стоит ПЕРВОЙ намеренно: отказ по ней не должен стоить ни
+        # одного распакованного кадра. ИЗМЕРЕНО до перестановки: отказ на mp4
+        # 60 к/с печатался после 180 кадров, 728 КБ в out/src.
         self.assertEqual([s["step"] for s in rep["steps"]],
-                         ["кадры", "частота", "петля", "план", "запись"])
+                         ["частота", "кадры", "петля", "план", "запись"])
 
     def test_a_loop_outside_the_material_writes_nothing(self):
         rep = fs.splice(self.root / "src", (350, 400), 6.04, self.root / "out",
@@ -398,7 +415,7 @@ class TheWholeSpliceOnADirectoryOfFrames(unittest.TestCase):
                     "fps_out": 24.0, "note": "подменённый раскодировщик"}
 
         rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
-                        decode=decoder)
+                        decode=decoder, prober=fake_prober(24))
         self.assertEqual(rep["outcome"], "годно")
         self.assertEqual(rep["frames"], 145)
         self.assertEqual(rep["fps"], 24.0)   # снята с файла, а не наша 30
@@ -412,7 +429,7 @@ class TheWholeSpliceOnADirectoryOfFrames(unittest.TestCase):
                     "note": "файл не видео"}
 
         rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
-                        decode=decoder)
+                        decode=decoder, prober=fake_prober(24))
         self.assertEqual(rep["outcome"], "не годно")
 
 
@@ -467,6 +484,140 @@ class TheEntryPoint(unittest.TestCase):
 
     def test_the_three_exit_codes_are_distinct(self):
         self.assertEqual(sorted(fs.EXIT_BY_OUTCOME.values()), [0, 1, 2])
+
+
+class TheKeyNeverOverridesWhatWasMeasured(unittest.TestCase):
+    """Е2: при расхождении ключа и файла верим файлу, и это «не годно».
+
+    ВОСПРОИЗВЕДЕНО до починки на настоящем mp4 60 к/с с `--fps 30`:
+    «годно, 161 кадр = 5.37 с» при том, что движения в этих кадрах 2.68 с —
+    ошибка ровно вдвое, и отчёт сходился сам с собой.
+    """
+
+    def test_a_key_that_disagrees_with_the_file_is_refused(self):
+        rep = fs.source_fps(30.0, 60.0)
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertIsNone(rep["fps"])
+
+    def test_the_refusal_names_both_numbers(self):
+        rep = fs.source_fps(30.0, 60.0)
+        self.assertIn("30.0", rep["note"])
+        self.assertIn("60.0", rep["note"])
+
+    def test_the_measured_value_wins_when_no_key_is_given(self):
+        self.assertEqual(fs.source_fps(None, 60.0)["fps"], 60.0)
+
+    def test_a_key_that_agrees_passes(self):
+        # Негативный контроль (И5): совпадение обязано проходить молча.
+        rep = fs.source_fps(24.0, 24.0)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["fps"], 24.0)
+
+    def test_a_directory_of_frames_has_nothing_to_measure(self):
+        rep = fs.source_fps(24.0, None)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["fps"], 24.0)
+
+
+class TheFpsRefusalCostsNoDecodedFrames(unittest.TestCase):
+    """П2: отказ по частоте — до раскодирования, а не после.
+
+    ИЗМЕРЕНО до перестановки на mp4 60 к/с: отказ печатался после 180
+    распакованных кадров, 728 КБ в out/src. На боевом драйвинге это минуты и
+    гигабайты, которые остаются лежать.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_decoder_is_never_called_when_the_key_disagrees(self):
+        video = self.root / "driving.mp4"
+        video.write_text("не видео", encoding="utf-8")
+        called = []
+
+        def decoder(src, dst, **kw):
+            called.append(src)
+            return {"outcome": "годно", "paths": [], "note": "не должен звучать"}
+
+        rep = fs.splice(video, (0, 40), 5.4, self.root / "out", fps=30,
+                        decode=decoder, prober=fake_prober(60, frames=120))
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertEqual(called, [])
+
+    def test_the_decoder_is_called_when_the_frequency_is_good(self):
+        # Негативный контроль (И5): при годной частоте раскодировщик обязан
+        # быть позван, иначе тест выше проходил бы и на сломанном модуле.
+        video = self.root / "driving.mp4"
+        video.write_text("не видео", encoding="utf-8")
+        paths = make_frames(self.root / "src", 200)
+        called = []
+
+        def decoder(src, dst, **kw):
+            called.append(src)
+            return {"outcome": "годно", "paths": paths, "note": "подставной"}
+
+        rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
+                        decode=decoder, prober=fake_prober(24))
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(len(called), 1)
+
+
+class TheToleranceIsAsymmetricAndAgreesWithTheNextInstrument(unittest.TestCase):
+    """Недостача кадров запрещена, избыток в пределах шага — разрешён.
+
+    ИЗМЕРЕНО на сетке 3 частоты x 118 длин петли x 6 заказов (2124 входа):
+    при прежнем симметричном допуске 4 склейка говорила «годно» 322 раза, и
+    137 из них (43%) следующий прибор `fork_run.length_fits_driving` называл
+    «не смогли, не хватает». После починки: «годно» 237 раз, расхождений 0.
+    """
+
+    def test_a_short_plan_is_refused_even_by_one_frame(self):
+        # L=6, 24 к/с, заказ 7.0 с: набирается 161 кадр против нужных 165.
+        rep = fs.choose_repeats(6, 7.0, fps=24)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+
+    def test_a_plan_longer_than_the_upper_tolerance_is_refused(self):
+        # L=6, заказ 7.0 с: ближайшее сверху 181 кадр — на 16 больше 165.
+        rep = fs.choose_repeats(6, 7.0, fps=24)
+        self.assertIn("допуске сверху", rep["note"])
+
+    def test_the_refusal_names_how_many_frames_are_missing(self):
+        # Ветка недостачи: из петли не набирается НИ ОДНА длина >= заказа.
+        # L=4, 24 к/с, заказ 10.0 с — 237 кадров, а полоса даёт максимум 217.
+        rep = fs.choose_repeats(4, 10.0, fps=24)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+        self.assertIn("НЕ ХВАТАЕТ", rep["note"])
+
+    def test_an_exact_plan_passes(self):
+        # Негативный контроль (И5): боевая петля 49 кадров на 6.04 с.
+        rep = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["plan"]["frames"], 145)
+
+    def test_a_plan_is_never_shorter_than_the_order(self):
+        # Литералы, не импорт (Т2): заказ 6.04 с при 24 к/с — это 145 кадров.
+        rep = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertGreaterEqual(rep["plan"]["frames"], 145)
+
+    def test_the_chosen_plan_never_contradicts_the_next_instrument(self):
+        # Е1 машиной, а не глазами: два прибора на одном входе.
+        from .. import fork_run
+        checked = wrong = 0
+        for fps in (24, 25, 30):
+            for length in range(2, 60):
+                for order in (5.0, 6.04, 7.0, 8.5, 10.0):
+                    got = fs.choose_repeats(length, order, fps=fps)
+                    if got["outcome"] != "годно":
+                        continue
+                    checked += 1
+                    after = fork_run.length_fits_driving(
+                        got["plan"]["frames"], seconds=order, fps=fps)
+                    if after["outcome"] != "годно":
+                        wrong += 1
+        self.assertGreater(checked, 0, "негативный контроль: сетка пуста")
+        self.assertEqual(wrong, 0, f"проверено {checked}, расхождений {wrong}")
 
 
 class WritingNeverEatsTheSource(unittest.TestCase):
