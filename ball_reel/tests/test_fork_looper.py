@@ -90,6 +90,37 @@ def two_exercises(n=NFRAMES):
             for t in range(n)]
 
 
+def two_exercises_second_is_perfect(n=NFRAMES, tire=0.0001):
+    """Два упражнения, и второе замыкается ТОЧНЕЕ первого.
+
+    A (руки) слегка уезжает — его мост стоит 1 кадр; B (ноги в другой посадке)
+    замыкается точно — мост 0 кадров. Значит по цене моста первым обязан идти
+    B, и это проверяемо в обе стороны: ослепив лицо на кадрах B, мы обязаны
+    увидеть B ВНИЗУ списка, хотя его нижняя граница дешевле цены A.
+
+    Снос `tire` выбран замером: 0.0001 даёт стык 0.15 типичного шага — петля A
+    ещё проходит планку преимущества (иначе её просто не будет в выдаче), но
+    уже дороже нулевого B.
+    """
+    return [skeleton(t / PERIOD, mode="arms", tired=tire * t) if t < n // 2
+            else seated(skeleton(t / PERIOD, mode="legs", amp=0.2), 0.6)
+            for t in range(n)]
+
+
+def two_speeds(n=NFRAMES, tire=0.0001):
+    """Два упражнения РАЗНОЙ СКОРОСТИ: медленное со сносом, потом быстрое.
+
+    Нужна ровно затем, чтобы глобальный знаменатель разошёлся с локальным:
+    медиана шага по клипу задаётся быстрым упражнением, а стык меряется у
+    медленного. На боевом ролике это расхождение доходило до 5.15 раза и
+    заказывало мост вчетверо длиннее нужного.
+    """
+    return [skeleton(t / PERIOD, mode="arms", amp=0.03, tired=tire * t)
+            if t < n // 2
+            else seated(skeleton(t / PERIOD, mode="legs", amp=0.25), 0.6)
+            for t in range(n)]
+
+
 def still_sequence(n=NFRAMES):
     """Человек не движется: ранжировать стыки нечем — исход «не смогли»."""
     return [skeleton(0.0) for _ in range(n)]
@@ -1407,6 +1438,360 @@ class NoHeavyImports(unittest.TestCase):
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parents[2]))
         self.assertEqual(out.stdout.strip(), "False", out.stderr[-400:])
+
+
+# ---------------------------------------------------------------------------
+# 19. ЦЕНА МОСТА. Стык больше не отбраковывает — он назначает цену
+# ---------------------------------------------------------------------------
+
+def priced(i, j, frames, floor, seam, outcome):
+    """Петля с уже посчитанной ценой моста — ВХОД для `rank_loops`.
+
+    Собирается литералами, а не вызовом `bridge_cost`: иначе порядок
+    проверялся бы вместе с арифметикой цены, и ошибка в одной пряталась бы за
+    другой.
+    """
+    return {"i": i, "j": j, "frames": j - i + 1,
+            "bridge": {"outcome": outcome, "frames": frames, "floor": floor,
+                       "seam": seam, "worst_axis": "голова",
+                       "unmeasured": [] if outcome == PASS else ["голова"],
+                       "measured": ["тело"], "reason": ""}}
+
+
+class BridgePrice(unittest.TestCase):
+    """Стык, переведённый в кадры подгонки, и три исхода у этого перевода."""
+
+    def test_the_seam_becomes_frames_by_rounding_up(self):
+        """«Стык 3.48 типичных шага» — это «не хватает 3.5 кадров обычного
+        движения», то есть мост в 4 кадра. Округление ВВЕРХ, а не к ближайшему:
+        мост в 3 кадра провёл бы переход быстрее обычного движения клипа, то
+        есть дал бы рывок — ровно то, ради чего петля и отбиралась.
+        """
+        self.assertEqual(fl.bridge_frames(3.48), 4)
+        self.assertEqual(fl.bridge_frames(3.01), 4)
+        self.assertEqual(fl.bridge_frames(0.01), 1)
+
+    def test_a_seam_that_is_a_whole_number_does_not_get_a_spare_frame(self):
+        """Негативный контроль округления с другой стороны (И5): вверх — это
+        не «плюс один всегда»."""
+        self.assertEqual(fl.bridge_frames(3.0), 3)
+        self.assertEqual(fl.bridge_frames(0.0), 0)
+
+    def test_an_unmeasured_seam_has_no_price_and_that_is_not_zero(self):
+        """ФОРМА ГЛАВНОГО ДЕФЕКТА: «не смогли», ведущее себя как ноль.
+
+        Цена неизмеренного стыка не выдумывается ни нулём (тогда он поднимает
+        кандидата в рейтинге — это и случилось на боевом ролике), ни
+        бесконечностью (тогда петля молча выбрасывается). Её просто нет.
+        """
+        self.assertIsNone(fl.bridge_frames(None))
+
+    def test_four_measured_axes_give_a_price_and_name_the_worst(self):
+        got = fl.bridge_cost({"поза": 0.99, "поток": 0.91, "пиксели": 1.45,
+                              "голова": 3.28})
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["frames"], 4)
+        self.assertEqual(got["worst_axis"], "голова")
+        self.assertEqual(got["unmeasured"], [])
+
+    def test_a_missing_axis_is_a_third_outcome_and_gives_a_bound(self):
+        """Р1: «не смогли» не сворачивается ни в «годно», ни в «не годно».
+
+        Числа — с боевого ролика: петля 309..357, у которой лица не видно на
+        первом кадре. По трём осям её мост был бы 3 кадра, и ровно этим она
+        обошла в рейтинге петлю, чей мост честно посчитан.
+        """
+        got = fl.bridge_cost({"поза": 1.479, "поток": 2.141, "пиксели": 1.935,
+                              "голова": None})
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIsNone(got["frames"], "цены у неизмеренного стыка нет")
+        self.assertEqual(got["floor"], 3, "но нижняя граница есть, и она в кадрах")
+        self.assertEqual(got["unmeasured"], ["голова"])
+
+    def test_the_same_loop_with_the_head_measured_gets_a_real_price(self):
+        """Негативный контроль с другой стороны (И5): та же петля, у которой
+        ось головы ответила, получает цену, а не границу. Настоящий стык
+        головы 309..357, померенный по соседним измеримым краям, — 11.74 шага,
+        и это мост в 12 кадров против кажущихся трёх."""
+        got = fl.bridge_cost({"поза": 1.479, "поток": 2.141, "пиксели": 1.935,
+                              "голова": 11.74}, max_frames=99)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["frames"], 12)
+
+    def test_nothing_measured_at_all_has_no_bound_either(self):
+        got = fl.bridge_cost({"поза": None, "голова": None})
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIsNone(got["frames"])
+        self.assertIsNone(got["floor"], "границу тоже не из чего вывести")
+
+    def test_a_long_bridge_is_a_no_and_not_a_dearer_yes(self):
+        """Третий исход у моста: слишком длинный — это «эту петлю не берём»."""
+        got = fl.bridge_cost({"тело": 3.0, "голова": 12.4}, max_frames=8)
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertEqual(got["frames"], 13)
+        self.assertIn("12.40", got["reason"])
+
+    def test_a_lower_bound_over_the_ceiling_is_already_a_no(self):
+        """«Не смогли» не выкупает длинный мост.
+
+        Недостающая ось может мост только УДЛИНИТЬ, никогда не укоротить.
+        Значит кандидат, у которого уже нижняя граница выше потолка, — «не
+        годно», и доизмерять его незачем. Это единственное место, где третий
+        исход законно сворачивается во второй, и законно оно ровно потому, что
+        направление доизмерения известно заранее.
+        """
+        got = fl.bridge_cost({"тело": 9.5, "голова": None}, max_frames=8)
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertEqual(got["floor"], 10)
+        self.assertIsNone(got["frames"], "посчитанной ценой это не стало")
+
+    def test_the_ceiling_shipped_is_eight_frames(self):
+        """Б2: отгружаемое значение сторожит тест НА САМО ЗНАЧЕНИЕ, литералом.
+
+        Взято по плато развёртки на боевом ролике: ответ не меняется на
+        отрезке 5..12, ниже 5 порог стоит на склоне, на 13 в выдачу
+        возвращаются соседи той петли, которую владелец забраковал глазами.
+        """
+        self.assertEqual(fl.BRIDGE_MAX_FRAMES, 8)
+
+    def test_the_ceiling_decides_at_exactly_eight_frames(self):
+        """Т1 с обеих сторон: мост ровно в потолок — годно, на кадр длиннее —
+        нет. Сдвинь потолок в любую сторону, и один из этих двух покраснеет."""
+        self.assertEqual(fl.bridge_cost({"тело": 8.0})["outcome"], "годно")
+        self.assertEqual(fl.bridge_cost({"тело": 8.01})["outcome"], "не годно")
+
+
+class TwoQueues(unittest.TestCase):
+    """Неизмеренная ось не имеет права удешевлять кандидата."""
+
+    def test_an_unmeasured_candidate_never_ranks_above_a_measured_one(self):
+        """ГЛАВНАЯ ПРАВКА, в чистом виде.
+
+        У непроверенного мост НЕ БОЛЬШЕ нуля, у проверенного — четыре кадра.
+        По цене непроверенный обошёл бы проверенного; по очередям — нет,
+        потому что ноль у него не измерен, а предположен.
+        """
+        got = fl.rank_loops([priced(200, 244, None, 0, 0.0, UNMEASURED),
+                             priced(100, 144, 4, 4, 3.28, PASS)])
+        self.assertEqual([(l["i"], l["j"]) for l in got],
+                         [(100, 144), (200, 244)])
+
+    def test_inside_the_measured_queue_the_cheaper_bridge_wins(self):
+        """Негативный контроль с другой стороны (И5): когда измерены все,
+        порядок обязан быть ровно по цене моста, а не по номеру кадра."""
+        got = fl.rank_loops([priced(10, 54, 9, 9, 8.1, PASS),
+                             priced(20, 64, 2, 2, 1.4, PASS),
+                             priced(30, 74, 5, 5, 4.6, PASS)])
+        self.assertEqual([l["bridge"]["frames"] for l in got], [2, 5, 9])
+
+    def test_unmeasured_candidates_are_ordered_among_themselves_by_the_bound(self):
+        """Вторая очередь — тоже очередь, а не свалка."""
+        got = fl.rank_loops([priced(10, 54, None, 6, 5.2, UNMEASURED),
+                             priced(20, 64, None, 2, 1.1, UNMEASURED)])
+        self.assertEqual([l["i"] for l in got], [20, 10])
+
+    def test_a_blind_face_no_longer_takes_the_first_place(self):
+        """То же самое, но целиком через прибор (Т5: развилка вызывается).
+
+        Упражнение B замыкается ТОЧНО (мост 0 кадров), упражнение A слегка
+        уезжает (мост 1 кадр). Пока лицо видно, первым обязано идти B — это
+        негативный контроль «прибор обязан шевельнуться». Как только лица на
+        кадрах B не видно, B уходит в конец списка, хотя его нижняя граница (0)
+        по-прежнему дешевле честной цены A (1): именно так «не смогли»
+        переставало быть нулём.
+        """
+        seq = two_exercises_second_is_perfect()
+        seen = analyse(Material(seq, blank=True))
+        self.assertEqual([(l["i"], l["j"]) for l in seen["loops"]],
+                         [(48, 92), (0, 44)], seen["note"])
+        self.assertEqual([l["bridge"]["frames"] for l in seen["loops"]], [0, 1])
+
+        blind = analyse(Material(seq, blank=True,
+                                 head_blind=range(48, NFRAMES)))
+        self.assertEqual([(l["i"], l["j"]) for l in blind["loops"]],
+                         [(0, 44), (48, 92)], blind["note"])
+        last = blind["loops"][1]
+        self.assertEqual(last["head_state"], UNMEASURED)
+        self.assertIsNone(last["bridge"]["frames"])
+        self.assertEqual(last["bridge"]["floor"], 0,
+                         "нижняя граница у него ДЕШЕВЛЕ, и всё равно он второй")
+        self.assertEqual(blind["loops"][0]["bridge"]["frames"], 1)
+
+    def test_the_deferred_candidate_suppresses_nobody(self):
+        """Отложенный не занимает места и не подавляет соседей по кадрам.
+
+        Ровно этим он и уводил измеримого соседа с боевого ролика: петля
+        309..357 пересекалась с 296..344 на 73% и вытесняла её, оставаясь при
+        этом непроверенной.
+        """
+        seq = two_exercises_second_is_perfect()
+        blind = analyse(Material(seq, blank=True, head_blind={48}))
+        first = blind["loops"][0]
+        self.assertEqual(first["head_state"], PASS,
+                         "первым обязан идти измеренный, а не отложенный")
+        self.assertEqual((first["i"], first["j"]), (49, 93),
+                         "сосед отложенного на кадр вправо — лицо на нём видно")
+
+    def test_the_table_marks_a_bound_so_it_cannot_be_read_as_a_price(self):
+        """(в) — пометка без изменения порядка — это то, что подвело.
+
+        Поэтому пометок теперь две, и обе В САМОЙ СТРОКЕ таблицы: «≥» у моста
+        и «≤» у выигрыша. Строка под таблицей осталась, но одна она не
+        спасала: клиент читает таблицу.
+        """
+        # Ослепляется УПРАЖНЕНИЕ A: у него стык ненулевой, значит есть и
+        # выигрыш, который можно напечатать границей. У точного B выигрыш не
+        # печатается вовсе — делить на нулевой стык нечем.
+        blind = analyse(Material(two_exercises_second_is_perfect(), blank=True,
+                                 head_blind=range(0, 48)))
+        txt = fl.table(blind)
+        bound = [r for r in txt.splitlines() if r.strip().startswith("2 ")][0]
+        self.assertIn("≥1к", bound, txt)
+        self.assertIn("≤", bound, txt)
+        self.assertIn("мост", txt.splitlines()[0])
+
+    def test_the_counters_say_how_many_bridges_were_priced_and_how_many_not(self):
+        """Р2: ноль отвергнутых при нуле посчитанных мостов — не успех."""
+        blind = analyse(Material(two_exercises_second_is_perfect(), blank=True,
+                                 head_blind=range(48, NFRAMES)))
+        self.assertEqual(blind["bridge_measured"], 1)
+        self.assertEqual(blind["head_unchecked"], 1)
+        self.assertEqual(blind["dropped_bridge"], 0)
+        note = [s["note"] for s in blind["steps"] if s["step"] == "финалисты"][0]
+        self.assertIn("МОСТЫ: посчитано 1", note)
+        self.assertIn("не смогли посчитать 1", note)
+
+    def test_the_bridge_is_measured_by_the_local_step_not_the_clip_median(self):
+        """Длина моста — величина АБСОЛЮТНАЯ, и знаменатель у неё локальный.
+
+        РАСХОЖДЕНИЕ ПРИБОРОВ, из-за которого это появилось: смена по кадрам
+        моста померила те же два стыка боевого ролика своим прибором (133
+        точки, пиксели) и получила «мост 1 кадр» там, где у нас выходило 4.
+        Причина — знаменатель: скорость движения по клипу неравномерна в 5.15
+        раза, а клиповая медиана одна на всех. После перехода на локальный шаг
+        приборы сошлись: 0.88 против 0.92 на стыке 344->296.
+
+        Здесь то же самое на фикстуре, где скорость заведомо разная: движение
+        МЕДЛЕННОЕ, а медиану шага задаёт быстрое соседнее. По клиповой медиане
+        стык вышел бы 0.123 шага и мост в 1 кадр; по локальной — 1.028 шага и
+        мост в 2 кадра, то есть клиповая медиана занижает его вдвое.
+
+        Порядок петель при этом остаётся на ГЛОБАЛЬНОЙ мере: она одинакова для
+        всех кандидатов и потому никого не искажает относительно других
+        (`score`, «выигрыш»), а мост — то, что клиент получит кадрами.
+        """
+        got = analyse(Material(two_speeds(), blank=True))
+        loop = got["loops"][0]
+        self.assertEqual(loop["bridge"]["frames"], 2)
+        self.assertEqual(loop["bridge_seams"]["поза"], 1.028)
+        self.assertEqual(loop["seam_pose"], 0.123,
+                         "тот же стык по клиповой медиане")
+        self.assertEqual(math.ceil(max(loop["seam_pose"], loop["seam_flow"])), 1,
+                         "по клиповой медиане мост вышел бы вдвое короче")
+
+    def test_the_head_axis_too_is_divided_by_its_own_local_step(self):
+        """У КАЖДОЙ ОСИ ЗНАМЕНАТЕЛЬ СВОЙ, и у головы он идёт в другую сторону.
+
+        Голова здесь качается медленно в первом упражнении и быстро во втором,
+        а петля выходит во втором. По клиповой медиане её стык — 11.381 шага,
+        то есть мост в 12 кадров и отказ по потолку; по локальному шагу самой
+        петли — 0.852 шага, то есть мост в 1 кадр. Разница в 13 раз, и она не
+        придумана: на боевом ролике та же ось шла в ОБРАТНУЮ сторону от позы
+        (внутри «свечи» голова медленнее клипа), поэтому общий знаменатель на
+        две оси был бы выдуманным.
+        """
+        m = Material(two_exercises_second_is_perfect(), blank=True)
+        m.head = lambda path: {
+            "head": (360.0,
+                     500.0
+                     + (1.0 if int(Path(path).stem) < NFRAMES // 2 else 24.0)
+                     * math.sin(2 * math.pi * (int(Path(path).stem) % PERIOD)
+                                / PERIOD)
+                     + 0.05 * int(Path(path).stem)),
+            "why": ""}
+        got = analyse(m)
+        loop = got["loops"][0]
+        self.assertEqual((loop["i"], loop["j"]), (48, 92), got["note"])
+        self.assertEqual(loop["seam_head"], 0.852, "локальный шаг головы")
+        self.assertEqual(loop["seam_head_clip"], 11.381, "клиповый шаг головы")
+        self.assertEqual(loop["bridge"]["frames"], 1,
+                         "по клиповому мосту вышло бы 12 кадров и отказ")
+
+    def test_the_local_head_scale_is_asked_of_eight_pairs(self):
+        """Б2: у отгружаемого значения свой тест, литералом и отдельно.
+
+        Число выбрано по полке (см. константу): 8 и 16 пар дают одну и ту же
+        медиану, 2 и 4 — другую. Поведенческого теста, различающего 8 и 16, не
+        существует ПО ЗАМЕРУ, и это не дыра, а причина, по которой взято 8.
+        """
+        self.assertEqual(fl.HEAD_LOCAL_PAIRS, 8)
+        m = Material(loop_sequence(), blank=True)
+        got = fl.head_scale(m.paths()[0:45], reader=m.head, pairs=8)
+        self.assertEqual(got["measured"], 8)
+        self.assertEqual(got["frames"], 16)
+
+    def test_a_bridge_priced_without_the_pixel_axis_says_so(self):
+        """И7: та же форма дефекта, найденная грепом по модулю, — но здесь она
+        закрывается пометкой, а не очередью, и это разные случаи.
+
+        Пиксельная ось выключается У ВСЕГО КЛИПА сразу, а не у одной петли:
+        занижены все кандидаты одинаково, порядок между ними не едет. Но цена
+        моста при этом посчитана по трём осям из четырёх и может быть только
+        нижней границей — и это обязано быть сказано.
+        """
+        got = analyse(Material(loop_sequence(), blank=True))
+        self.assertTrue(got["loops"][0]["pixel_axis_off"])
+        self.assertIn("пиксельная ось клипа НЕ ИЗМЕРЕНА", fl.table(got))
+
+    def test_the_pixel_note_is_silent_on_a_clip_where_that_axis_worked(self):
+        """Негативный контроль ЧЕРЕЗ ПРИБОР (И5): пометка обязана молчать.
+
+        Фикстурам этого модуля пиксельная ось не светит: их серый кадр выведен
+        из симметричного скелета, суммы гасятся, и типичный переход выходит
+        нулевым. Поэтому картинка здесь подаётся ПЕРИОДИЧЕСКАЯ: масштаб оси
+        измеряется (переход ненулевой), а на стыке петли она возвращается в ту
+        же точку, что и поза. Без такого входа сторож проверялся бы только с
+        одной стороны — и мутация «пометка кричит всегда» его пережила бы
+        (поймано мутацией, а не рассуждением).
+        """
+        import numpy as np
+
+        m = Material(loop_sequence(), blank=True)
+        m.gray = lambda path: np.full(
+            (8, 8), 120.0 + 30.0 * math.sin(2 * math.pi
+                                            * (int(Path(path).stem) % PERIOD)
+                                            / PERIOD), dtype="float64")
+        got = analyse(m)
+        self.assertGreater(got["pixel_step"], 0.0,
+                           "фикстура обязана включить пиксельную ось")
+        self.assertFalse(got["loops"][0]["pixel_axis_off"])
+        self.assertNotIn("пиксельная ось клипа НЕ ИЗМЕРЕНА", fl.table(got))
+
+    def test_the_pixel_note_is_silent_when_that_axis_worked(self):
+        """Негативный контроль (И5): сторож обязан молчать на входе, где всё
+        измерено. Отчёт собран здесь литералами — `table` чистая функция, и
+        проверять её проще подставленным отчётом, чем прогоном."""
+        quiet = {"fps": 30, "dropped_bridge": 0, "loops": [
+            {"rank": 1, "i": 0, "j": 44, "frames": 45, "seconds": 1.5,
+             "joints": 12, "score": 0.5, "seam_pose": 0.5, "seam_flow": 0.2,
+             "seam_pixel": 0.4, "seam_head": 0.3, "advantage": 3.0,
+             "repeats": [], "gif": None, "head_state": PASS,
+             "pixel_axis_off": False,
+             "bridge": {"outcome": PASS, "frames": 1, "floor": 1,
+                        "seam": 0.5, "unmeasured": []}}]}
+        txt = fl.table(quiet)
+        self.assertNotIn("пиксельная ось", txt)
+        self.assertNotIn("ЦЕНА МОСТА НЕ ПОСЧИТАНА", txt)
+        self.assertIn("1к", txt)
+
+    def test_a_head_that_never_returns_is_dropped_by_the_bridge_now(self):
+        """Отбраковка по голове осталась, но её выносит ЦЕНА МОСТА, а не
+        сравнение с типичной оценкой клипа, посчитанной без головы."""
+        got = analyse(Material(loop_sequence(), blank=True, head_mode="уезжает"))
+        self.assertEqual(got["loops"], [], got["note"])
+        self.assertGreater(got["dropped_bridge"], 0)
+        self.assertEqual(got["dropped_bridge"], got["dropped_head"],
+                         "длинными эти мосты сделала именно голова")
 
 
 if __name__ == "__main__":
