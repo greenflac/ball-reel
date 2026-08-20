@@ -722,5 +722,88 @@ class TheOrderedLengthMustFitTheDrivingWeHave(unittest.TestCase):
 
 
 
+
+
+class TheCommandThatActuallyRunsThePipeline(unittest.TestCase):
+    """Найдено при сборке руководства по запуску, а не тестом.
+
+    `from_template` был объявлен «точкой входа оператора» и ВСЁ ЭТО ВРЕМЯ
+    никем из командной строки не вызывался: `fork_template` только ПРОВЕРЯЕТ
+    карточку, а запустить конвейер было нечем. В руководстве на этом месте
+    стояло бы «напишите скрипт на питоне» — а это не руководство.
+
+    Тот же класс, что `test_reachable` ловит для модулей: написано, отчитано и
+    ни к чему не подключено. Сторож ловит модули, а отсутствие CLI не ловит
+    никто, потому что модуль-то импортируется.
+    """
+
+    def _bench_card(self, tmp):
+        from ball_reel import fork_template
+
+        return fork_template.make_bench(Path(tmp) / "bench")
+
+    def test_three_outcomes_map_to_three_exit_codes(self):
+        """Литералы (Т2): 0/1/2 — раскладка всего проекта, не наша выдумка."""
+        self.assertEqual(fork_run.EXIT_CODES[PASS], 0)
+        self.assertEqual(fork_run.EXIT_CODES[FAIL], 1)
+        self.assertEqual(fork_run.EXIT_CODES[UNMEASURED], 2)
+
+    def test_the_codes_are_the_same_as_the_neighbours_use(self):
+        """Своя раскладка означала бы, что оператор читает не то, к чему
+        привык у соседних точек входа, и «не смогли» примет за успех."""
+        from ball_reel import fork_stand
+
+        self.assertEqual(fork_run.EXIT_CODES, fork_stand.EXIT_CODES)
+
+    def test_a_missing_card_exits_one_and_says_so(self):
+        import io
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = fork_run.main([str(Path(tmp) / "нет.json"),
+                                      "--out", str(Path(tmp) / "out")])
+        self.assertEqual(code, 1)
+        self.assertIn("описание", buf.getvalue())
+
+    def test_a_bench_card_in_production_exits_one(self):
+        """Негативный контроль: боевой прогон по заглушкам — провал."""
+        import io
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = fork_run.main([str(self._bench_card(tmp)),
+                                      "--out", str(Path(tmp) / "out"),
+                                      "--production"])
+        self.assertEqual(code, 1)
+
+    def test_the_report_prints_every_step_with_its_seconds(self):
+        got = {"steps": [{"step": "входы", "outcome": PASS, "note": "всё на месте",
+                          "seconds": 0.5}],
+               "outcome": PASS, "note": "шагов 1", "dir": "/куда-то"}
+        text = fork_run.report_text(got)
+        for piece in ("входы", "всё на месте", "0.500", "/куда-то"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, text)
+
+    def test_machine_readable_output_is_valid_json(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                fork_run.main([str(Path(tmp) / "нет.json"),
+                               "--out", str(Path(tmp) / "out"), "--json"])
+        got = json.loads(buf.getvalue())
+        self.assertIn("outcome", got)
+        self.assertIn("steps", got)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -639,3 +639,64 @@ def _report(steps: list, out: Path) -> dict:
                  f"не смогли {unmeasured}. ГЕНЕРАЦИИ НЕ БЫЛО — путь собран на "
                  f"моке, продуктовое заявление им не проверяется."),
     }
+
+#: Код возврата по исходу. ВЫБРАНО не нами: та же раскладка уже у
+#: `fork_template`, `fork_stand`, `fork_install`, `fork_looper`, `fork_splice`
+#: и `fork_backend`. Своя раскладка здесь означала бы, что оператор, привыкший
+#: к одной, читает другую — и «не смогли» примет за успех.
+EXIT_CODES = {PASS: 0, FAIL: 1, UNMEASURED: 2}
+
+
+def report_text(report: dict) -> str:
+    """Отчёт словами. Ровно тот формат, что печатают соседние точки входа."""
+    lines = ["СКВОЗНОЙ ПРОГОН", ""]
+    for st in report["steps"]:
+        lines.append(f"  [{st['outcome']:>19}] {st['step']:<11} "
+                     f"{st['seconds']:>7.3f} с  {st['note']}")
+    lines += ["", f"ИТОГ: {report['outcome']}", f"  {report['note']}",
+              f"  выход: {report['dir']}"]
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    """Точка входа: КАРТОЧКА -> ПРОГОН. Три исхода, три кода возврата.
+
+    ЗАЧЕМ ОНА ПОЯВИЛАСЬ ТОЛЬКО СЕЙЧАС, и это находка, а не забывчивость.
+    `from_template` был написан как «точка входа оператора» и всё это время
+    НИКЕМ ИЗ КОМАНДНОЙ СТРОКИ НЕ ВЫЗЫВАЛСЯ: `fork_template` только ПРОВЕРЯЕТ
+    карточку, а запустить конвейер было нечем. То есть в руководстве по
+    запуску на этом месте стояло бы «напишите скрипт на питоне» — а это не
+    руководство. Нашлось при сборке блюпринта: проверял, какие команды в него
+    войдут, и обнаружил, что главной среди них нет.
+
+    Тот же класс, что `test_reachable` ловит для модулей: написано, отчитано и
+    ни к чему не подключено. Сторож ловит модули, а не отсутствие CLI.
+    """
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(
+        prog="python3 -m ball_reel.fork_run",
+        description="Сквозной прогон по карточке темплейта. Коды возврата: "
+                    "0 годно, 1 не годно, 2 не смогли проверить.")
+    ap.add_argument("card", help="файл-описание темплейта (fork-template/1)")
+    ap.add_argument("--out", required=True, help="куда положить выход")
+    ap.add_argument("--production", action="store_true",
+                    help="боевой прогон: испытательное описание отбивается")
+    ap.add_argument("--backend", metavar="АДРЕС",
+                    help="адрес ComfyUI; без него шаг рендера «не смогли»")
+    ap.add_argument("--json", action="store_true",
+                    help="печатать отчёт машинно, а не словами")
+    a = ap.parse_args(argv)
+
+    kw = {}
+    if a.backend:
+        kw["backend"] = a.backend
+    report = from_template(a.card, a.out, production=a.production, **kw)
+    print(json.dumps(report, ensure_ascii=False, indent=2) if a.json
+          else report_text(report))
+    return EXIT_CODES[report["outcome"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
