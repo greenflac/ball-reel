@@ -36,8 +36,10 @@ def skeleton(phase, *, mode="arms", tired=0.0, amp=0.10, seen=()):
     lx = ly = 0.0
     if mode == "legs":
         lx, ly, ax, ay = ax, ay, 0.0, 0.0
-    elif mode == "line":     # движение строго по одной оси: поза неоднозначна
+    elif mode == "line":     # руки строго вверх-вниз: поза неоднозначна
         ax = 0.0
+    elif mode == "legs_line":  # ноги строго вверх-вниз, руки стоят
+        lx, ly, ax, ay = 0.0, ay, 0.0, 0.0
     pts = {
         "l_hip": (0.45, 0.60), "r_hip": (0.55, 0.60),
         "l_shoulder": (0.44, 0.40), "r_shoulder": (0.56, 0.40),
@@ -63,9 +65,28 @@ def drift_sequence(n=NFRAMES, *, tire=0.002):
     return [skeleton(0.25, tired=tire * t) for t in range(n)]
 
 
+ANCHOR = ("l_hip", "r_hip", "l_shoulder", "r_shoulder")
+
+
+def seated(points, tilt):
+    """Та же механика движения, но ДРУГАЯ ПОСАДКА: конечности смещены целиком.
+
+    Без этого «другое упражнение» фикстур отличалось на 14..17 типичных шагов,
+    тогда как на боевом ролике разные упражнения расходятся на 55, а варианты
+    одного — на 17. То есть синтетика описывала варианты, а не упражнения, и
+    порог, откалиброванный по живому материалу, честно их схлопывал.
+    """
+    return {k: (x, y if k in ANCHOR else y + tilt, v)
+            for k, (x, y, v) in points.items()}
+
+
 def two_exercises(n=NFRAMES):
-    """Первую половину работают руки, вторую — ноги. Петель обязано быть две."""
-    return [skeleton(t / PERIOD, mode="arms" if t < n // 2 else "legs")
+    """Первую половину работают руки, вторую — ноги в другой посадке.
+
+    ИЗМЕРЕНО: 31.4 типичных шага между ними при пороге 24.
+    """
+    return [skeleton(t / PERIOD, mode="arms") if t < n // 2
+            else seated(skeleton(t / PERIOD, mode="legs", amp=0.2), 0.6)
             for t in range(n)]
 
 
@@ -176,9 +197,13 @@ class Material:
         pts = self.poses[idx]
         if pts is None:
             return {"head": None, "why": ""}
-        # Голова — над серединой плеч, в пикселях кадра 720x1278.
+        # Голова — над серединой плеч, в пикселях кадра 720x1278, и она
+        # ПОКАЧИВАЕТСЯ вместе с движением: неподвижная голова дала бы нулевой
+        # типичный шаг, ось выключилась бы, и проверки прошли бы вхолостую.
+        # Поймано прогоном: первая редакция держала плечи неподвижно.
+        bob = 6.0 * float(np.sin(2 * np.pi * (idx % PERIOD) / PERIOD))
         x = 720 * (pts["l_shoulder"][0] + pts["r_shoulder"][0]) / 2
-        y = 1278 * (pts["l_shoulder"][1] + pts["r_shoulder"][1]) / 2 - 60
+        y = 1278 * (pts["l_shoulder"][1] + pts["r_shoulder"][1]) / 2 - 60 + bob
         if self.head_mode == "уезжает":
             y += 0.7 * idx
         elif self.head_mode == "рывок":
@@ -869,11 +894,16 @@ def many_exercises(count, *, each=50):
     дублей схлопнуло её — правильно схлопнуло: ИЗМЕРЕНО, соседние «упражнения»
     расходились на 8.3 типичных шага при пороге 12, то есть это было одно
     движение с разным размахом. Здесь у каждого своя конфигурация: что
-    движется (руки, ноги, вертикаль), с каким размахом и с каким наклоном —
-    16.4..33.9 типичных шага друг от друга.
+    движется (руки, ноги, вертикаль), с каким размахом и в какой посадке —
+    не ближе 28.8 типичных шагов друг от друга при пороге 24.
+
+    Число пришлось поднимать дважды, и оба раза замером: сначала фикстура
+    отличалась только амплитудой (8.3 шага — по мере прибора это одно движение
+    с разным размахом, и он был прав), потом посадкой на 14..30 шагов, что по
+    шкале боевого ролика (55 у разных упражнений) всё ещё «варианты одного».
     """
-    plans = [("arms", 0.10, 0.0), ("legs", 0.14, 0.0), ("line", 0.12, 0.10),
-             ("arms", 0.06, -0.12), ("legs", 0.08, 0.14), ("line", 0.16, -0.06)]
+    plans = [("arms", 0.16, 0.0), ("legs", 0.20, 0.42), ("line", 0.20, -0.40),
+             ("arms", 0.05, 0.85), ("legs", 0.06, -0.80), ("line", 0.09, 1.25)]
     anchor = ("l_hip", "r_hip", "l_shoulder", "r_shoulder")
     out = []
     for e in range(count):
@@ -1079,6 +1109,289 @@ class JointCoverage(unittest.TestCase):
         self.assertEqual(got["loops"][0]["joints"], 12)
         self.assertNotIn("сколько суставов из 12", fl.table(got),
                          "пояснение печатается только когда есть что пояснять")
+
+
+# ---------------------------------------------------------------------------
+# 17. ДВА СИТА, И ОНИ ЛОВЯТ РАЗНОЕ
+# ---------------------------------------------------------------------------
+
+def two_places_one_movement(each=120):
+    """Упражнение A, потом B, потом СНОВА A — как в боевом ролике.
+
+    Кадры первого и третьего блока не пересекаются вовсе, а движение одно и то
+    же: ровно тот случай, который сито диапазонов не видит в принципе.
+    """
+    out = []
+    for mode, amp, tilt in (("arms", 0.10, 0.0), ("legs", 0.20, 0.6),
+                            ("arms", 0.10, 0.0)):
+        for t in range(each):
+            out.append(seated(skeleton(t / PERIOD, mode=mode, amp=amp), tilt))
+    return out
+
+
+def same_start_different_moves(each=120):
+    """Два упражнения, начинающиеся из ОДНОЙ позы и расходящиеся дальше.
+
+    Вертикальный мах: в фазе 0 смещение нулевое, поэтому стартовые скелеты
+    совпадают до последней цифры, а размах отличается вшестеро (34.8 типичных
+    шага друг от друга при пороге 24). Сверка «только по
+    началу» назвала бы это одним движением.
+    """
+    return ([skeleton(t / PERIOD, mode="line", amp=0.05) for t in range(each)]
+            + [skeleton(t / PERIOD, mode="line", amp=0.30) for t in range(each)])
+
+
+class TwoSieves(unittest.TestCase):
+    def test_the_signature_samples_the_loop_at_a_fixed_rate(self):
+        """Литералы: петля 0..44 описывается каждым пятым кадром.
+
+        Частота одна на все петли — иначе длинная петля описывается реже
+        короткой, и одно движение раскладывается на два (поймано прогоном).
+        """
+        asked = []
+
+        def state_at(frame):
+            asked.append(frame)
+            return norm(skeleton(frame / PERIOD))
+
+        sig = fl.loop_signature(state_at, 0, 44)
+        self.assertEqual(asked, [0, 5, 10, 15, 20, 25, 30, 35, 40])
+        self.assertEqual(len(sig), 9)
+        # Петля вдвое длиннее описывается вдвое подробнее, а не той же горстью.
+        asked.clear()
+        fl.loop_signature(state_at, 0, 88)
+        self.assertEqual(len(asked), 18)
+
+    def test_the_signature_refuses_when_a_pose_is_missing(self):
+        """Р1: сверять движения по половине подписи нельзя."""
+        self.assertIsNone(fl.loop_signature(lambda f: None, 0, 44))
+        self.assertIsNone(
+            fl.loop_signature(lambda f: None if f == 15 else norm(skeleton(0.0)),
+                              0, 44))
+
+    def test_the_signature_gap_ignores_where_the_cycle_starts(self):
+        """То же упражнение с другой точки цикла — то же упражнение."""
+        at = lambda f: norm(skeleton(f / PERIOD))
+        a = fl.loop_signature(at, 0, 44)
+        b = fl.loop_signature(at, 11, 55)      # тот же маятник, сдвиг на четверть
+        # Не ровно ноль: 44 кадра на 8 точек делятся с остатком, и точки
+        # ложатся на соседние кадры движения. 0.036 длины торса — это один
+        # межкадровый шаг, тогда как другое упражнение даёт впятеро больше.
+        # 0.071 длины торса — это два типичных межкадровых шага: точки двух
+        # подписей ложатся между собой, ровнее не бывает. Другое упражнение
+        # даёт впятеро больше, и порог 12 типичных шагов лежит далеко от обоих.
+        self.assertLess(fl.signature_gap(a, b), 0.1)
+        # А другое упражнение остаётся другим и после сдвига.
+        other = fl.loop_signature(lambda f: norm(skeleton(f / PERIOD, mode="legs",
+                                                          amp=0.14)), 0, 44)
+        self.assertGreater(fl.signature_gap(a, other), 0.3)
+
+    def test_the_vectorised_gap_equals_pose_gap(self):
+        """Е1: быстрая арифметика обязана давать то же, чем судит вся приёмка."""
+        at = lambda f: norm(skeleton(f / PERIOD))
+        a = [at(0), at(7)]
+        b = [at(3), at(19)]
+        by_hand = max(
+            max(min(fl.pose_gap(x, y) for y in b) for x in a),
+            max(min(fl.pose_gap(x, y) for x in a) for y in b))
+        # places=5, а не 9: `pose_gap` округляет до шести знаков, и разница
+        # ровно в этом округлении — 2e-7.
+        self.assertAlmostEqual(fl.signature_gap(a, b), by_hand, places=5)
+
+    def test_the_gap_is_the_worst_phase_not_the_average(self):
+        """Совпадения в одной точке цикла недостаточно: берётся худшая фаза."""
+        at = lambda f: norm(skeleton(f / PERIOD))
+        a = fl.loop_signature(at, 0, 44)
+        b = list(a)
+        b[3] = norm(skeleton(0.37, mode="legs", amp=0.25))
+        gap = fl.signature_gap(a, b)
+        self.assertGreater(gap, 0.2, "одна разошедшаяся фаза обязана решать")
+
+    def test_one_movement_in_two_places_collapses(self):
+        """ГЛАВНЫЙ СЛУЧАЙ. Кадры не пересекаются, движение одно."""
+        m = Material(two_places_one_movement(), blank=True)
+        got = analyse(m)
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertEqual(len(got["loops"]), 2,
+                         f"движений два, петель {len(got['loops'])}: "
+                         f"{[(l['i'], l['j']) for l in got['loops']]}")
+        self.assertGreater(got["dropped_duplicate"], 0)
+
+    def test_two_movements_that_start_alike_are_told_apart(self):
+        """Сверка ТОЛЬКО ПО НАЧАЛУ схлопнула бы их: стартовые позы совпадают
+        до последней цифры, а дальше движения расходятся вшестеро по размаху.
+
+        Проверяется на самой мере, а не на конвейере: конвейеру для этого
+        пришлось бы дать клип, у которого половины отличаются скоростью, и он
+        честно нашёл бы там монтажный рез — то есть тест мерил бы не то.
+        """
+        seq = same_start_different_moves()
+        self.assertEqual(seq[0], seq[120],
+                         "фикстура сломана: стартовые позы обязаны совпадать")
+        st = fl.states(seq)
+        at = lambda f: st[f] if 0 <= f < len(st) else None
+        typical = fl.typical_step(st)["step"]
+        self.assertEqual(fl.pose_gap(st[0], st[120]), 0.0,
+                         "по началу движения неразличимы — в этом и дело")
+        gap = fl.signature_gap(fl.loop_signature(at, 0, 44),
+                               fl.loop_signature(at, 120, 164))
+        self.assertGreater(gap / typical, fl.DUPLICATE_MAX_STEPS,
+                           f"по всей петле обязаны различаться: {gap/typical:.1f} "
+                           f"типичных шага против порога {fl.DUPLICATE_MAX_STEPS}")
+
+    def test_the_same_movement_with_a_smaller_swing_is_still_one_movement(self):
+        """Один и тот же мах с размахом 0.05 и 0.12 — одно упражнение.
+
+        ИЗМЕРЕНО: 10.4 типичных шага между ними при пороге 24. Это середина
+        между «сдвиг на кадр» (2..3) и «другое упражнение» (55), и на боевом
+        ролике ровно такая пара (17.1 шага) глазами читалась как одно движение
+        с разной амплитудой. Опустив порог, мы отдадим клиенту две карточки
+        одного упражнения — ради этого теста порог и мутируется вниз.
+        """
+        seq = ([skeleton(t / PERIOD, mode="line", amp=0.05) for t in range(120)]
+               + [skeleton(t / PERIOD, mode="line", amp=0.12) for t in range(120)])
+        st = fl.states(seq)
+        at = lambda f: st[f] if 0 <= f < len(st) else None
+        gap = (fl.signature_gap(fl.loop_signature(at, 0, 44),
+                                fl.loop_signature(at, 120, 164))
+               / fl.typical_step(st)["step"])
+        self.assertGreater(gap, 6.0, "фикстура должна быть ВЫШЕ нижней мутации")
+        self.assertLess(gap, fl.DUPLICATE_MAX_STEPS)
+        got = analyse(Material(seq, blank=True))
+        self.assertEqual(len(got["loops"]), 1,
+                         f"это одно движение, петель {len(got['loops'])}: "
+                         f"{[(l['i'], l['j']) for l in got['loops']]}")
+
+    def test_the_two_sieves_catch_different_things(self):
+        """Каждое сито обязано ловить своё, и это видно по счётчикам."""
+        shifted = Material(loop_sequence(), blank=True)
+        one_move = Material(two_places_one_movement(), blank=True)
+        a = analyse(shifted)
+        b = analyse(one_move)
+        self.assertGreater(a["dropped_overlap"], 0,
+                           "сдвиги на кадр внутри одного места ловит сито "
+                           "диапазонов")
+        self.assertGreater(b["dropped_duplicate"], 0,
+                           "повтор упражнения в другом месте клипа ловит только "
+                           "сито содержания")
+
+    def test_comparing_movements_asks_the_detector_nothing(self):
+        """Т4 и П2: сверка идёт по УЖЕ СНЯТЫМ позам, новых опросов нет."""
+        m = Material(two_places_one_movement(), blank=True)
+        analyse(m)
+        self.assertEqual(len(m.calls), 360,
+                         "детектор позы обязан быть вызван ровно по разу на "
+                         "кадр: сверка движений своих опросов не делает")
+
+
+# ---------------------------------------------------------------------------
+# 18. ОСЬ ГОЛОВЫ
+# ---------------------------------------------------------------------------
+
+class HeadAxis(unittest.TestCase):
+    def test_a_head_that_returns_keeps_the_loop(self):
+        m = Material(loop_sequence(), blank=True)
+        got = analyse(m)
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertEqual(got["loops"][0]["head_state"], PASS)
+        self.assertEqual(got["dropped_head"], 0)
+        self.assertLess(got["loops"][0]["seam_head"], 1.0)
+
+    def test_a_head_that_never_returns_drops_the_loop(self):
+        """И5, другая сторона: голова уезжает — петля не выпускается.
+
+        И бюджет попыток не превращается в лазейку: исчерпав его на работающей
+        оси, прибор ОСТАНАВЛИВАЕТСЯ, а не выпускает двадцать первого с пометкой
+        «не проверена».
+        """
+        m = Material(loop_sequence(), blank=True, head_mode="уезжает")
+        got = analyse(m)
+        self.assertGreater(got["dropped_head"], 0, got["note"])
+        self.assertEqual(got["loops"], [], got["note"])
+        self.assertEqual(got["head_tried"], fl.HEAD_MAX_TRIES)
+        self.assertIn("БЮДЖЕТ ГОЛОВЫ ИСЧЕРПАН",
+                      [s["note"] for s in got["steps"]
+                       if s["step"] == "финалисты"][0])
+
+    def test_a_head_jump_is_caught_where_the_pose_is_perfect(self):
+        """Поза и картинка идеальны, голова прыгает — этого не видит ничто,
+        кроме своей оси."""
+        m = Material(loop_sequence(), blank=True, head_mode="рывок")
+        got = analyse(m)
+        for lp in got["loops"]:
+            with self.subTest(loop=(lp["i"], lp["j"])):
+                self.assertFalse(lp["i"] < NFRAMES // 2 <= lp["j"]
+                                 and lp["head_state"] == PASS,
+                                 "петля перешагнула рывок головы")
+
+    def test_no_head_detector_marks_the_loop_instead_of_failing_it(self):
+        """Р1: «не смогли посмотреть» не значит «плохо» — но и не молчит."""
+        m = Material(loop_sequence(), blank=True, head_broken=True)
+        got = analyse(m)
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertTrue(got["loops"])
+        self.assertEqual(got["loops"][0]["head_state"], UNMEASURED)
+        self.assertIn("DWPose", got["loops"][0]["head_note"])
+        self.assertIn("ГОЛОВА НЕ ПРОВЕРЕНА", fl.table(got))
+        self.assertIsNone(got["head_step"])
+
+    def test_a_face_not_seen_marks_the_loop_too_but_differently(self):
+        m = Material(loop_sequence(), blank=True, head_blind=range(0, 60))
+        got = analyse(m)
+        self.assertTrue(got["loops"])
+        self.assertEqual(got["loops"][0]["head_state"], UNMEASURED)
+        self.assertIn("лица не видно", got["loops"][0]["head_note"])
+
+    def test_a_head_that_almost_returns_is_kept_and_not_crushed(self):
+        """Вес оси головы — 1.0, а не «побольше, чтобы наверняка».
+
+        Голова возвращается почти точно (сползание 0.01 px за кадр, стык 0.78
+        типичного смещения). Такую петлю прибор обязан ОТДАТЬ: при весе 100 её
+        стык превратился бы в 78 шагов и петля отвалилась бы вместе с годным
+        материалом.
+        """
+        import numpy as np
+
+        m = Material(loop_sequence(), blank=True)
+        m.head = lambda path: {
+            "head": (360.0,
+                     500.0 + 6.0 * float(np.sin(2 * np.pi *
+                                                (int(Path(path).stem) % PERIOD)
+                                                / PERIOD))
+                     + 0.01 * int(Path(path).stem)),
+            "why": ""}
+        got = analyse(m)
+        self.assertEqual(got["outcome"], PASS, got["note"])
+        self.assertEqual(got["dropped_head"], 0, got["note"])
+        self.assertGreater(got["loops"][0]["seam_head"], 0.4)
+        self.assertLess(got["loops"][0]["seam_head"], 1.5)
+
+    def test_the_head_is_asked_only_about_finalists(self):
+        """П2: 0.436 с/кадр — голова спрашивается о единицах, а не о тысячах."""
+        m = Material(two_places_one_movement(), blank=True)
+        got = analyse(m)
+        self.assertLessEqual(got["head_tried"], fl.HEAD_MAX_TRIES)
+        # Кадров головы: масштаб плюс по два на попытку, и это в разы меньше,
+        # чем 360 кадров материала.
+        self.assertLess(got["head_frames"], 120)
+        self.assertGreater(got["head_frames"], 0)
+
+    def test_the_scale_of_the_head_axis_is_measured_on_the_clip(self):
+        m = Material(loop_sequence(), blank=True)
+        got = fl.head_scale(m.paths(), reader=m.head)
+        self.assertEqual(got["outcome"], PASS)
+        # Литералы, а не `fl.HEAD_SCALE_PAIRS`: ожидаемое, импортированное из
+        # проверяемого модуля, поедет вместе с ним и промолчит (Т2). Поймано
+        # мутацией: подмена 40 на 5 пережила этот тест.
+        self.assertEqual(got["measured"], 40)
+        self.assertEqual(got["frames"], 80)
+
+    def test_the_scale_says_when_it_cannot_be_measured(self):
+        m = Material(loop_sequence(), blank=True, head_broken=True)
+        got = fl.head_scale(m.paths(), reader=m.head)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIsNone(got["step"])
+        self.assertIn("спросить нечем", got["reason"])
 
 
 class NoHeavyImports(unittest.TestCase):

@@ -461,9 +461,11 @@ def read_lock(path: str | Path) -> dict:
     без_размера = [e["name"] for e in entries if e["bytes"] is None]
     return {
         "outcome": PASS, "path": str(p), "entries": entries,
-        "note": (f"реестр {p.name}: записей {len(entries)}, суммарно "
-                 f"{_gib(sum(e['bytes'] or 0 for e in entries))} ГиБ"
-                 + (f". БЕЗ РАЗМЕРА: {', '.join(без_размера)}"
+        "note": (f"реестр {p.name}: записей {len(entries)}, "
+                 + ("суммарно " if not без_размера else "ОБЪЯВЛЕНО суммарно ")
+                 + f"{_gib(sum(e['bytes'] for e in entries if e['bytes'] is not None))} ГиБ"
+                 + (f" — это НИЖНЯЯ ГРАНИЦА, размера нет у {len(без_размера)} "
+                    f"из {len(entries)}. БЕЗ РАЗМЕРА: {', '.join(без_размера)}"
                     if без_размера else "")),
     }
 
@@ -595,6 +597,19 @@ def disk(files: list, path: str | Path = ".") -> dict:
     Порог «нужно 40» отвечает на вопрос до аренды. После аренды вопрос другой:
     половина весов уже лежит, качать осталось столько-то, и место меряется
     против ОСТАТКА. Иначе прибор пошлёт освобождать диск там, где всё влезает.
+
+    ТРИ ИСХОДА (Р1), и третий не сворачивается ни в первый, ни во второй:
+
+        не годно   объявленный остаток плюс запас НЕ ВЛЕЗАЕТ в свободное.
+                   Неизвестные размеры могут этот остаток только увеличить,
+                   поэтому нехватка доказана и незнанием не отменяется.
+        не смогли  места хватает по объявленному, НО хотя бы у одного веса к
+                   докачке размера в реестре нет: сумма — нижняя граница, и
+                   «влезает» здесь не измерено ничем.
+        годно      места хватает, и размер объявлен у КАЖДОГО веса к докачке.
+
+    Рядом с вердиктом печатаются числа (Р2): сколько файлов к докачке, у
+    скольких размер объявлен и по скольким СВЕРИТЬ НЕЧЕМ.
     """
     # Р2: ноль байт к докачке ПРИ НУЛЕ известных весов — не «места хватает»,
     # а «неизвестно, сколько качать». Первая редакция этого шага отвечала
@@ -614,23 +629,65 @@ def disk(files: list, path: str | Path = ".") -> dict:
                          + (f"{_gib(free)} ГиБ" if free is not None
                             else f"неизвестно ({why})")
                          + f" на {path}, но сравнивать не с чем")}
-    todo = sum(f["bytes"] or 0 for f in files if f["state"] != "ok")
+    # ВЕС БЕЗ ОБЪЯВЛЕННОГО РАЗМЕРА — ЭТО НЕ НОЛЬ БАЙТ К ЗАГРУЗКЕ.
+    # Прежняя редакция считала `f["bytes"] or 0`, то есть молча подставляла
+    # ноль вместо неизвестного. Наблюдалось на настоящем локе (одна запись без
+    # `bytes`): «качать осталось 7.3 ГиБ, свободно 15.823, нужно 12.3 — годно»,
+    # тогда как качать на деле 18.007 ГиБ и места НЕ ХВАТИЛО БЫ. Когда размера
+    # нет ни у одного веса, выходило «качать осталось 0.0 ГиБ — годно» на
+    # машине, где не скачано вообще ничего. Ноль байт к докачке ПРИ
+    # НЕИЗВЕСТНЫХ размерах — это «не смогли проверить» (Р1), а не «места
+    # хватает»; существующая проверка `if not files` сторожила только пустой
+    # список и на неполные размеры не срабатывала.
+    todo_files = [f for f in files if f.get("state") != "ok"]
+    known = [f for f in todo_files if f.get("bytes") is not None]
+    unknown = [f for f in todo_files if f.get("bytes") is None]
+    todo = sum(f["bytes"] for f in known)
     try:
         free = shutil.disk_usage(str(path)).free
     except OSError as exc:
         return {"outcome": UNMEASURED, "free_gib": None,
                 "todo_gib": _gib(todo), "path": str(path),
+                "todo_files": len(todo_files), "known": len(known),
+                "unknown": len(unknown),
+                "unknown_names": [f.get("name") for f in unknown],
                 "note": f"диск не опрошен: {str(exc)[:100]}"}
     need = todo + DISK_MARGIN_GIB * GIB
-    ok = free >= need
+    fits = free >= need
+    # ПОРЯДОК ИСХОДОВ. Доказанная нехватка сильнее незнания: если не влезает
+    # уже ОБЪЯВЛЕННЫЙ остаток, неизвестные размеры могут его только увеличить,
+    # и «не годно» здесь ИЗМЕРЕНО, а не предположено. И наоборот — «влезает»
+    # при неизвестных размерах не измерено ничем, поэтому там третий исход.
+    # Свернуть его в «годно» — это ровно тот дефект, который здесь чинится.
+    if not fits:
+        outcome = FAIL
+    elif unknown:
+        outcome = UNMEASURED
+    else:
+        outcome = PASS
+    # Р2: числа рядом с вердиктом — сколько сверено и сколько сверить нечем.
+    counts = (f"к докачке файлов {len(todo_files)}: с объявленным размером "
+              f"{len(known)}, сверить нечем {len(unknown)}")
+    tail = ""
+    if unknown:
+        tail = (". СВЕРИТЬ НЕЧЕМ " + str(len(unknown)) + ": "
+                + ", ".join(str(f.get("name")) for f in unknown[:8])
+                + " — размер в реестре не объявлен, и сколько они займут, "
+                  "прибор НЕ ЗНАЕТ. Напечатанный остаток — НИЖНЯЯ ГРАНИЦА"
+                + (", и её уже не хватает" if not fits
+                   else ", то есть места может и не хватить"))
     return {
-        "outcome": PASS if ok else FAIL,
+        "outcome": outcome,
         "free_gib": _gib(free), "todo_gib": _gib(todo),
         "need_gib": _gib(need), "margin_gib": DISK_MARGIN_GIB, "path": str(path),
+        "todo_files": len(todo_files), "known": len(known),
+        "unknown": len(unknown),
+        "unknown_names": [f.get("name") for f in unknown],
         "note": (f"качать осталось {_gib(todo)} ГиБ, свободно {_gib(free)} ГиБ "
                  f"на {path}, нужно {_gib(need)} ГиБ (остаток плюс запас "
                  f"{DISK_MARGIN_GIB} ГиБ на временный файл докачки и выход "
-                 f"прогона)" + ("" if ok else " — НЕ ХВАТАЕТ")),
+                 f"прогона). {counts}"
+                 + ("" if fits else " — НЕ ХВАТАЕТ") + tail),
     }
 
 
@@ -777,6 +834,29 @@ def card(*, smi=read_smi, length: int | None = None,
     ТРИ ИСХОДА У ОБЪЁМА ПАМЯТИ (Р1). Ниже `GPU_MEMORY_DOUBT_GIB` — «не та
     карта». Выше `MIN_GPU_MEMORY_GIB` — «та». МЕЖДУ НИМИ — «не смогли
     отличить», потому что раскладку памяти A16 никто не наблюдал (см. планку).
+
+    ИМЯ СВЕРЯЕТСЯ У КАЖДОЙ КАРТЫ, И НЕСОВПАВШЕЕ ИМЯ — ЭТО «НЕ ГОДНО», А НЕ
+    «НЕ СМОГЛИ». Решено осознанно, вот из чего. «Не смогли» — исход про
+    НЕЗНАНИЕ прибора: он про то, что мы не наблюдали (раскладка памяти A16) или
+    не получили (`nvidia-smi` не отработал). Здесь незнания нет: имя печатает
+    ДРАЙВЕР той карты, что стоит в машине, — это прямое свидетельство (Е2),
+    полученное на этой самой машине, и «Tesla T4» означает Tesla T4 при любой
+    раскладке памяти. Арендовано не то, что утверждено и оплачено, — это
+    НАХОДКА ПРИЁМКИ, ровно как `count < EXPECTED_GPU_COUNT`, и сводить её к
+    «не смогли» значило бы предъявить владельцу сомнение вместо факта.
+    Обратное свернуло бы Р1 в другую сторону: код возврата 2 читается как
+    «проверьте руками», а тут проверять нечего — карту привезли не ту.
+
+    ТРЕТИЙ ИСХОД У ИМЕНИ ВСЁ-ТАКИ ЕСТЬ, и он ровно там, где кончается
+    свидетельство: имя в строке ПУСТОЕ. Тогда сверять нечем — это «не смогли»,
+    и назвать пустое поле подменой было бы враньём про железо, выведенным из
+    вывода утилиты. Прежняя редакция ловила имена через `any(...)` по всем
+    картам сразу и на четырёх безымянных строках отвечала «привезли не ту
+    карту», не имея ни одного имени на руках.
+
+    ЧТО СЧИТАЕТСЯ СОВПАДЕНИЕМ — вхождение `EXPECTED_GPU_NAME`, см. комментарий
+    у самой константы: vGPU-профиль A16 зовётся «NVIDIA A16-16Q» и это ТА
+    САМАЯ карта, ломоть которой ловит уже не имя, а ступень памяти.
     """
     # Умолчания разрешаются В ТЕЛЕ, а не в сигнатуре, и это не стиль.
     # `def card(step=DEFAULT_STEP)` привязывает значение НА МОМЕНТ ОПРЕДЕЛЕНИЯ
@@ -815,12 +895,31 @@ def card(*, smi=read_smi, length: int | None = None,
 
     beefs = []
     doubts = []
-    names = ", ".join(g["name"] for g in cards)
-    if not any(EXPECTED_GPU_NAME.lower() in (g["name"] or "").lower()
-               for g in cards):
-        beefs.append(f"утверждена {EXPECTED_GPU_NAME}, а nvidia-smi называет "
-                     f"{names} — привезли не ту карту (это ИМЯ ОТ ДРАЙВЕРА, "
-                     f"а не вывод по объёму памяти)")
+    # ИМЯ СВЕРЯЕТСЯ У КАЖДОЙ КАРТЫ ПООТДЕЛЬНОСТИ, А НЕ ЧЕРЕЗ `any`.
+    # Прежняя редакция считала находкой только случай, когда НИ ОДНА карта не
+    # похожа на утверждённую. Наблюдалось: три A16 плюс чужая RTX 3090 давали
+    # «годно, карт 4» — то есть одной правильной карты из четырёх хватало,
+    # чтобы прибор промолчал про три остальные. Разнородная машина — это и
+    # есть типичная подмена: докладывают недостающее тем, что нашлось.
+    wrong = [(i, g["name"]) for i, g in enumerate(cards, 1)
+             if (g["name"] or "").strip()
+             and EXPECTED_GPU_NAME.lower() not in g["name"].lower()]
+    nameless = [i for i, g in enumerate(cards, 1)
+                if not (g["name"] or "").strip()]
+    matched = count - len(wrong) - len(nameless)
+    if wrong:
+        beefs.append("утверждена " + EXPECTED_GPU_NAME + ", а nvidia-smi "
+                     "называет иначе " + str(len(wrong)) + " из "
+                     + str(count) + ": "
+                     + "; ".join(f"карта {i} — {nm}" for i, nm in wrong)
+                     + " — привезли не ту карту (это ИМЯ ОТ ДРАЙВЕРА, а не "
+                       "вывод по объёму памяти)")
+    if nameless:
+        doubts.append("у " + str(len(nameless)) + " карт из " + str(count)
+                      + " (" + ", ".join(str(i) for i in nameless) + ") имя в "
+                      "выводе nvidia-smi пустое — СВЕРИТЬ ПО ИМЕНИ НЕЧЕМ. Это "
+                      "не «не та карта»: пустое поле говорит про вывод "
+                      "утилиты, а не про железо")
     if count < EXPECTED_GPU_COUNT:
         beefs.append(f"карт {count}, а утверждено {EXPECTED_GPU_COUNT} "
                      f"(A16 — четыре независимых GPU, память НЕ складывается)")
@@ -845,13 +944,18 @@ def card(*, smi=read_smi, length: int | None = None,
     return {
         "outcome": FAIL if beefs else (UNMEASURED if doubts else PASS),
         "count": count, "gpus": cards, "driver": cards[0]["driver"],
+        "name_matched": matched, "name_wrong": len(wrong),
+        "name_unreadable": len(nameless),
+        "wrong_names": [nm for _, nm in wrong],
         "smallest_gib": smallest, "step": step, "length": length,
         "blocks": blocks, "headroom_gib": headroom, "doubts": doubts,
         "need_gib": row["total_gb"] if row else None,
         "note": (f"карт {count}: {'; '.join(lines)}. На ступени {step} при "
                  f"блоксвопе {blocks} нужно "
                  f"{row['total_gb'] if row else '?'} ГиБ из {smallest}, "
-                 f"ЗАПАС {headroom} ГиБ при {length} кадрах"
+                 f"ЗАПАС {headroom} ГиБ при {length} кадрах. ИМЕНА: сверено "
+                 f"{count}, совпало с {EXPECTED_GPU_NAME} {matched}, не "
+                 f"совпало {len(wrong)}, сверить нечем {len(nameless)}"
                  + (". " + "; ".join(beefs) if beefs else "")
                  + (". " + "; ".join(doubts) if doubts else "")
                  + ". Объём памяти ЗАМЕРЕН здесь утилитой, а бюджет — РАСЧЁТ "

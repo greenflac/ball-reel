@@ -37,6 +37,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ball_reel import fork_stand as st
 from ball_reel.fork_identity import FAIL, PASS, UNMEASURED
@@ -67,6 +68,35 @@ SMI_SMALL = "\n".join(["NVIDIA T4, 15360 MiB, 7.5, 550.90.07"] * 4) + "\n"
 #: Карта с именем утверждённой, но с памятью, которой не бывает у 16 ГБ.
 #: Четыре штуки, чтобы ступень числа карт не подмешивала свою находку.
 SMI_A16_TINY = "\n".join(["NVIDIA A16, 8192 MiB, 8.6, 550.90.07"] * 4) + "\n"
+
+
+#: НАСТОЯЩИЙ СЛУЧАЙ, НА КОТОРОМ ДЕФЕКТ БЫЛ ВИДЕН (И2). Числа — литералы (Т2),
+#: посчитанные отдельно: 7838315315 / 2**30 = 7.300…, 11496331072 / 2**30 =
+#: 10.707…, 16988603351 / 2**30 = 15.823…. Объявленный остаток 7.3 плюс запас
+#: 5.0 = 12.3 влезает в 15.823 — и прибор говорил «годно». Настоящий остаток
+#: 7.3 + 10.707 = 18.007 плюс запас НЕ ВЛЕЗАЕТ, и знать этого прибор не мог.
+DECLARED_TODO_BYTES = 7838315315
+UNDECLARED_BYTES = 11496331072
+FREE_OBSERVED_BYTES = 16988603351
+
+
+def free_space(free_bytes):
+    """Свободное место задаётся ТЕСТОМ, а не раннером (Т4).
+
+    Без этой подмены проверки места мерили бы диск машины, где идут тесты:
+    зеленели бы на большой и краснели на маленькой, то есть мерили бы раннер.
+    Подменяется ровно `shutil.disk_usage` — та же явная точка, что `smi`.
+    """
+    class _Usage:
+        def __init__(self, free):
+            self.total, self.used, self.free = free * 4, free * 3, free
+    return mock.patch.object(st.shutil, "disk_usage",
+                             lambda _p: _Usage(free_bytes))
+
+
+def weight(name, state, size):
+    """Запись о весе в том виде, в каком её отдаёт ступень размеров."""
+    return {"name": name, "state": state, "bytes": size}
 
 
 def smi_says(text):
@@ -378,6 +408,100 @@ class TheCardStepMustSayCannotRatherThanNoCard(unittest.TestCase):
     def test_an_unknown_step_does_not_silently_pass(self):
         got = st.card(smi=smi_says(SMI_A16), step="Q9_K_XXL")
         self.assertEqual(got["outcome"], FAIL)
+
+    # --- ИСПРАВЛЕННЫЙ ДЕФЕКТ: имена сверялись через `any` по всем картам ---
+
+    def test_one_approved_card_among_strangers_is_a_finding(self):
+        """НАБЛЮДАВШИЙСЯ СЛУЧАЙ (И2): три A16 плюс чужая 3090 — было «годно».
+
+        `any(...)` по всем картам сразу означал: одной правильной карты из
+        четырёх довольно, чтобы промолчать про три остальные. Между тем
+        разнородная машина — это и есть типичная подмена при аренде.
+
+        ПОЧЕМУ «НЕ ГОДНО», А НЕ «НЕ СМОГЛИ»: имя печатает драйвер той карты,
+        что стоит в машине, — это свидетельство (Е2), а не догадка о
+        раскладке памяти. Незнания здесь нет, значит и третьего исхода нет.
+        """
+        smi = smi_says("\n".join(["NVIDIA A16, 16376 MiB, 8.6, 550.90.07"] * 3
+                                 + ["NVIDIA GeForce RTX 3090, 24576 MiB, 8.6, "
+                                    "550.90.07"]) + "\n")
+        got = st.card(smi=smi)
+        self.assertEqual(got["outcome"], "не годно", got["note"])
+        self.assertEqual(got["count"], 4)
+        self.assertEqual(got["name_wrong"], 1)
+        self.assertEqual(got["name_matched"], 3)
+        self.assertEqual(got["wrong_names"], ["NVIDIA GeForce RTX 3090"])
+        self.assertIn("не ту карту", got["note"])
+        self.assertIn("карта 4 — NVIDIA GeForce RTX 3090", got["note"])
+
+    def test_every_stranger_is_named_and_not_only_the_first(self):
+        """Одна A16 и три T4: перечислены обязаны быть ВСЕ ТРИ.
+
+        Раньше про имена здесь не говорилось ни слова, а итог был «не смогли»
+        — и то лишь из-за полосы сомнения по объёму (15.0 ГиБ). Подмена трёх
+        карт из четырёх проходила как «проверьте руками объём».
+        """
+        smi = smi_says("NVIDIA A16, 16376 MiB, 8.6, 550.90.07\n"
+                       + "\n".join(["NVIDIA T4, 15360 MiB, 7.5, 550.90.07"] * 3)
+                       + "\n")
+        got = st.card(smi=smi)
+        self.assertEqual(got["outcome"], "не годно", got["note"])
+        self.assertEqual(got["name_wrong"], 3)
+        self.assertEqual(got["wrong_names"], ["NVIDIA T4"] * 3)
+        for n in ("карта 2 — NVIDIA T4", "карта 3 — NVIDIA T4",
+                  "карта 4 — NVIDIA T4"):
+            self.assertIn(n, got["note"])
+
+    def test_four_approved_cards_raise_no_name_finding(self):
+        """ГЛАВНЫЙ НЕГАТИВНЫЙ КОНТРОЛЬ ЭТОЙ ПРАВКИ (И5).
+
+        Четыре настоящие A16 обязаны проходить молча. Сторож, который на
+        утверждённой машине тоже кричит, будет выключен на второй аренде.
+        """
+        got = st.card(smi=smi_says(SMI_A16))
+        self.assertEqual(got["outcome"], "годно", got["note"])
+        self.assertEqual(got["name_wrong"], 0)
+        self.assertEqual(got["name_matched"], 4)
+        self.assertNotIn("не ту карту", got["note"])
+
+    def test_a_vgpu_profile_of_the_approved_card_is_not_a_stranger(self):
+        """Вторая сторона контроля (И5): сверка ПО ВХОЖДЕНИЮ, а не по равенству.
+
+        A16 — карта под VDI, и её штатно отдают ломтями: имя выглядит как
+        «NVIDIA A16-16Q». Это ТА САМАЯ карта, и по имени она обязана пройти;
+        ломоть ловит ступень памяти, а не имя. НЕПРОВЕРЕНО (Ц4): как именно
+        пишется имя профиля, командой здесь не получено — строка сочинена,
+        как и все остальные `nvidia-smi` в этом файле.
+        """
+        got = st.card(smi=smi_says("\n".join(
+            ["NVIDIA A16-16Q, 16376 MiB, 8.6, 550.90.07"] * 4) + "\n"))
+        self.assertEqual(got["name_wrong"], 0, got["note"])
+        self.assertNotIn("не ту карту", got["note"])
+
+    def test_a_card_whose_name_is_empty_is_unmeasured_not_a_wrong_card(self):
+        """ТРЕТИЙ ИСХОД У ИМЕНИ (Р1): пустое поле — «сверить нечем».
+
+        Пустое имя говорит про вывод утилиты, а не про железо. Прежняя
+        редакция на четырёх безымянных строках отвечала «привезли не ту
+        карту», не имея на руках ни одного имени, — то есть выдавала
+        незнание за находку.
+        """
+        got = st.card(smi=smi_says("\n".join(
+            [", 16376 MiB, 8.6, 550.90.07"] * 4) + "\n"))
+        self.assertEqual(got["outcome"], "не смогли проверить", got["note"])
+        self.assertNotEqual(got["outcome"], "не годно")
+        self.assertEqual(got["name_unreadable"], 4)
+        self.assertEqual(got["name_wrong"], 0)
+        self.assertNotIn("не ту карту", got["note"])
+        self.assertIn("СВЕРИТЬ ПО ИМЕНИ НЕЧЕМ", got["note"])
+
+    def test_the_name_counters_are_printed_next_to_the_verdict(self):
+        """Р2: сверено / совпало / не совпало / сверить нечем — числами."""
+        smi = smi_says("\n".join(["NVIDIA A16, 16376 MiB, 8.6, 550.90.07"] * 3
+                                 + ["NVIDIA GeForce RTX 3090, 24576 MiB, 8.6, "
+                                    "550.90.07"]) + "\n")
+        self.assertIn("ИМЕНА: сверено 4, совпало с A16 3, не совпало 1, "
+                      "сверить нечем 0", st.card(smi=smi)["note"])
 
 
 class TheRamStepIsTheRequirementBlockswapCreated(unittest.TestCase):
@@ -824,6 +948,115 @@ class TheDiskStepCountsWhatIsStillToDownload(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         got = st.disk([], tmp.name)
         self.assertEqual(got["outcome"], UNMEASURED)
+
+    # --- ИСПРАВЛЕННЫЙ ДЕФЕКТ: вес без объявленного размера считался нулём ---
+
+    def test_a_weight_without_a_declared_size_is_not_zero_bytes_to_download(self):
+        """НАБЛЮДАВШИЙСЯ СЛУЧАЙ (И2): пять размеров есть, у шестого нет.
+
+        Прибор отвечал «место: годно, качать осталось 7.3 ГиБ, нужно 12.3 при
+        свободных 15.823» — и это был бы отказ на 39-й минуте загрузки:
+        неучтённый вес весит 10.707 ГиБ, настоящая нужда 23.007 ГиБ. Ответ
+        обязан быть третьим исходом (Р1), а не «годно»: сумма, в которой
+        пропущено слагаемое, не сравнима со свободным местом.
+
+        Ожидаемое — литералы (Т2): 7.3 и «сверить нечем 1».
+        """
+        files = [weight("declared.gguf", "missing", DECLARED_TODO_BYTES),
+                 weight("Wan2.2-Animate-14B-Q4_K_M.gguf", "missing", None)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertEqual(got["outcome"], "не смогли проверить", got["note"])
+        self.assertNotEqual(got["outcome"], "годно")
+        self.assertEqual(got["todo_gib"], 7.3)
+        self.assertEqual(got["unknown"], 1)
+        self.assertIn("сверить нечем 1", got["note"])
+        self.assertIn("Wan2.2-Animate-14B-Q4_K_M.gguf", got["note"])
+
+    def test_no_declared_size_at_all_is_not_zero_gibibytes_to_download(self):
+        """Второй наблюдавшийся край: размера нет НИ У ОДНОГО из шести.
+
+        Печаталось «качать осталось 0.0 ГиБ, место: годно» — на машине, где не
+        скачано ничего, и строкой выше в том же отчёте стояло «нет файла 6».
+        """
+        files = [weight(f"вес{i}.safetensors", "missing", None)
+                 for i in range(6)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertEqual(got["outcome"], "не смогли проверить", got["note"])
+        self.assertEqual(got["todo_gib"], 0.0)
+        self.assertEqual(got["unknown"], 6)
+        self.assertIn("сверить нечем 6", got["note"])
+
+    def test_all_sizes_declared_and_fitting_stays_good(self):
+        """НЕГАТИВНЫЙ КОНТРОЛЬ (И5): проверка обязана СМОЛЧАТЬ.
+
+        Сторож, который на исправном входе тоже кричит, будет выключен.
+        """
+        files = [weight("a.gguf", "missing", DECLARED_TODO_BYTES),
+                 weight("b.safetensors", "ok", 253815318)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertEqual(got["outcome"], "годно", got["note"])
+        self.assertEqual(got["unknown"], 0)
+        self.assertIn("сверить нечем 0", got["note"])
+
+    def test_a_downloaded_weight_without_a_size_does_not_spoil_the_verdict(self):
+        """Вторая сторона того же (И5): у СКАЧАННОГО размер уже не нужен.
+
+        `state == "ok"` означает, что файл на месте и сверен; качать его не
+        надо, и отсутствие числа в реестре про место ничего не говорит.
+        """
+        files = [weight("a.gguf", "missing", DECLARED_TODO_BYTES),
+                 weight("уже-лежит.safetensors", "ok", None)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertEqual(got["outcome"], "годно", got["note"])
+        self.assertEqual(got["unknown"], 0)
+
+    def test_a_proven_shortage_stays_not_good_even_with_an_unknown_size(self):
+        """Р1: третий исход не поглощает ВТОРОЙ.
+
+        Если не влезает уже объявленный остаток, неизвестные размеры могут его
+        только увеличить — нехватка ИЗМЕРЕНА. Сказать здесь «не смогли»
+        значило бы предъявить сомнение вместо находки и отправить человека
+        проверять руками то, что уже посчитано.
+        """
+        files = [weight("огромный.gguf", "missing", FREE_OBSERVED_BYTES),
+                 weight("безразмера.gguf", "missing", None)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertEqual(got["outcome"], "не годно", got["note"])
+        self.assertIn("НЕ ХВАТАЕТ", got["note"])
+        self.assertIn("сверить нечем 1", got["note"])
+
+    def test_the_counters_are_printed_next_to_the_space_verdict(self):
+        """Р2: проверено / сверить нечем — числами, рядом с вердиктом."""
+        files = [weight("a", "missing", 1024), weight("b", "size", 2048),
+                 weight("c", "missing", None), weight("d", "ok", 4096)]
+        with free_space(FREE_OBSERVED_BYTES):
+            got = st.disk(files, "/любой/путь/подменён")
+        self.assertIn("к докачке файлов 3: с объявленным размером 2, "
+                      "сверить нечем 1", got["note"])
+        self.assertEqual((got["todo_files"], got["known"], got["unknown"]),
+                         (3, 2, 1))
+
+    def test_the_lock_note_calls_an_incomplete_sum_a_lower_bound(self):
+        """И7: та же форма (`bytes or 0`) была и в разборе реестра.
+
+        Исход она там не меняла — реестр с записью без размера и так `годно`,
+        — но число подавалось как полная сумма. Теперь оно названо нижней
+        границей, и рядом стоит, у скольких записей размера нет.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = write_lock(Path(tmp.name), [
+            {"role": "diffusion", "path": "a.gguf", "bytes": 1073741824},
+            {"role": "vae", "path": "b.safetensors"},
+        ])
+        note = st.read_lock(path)["note"]
+        self.assertIn("ОБЪЯВЛЕНО суммарно 1.0 ГиБ", note)
+        self.assertIn("НИЖНЯЯ ГРАНИЦА, размера нет у 1 из 2", note)
 
 
 class TheLockIsReadForSizesAndNotOnlyHashes(unittest.TestCase):
