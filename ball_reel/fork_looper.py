@@ -170,34 +170,6 @@ PIXEL_WEIGHT = 1.0
 #: Поэтому число сравненных суставов ПЕЧАТАЕТСЯ рядом с каждой петлёй, а чинится
 #: это не сводкой, а третьей осью.
 
-# ┌──────────────────────────────────────────────────────────────────────────┐
-# │ DEBT(2026-08-20): ОСЬ ГОЛОВЫ НЕ ПОСТРОЕНА. Здесь ЛЕЖАТ ТОЛЬКО КОНСТАНТЫ. │
-# └──────────────────────────────────────────────────────────────────────────┘
-# Ни `HEAD_WEIGHT`, ни `HEAD_SCALE_PAIRS`, ни `HEAD_MAX_TRIES` НИКЕМ НЕ
-# ВЫЗЫВАЮТСЯ: смена оборвалась на обрыве связи, успев объявить константы и не
-# успев написать функцию и подключить её к отбору. Сьют зелёный ИМЕННО ПОТОМУ,
-# что их никто не зовёт, — зелень здесь не свидетельство.
-#
-# ЗАЧЕМ ОСЬ НУЖНА (замерено, не предположено). Владелец увидел глазами, что на
-# части петель голова не возвращается в исходное положение. Смещение центра
-# лицевой рамки на стыке против обычного межкадрового смещения головы:
-#     петля 114..162   4.9 px / 1.8 =  2.7x
-#     петля  88..136   8.6 px / 3.8 =  2.3x
-#     петля  58..106   8.6 px / 1.0 =  8.6x
-#     петля 308..356  15.6 px / 1.1 = 14.7x
-#     петля 143..191  19.3 px / 1.9 = 10.0x
-# Петли 4 и 5 прошли планку при скачке головы в 10-15 раз, потому что
-# `pose.world_landmarks` отдаёт РОВНО 12 суставов и ГОЛОВЫ СРЕДИ НИХ НЕТ.
-# Пиксельная ось голову видит, но её вклад растворяется: голова — малая доля
-# кадра.
-#
-# ЧТО ДОСТРОИТЬ: отдельная ось (не подмешивать в позу — растворится так же, как
-# растворились запястья), нормировка на типичное смещение головы ЭТОГО клипа,
-# сведение тем же максимумом, что и три существующие. Источник точек —
-# `fork_channels.face_bbox` поверх `wholebody_points`. Считать только для
-# КАНДИДАТОВ, прошедших первый отбор: их единицы против тысяч пар, иначе
-# 0.436 с/кадр делают полный проход дороже в 9 раз.
-
 #: ВЫБРАНО: вес оси ГОЛОВЫ. Величина приведена к своему типичному шагу, как и
 #: остальные три, поэтому 1.0 означает: одно типичное смещение головы за кадр
 #: расхождения так же плохо, как один типичный шаг позы.
@@ -385,6 +357,131 @@ def read_gray(path):
     первой молча.
     """
     return motion._gray(path, CUT_SIDE)
+
+
+def read_head(path) -> dict:
+    """Где в кадре голова. ТРЕТЬЯ ТОЧКА ВНЕДРЕНИЯ (Т4).
+
+    Возвращает `{"head": (x, y) | None, "why": str}` в пикселях кадра, и три
+    состояния здесь те же, что у `read_pose`:
+
+        head, why == ""             голова найдена — измерение;
+        None, why == ""             лица в кадре НЕ ВИДНО — тоже измерение
+                                    (человек отвернулся, вышел, закрыт);
+        None, why != ""             СПРОСИТЬ НЕЧЕМ (нет весов DWPose, нет
+                                    onnxruntime) — НЕ измерение.
+
+    Точка — центр ЛИЦЕВОЙ РАМКИ вендора (`fork_channels.face_bbox` поверх 133
+    точек COCO-WholeBody). Своей формулы рамки здесь нет и быть не должно: она
+    уже выведена по исходнику вендора, и вторая разъехалась бы с первой (Е1).
+
+    Импорт ленивый: `fork_channels` тянет onnxruntime и 350 МБ весов, а весь
+    счёт этого модуля обязан проверяться без них (Т4).
+    """
+    try:
+        from PIL import Image
+
+        from . import fork_channels
+
+        pts = fork_channels.wholebody_points(str(path))
+        if pts is None:
+            return {"head": None, "why": ""}
+        with Image.open(path) as im:
+            w, h = im.size
+        box = fork_channels.face_bbox(pts, (h, w))
+        if box is None:
+            return {"head": None, "why": ""}
+        x1, x2, y1, y2 = box
+        return {"head": ((x1 + x2) / 2.0, (y1 + y2) / 2.0), "why": ""}
+    except Exception as exc:  # noqa: BLE001 — см. `read_pose`: причин «спросить
+        # нечем» много, и все они означают исход «не смогли», а не «головы нет».
+        return {"head": None, "why": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+# ---------------------------------------------------------------------------
+# ОСЬ ГОЛОВЫ. Четвёртая, и её нашёл человек глазами, а не приёмка
+# ---------------------------------------------------------------------------
+
+def _head_at(paths, k, *, reader, cache) -> dict:
+    """Голова на кадре k с запоминанием: один кадр опрашивается один раз."""
+    if k not in cache:
+        cache[k] = reader(str(paths[k]))
+    return cache[k]
+
+
+def head_scale(paths, *, reader=None, pairs=None, cache=None) -> dict:
+    """Типичное смещение головы за кадр — СВОЯ единица для своей оси.
+
+    Меряется по `pairs` парам соседних кадров, разложенным равномерно по всему
+    материалу, а не по всем подряд: голова стоит 0.436 с/кадр против 0.048 у
+    позы (ИЗМЕРЕНО на боевом ролике), и полный проход по 362 кадрам стоил бы
+    158 с против 35 с здесь.
+
+    ЧЕГО ЭТОТ ЗАМЕР НЕ ГОВОРИТ (Ц4): насколько медиана по 40 парам отличается
+    от медианы по всем — НЕ ИЗМЕРЕНО. Если материал делится на спокойную и
+    быструю половины, выборка равномерна по времени, но не по движению.
+    """
+    import numpy as np
+
+    reader = read_head if reader is None else reader
+    pairs = HEAD_SCALE_PAIRS if pairs is None else pairs
+    cache = {} if cache is None else cache
+    t = time.perf_counter()
+    n = len(paths)
+    if n < 2:
+        return {"step": None, "measured": 0, "frames": 0, "elapsed": 0.0,
+                "reason": "кадров меньше двух", "outcome": UNMEASURED}
+    spots = sorted({int(k) for k in np.linspace(0, n - 2, min(pairs, n - 1))})
+    steps, broken = [], ""
+    for k in spots:
+        a = _head_at(paths, k, reader=reader, cache=cache)
+        b = _head_at(paths, k + 1, reader=reader, cache=cache)
+        if a["why"] or b["why"]:
+            broken = a["why"] or b["why"]
+            continue
+        if a["head"] is None or b["head"] is None:
+            continue
+        steps.append(float(np.hypot(a["head"][0] - b["head"][0],
+                                    a["head"][1] - b["head"][1])))
+    elapsed = round(time.perf_counter() - t, 4)
+    if not steps:
+        return {"step": None, "measured": 0, "frames": len(cache),
+                "elapsed": elapsed, "outcome": UNMEASURED,
+                "reason": (f"спросить нечем: {broken}" if broken else
+                           "лица не видно ни на одной паре кадров")}
+    return {"step": float(np.median(steps)), "measured": len(steps),
+            "frames": len(cache), "elapsed": elapsed, "outcome": PASS,
+            "reason": ""}
+
+
+def head_seam(paths, i, j, *, reader=None, cache=None) -> dict:
+    """Насколько голова НЕ ВЕРНУЛАСЬ на место к концу петли, в пикселях.
+
+    Отдельная ось, а НЕ добавка к позе, и это не вкус: в среднем по двенадцати
+    суставам голова растворилась бы ровно так же, как растворились запястья.
+    Тот же довод, по которому оси сводятся максимумом, применён на уровень
+    ниже — к тому, что попадает внутрь одной оси.
+
+    Три исхода (Р1): измерено / лица не видно / спросить нечем. Первое судит,
+    второе и третье — НЕ судят: петля с неизмеримой головой не отвергается, а
+    помечается, потому что «не смогли посмотреть» не значит «плохо».
+    """
+    import numpy as np
+
+    reader = read_head if reader is None else reader
+    cache = {} if cache is None else cache
+    a = _head_at(paths, i, reader=reader, cache=cache)
+    b = _head_at(paths, j, reader=reader, cache=cache)
+    if a["why"] or b["why"]:
+        return {"outcome": UNMEASURED, "gap": None,
+                "reason": f"спросить нечем: {a['why'] or b['why']}"}
+    if a["head"] is None or b["head"] is None:
+        gone = i if a["head"] is None else j
+        return {"outcome": UNMEASURED, "gap": None,
+                "reason": f"лица не видно на кадре {gone}"}
+    return {"outcome": PASS, "reason": "",
+            "gap": round(float(np.hypot(a["head"][0] - b["head"][0],
+                                        a["head"][1] - b["head"][1])), 3)}
 
 
 # ---------------------------------------------------------------------------
@@ -1144,10 +1241,98 @@ def _flow_between(st, i, j):
          for k in shared])), 6)
 
 
+def pick_with_head(worthy, paths, *, median_score, advantage_min, top=None,
+                   overlap_max=None, head=None, head_weight=None, tries=None,
+                   scale=None, refine=None) -> dict:
+    """Набрать финалистов, проверяя ГОЛОВУ у каждого, и добирать вместо отсева.
+
+    ПОРЯДОК РАБОТ ЗДЕСЬ — ЭТО ЦЕНА (П2). Три первые оси стоят миллисекунды и
+    считаются по всем парам; голова стоит 0.436 с/кадр, поэтому её спрашивают
+    только у кандидатов, дошедших до финала: четыре кадра на кандидата против
+    тысяч пар.
+
+    ОТВЕРГНУТЫЙ ГОЛОВОЙ КАНДИДАТ НЕ ЗАНИМАЕТ МЕСТО. Он не подавляет соседей и
+    не съедает строку в пятёрке: берётся следующий непересекающийся. Иначе
+    клиент получил бы четыре петли вместо пяти просто потому, что одна из них
+    оказалась негодной.
+
+    ЧЕГО ЭТА ДЕШЕВИЗНА СТОИТ, И ЭТО НАДО ЧИТАТЬ ВСЛУХ: голова считается только
+    у финалистов, а типичная оценка клипа (`median_score`) посчитана БЕЗ неё.
+    Значит ось головы умеет только ПОНИЖАТЬ кандидата относительно
+    головы-не-знающей медианы; поднять кого-то, кто не дошёл до финала, она не
+    может. Направление отсева безопасное (лишнего не выдадим, годное могли
+    потерять), но симметричным этот замер не является.
+
+    Три исхода у каждой петли (Р1): голова проверена / лица не видно / голову
+    не спросили (нет прибора или кончились попытки). Второе и третье НЕ
+    отвергают петлю — они её помечают.
+    """
+    top = TOP_LOOPS if top is None else top
+    overlap_max = OVERLAP_MAX if overlap_max is None else overlap_max
+    head_weight = HEAD_WEIGHT if head_weight is None else head_weight
+    tries = HEAD_MAX_TRIES if tries is None else tries
+    head = read_head if head is None else head
+    refine = (lambda c: c) if refine is None else refine
+    cache: dict = {}
+
+    kept, dropped_overlap, dropped_head, tried, unchecked = [], 0, 0, 0, 0
+    for cand in worthy:
+        if len(kept) >= top:
+            break
+        if any(overlap(cand, k) > overlap_max for k in kept):
+            dropped_overlap += 1
+            continue
+        # Границы уточняются ДО опроса головы: судить надо тот стык, который
+        # увидит клиент, а уточнение сдвигает края на прорежённом проходе.
+        loop = dict(refine(cand))
+        if scale is None or scale.get("step") in (None, 0):
+            loop["head_state"] = UNMEASURED
+            loop["head_note"] = ((scale or {}).get("reason")
+                                 or "масштаб оси головы не измерен")
+            loop["seam_head"] = None
+            unchecked += 1
+            kept.append(loop)
+            continue
+        if tried >= tries:
+            loop["head_state"] = UNMEASURED
+            loop["head_note"] = (f"голову не спрашивали: исчерпаны "
+                                 f"{tries} попыток")
+            loop["seam_head"] = None
+            unchecked += 1
+            kept.append(loop)
+            continue
+        tried += 1
+        seam = head_seam(paths, loop["i"], loop["j"], reader=head, cache=cache)
+        if seam["outcome"] != PASS:
+            loop["head_state"] = UNMEASURED
+            loop["head_note"] = seam["reason"]
+            loop["seam_head"] = None
+            unchecked += 1
+            kept.append(loop)
+            continue
+        ratio = seam["gap"] / scale["step"]
+        score = max(loop["score"], head_weight * ratio)
+        adv = median_score / score if score > 0 else math.inf
+        if adv < advantage_min:
+            dropped_head += 1
+            continue
+        loop["head_state"] = PASS
+        loop["head_note"] = ""
+        loop["head_gap"] = seam["gap"]
+        loop["seam_head"] = round(ratio, 3)
+        loop["score"] = round(score, 3)
+        kept.append(loop)
+    return {"kept": kept, "dropped_overlap": dropped_overlap,
+            "dropped_head": dropped_head, "head_tried": tried,
+            "head_frames": len(cache), "unchecked": unchecked,
+            "considered": len(worthy)}
+
+
 def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
                cache=None, min_frames=None, overlap_max=None, top=None,
                advantage_min=None, flow_weight=None, pixel_weight=None,
-               gif=True, decode=None, stride=None, max_frames=None) -> dict:
+               head=None, head_weight=None, gif=True, decode=None, stride=None,
+               max_frames=None) -> dict:
     """Найти петли в драйвинге. Дешёвое раньше дорогого (П2), три исхода (Р1).
 
     `source` — каталог кадров или видеофайл. Видео раскодируется
@@ -1371,20 +1556,45 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
 
     # 5. Подавление пересечений: несколько РАЗНЫХ петель, и ровно столько,
     # сколько набралось. Недобор печатается числом, а не добивается мусором.
-    chosen = select(worthy, overlap_max=overlap_max, top=top)
+    # 6. Масштаб оси головы — до отбора: без него ось выключена, и это надо
+    # знать до того, как мы потратим попытки.
+    t0 = time.perf_counter()
+    head_cache: dict = {}
+    scale = head_scale(paths, reader=head, cache=head_cache)
+    steps.append(("голова", scale["outcome"],
+                  (f"типичное смещение головы {scale['step']:.2f} px по "
+                   f"{scale['measured']} парам, снято кадров {scale['frames']}"
+                   if scale["outcome"] == PASS else
+                   f"ось головы ВЫКЛЮЧЕНА: {scale['reason']}. Петли выйдут "
+                   f"помеченными «голова не проверена», а не молча годными"),
+                  scale["elapsed"]))
 
-    # 6. Уточнение на полной частоте — только вокруг найденного.
-    fine = refine_all(chosen["kept"], paths, stride=stride, reader=reader,
-                      cache=cache, fps=fps, min_frames=min_frames,
-                      flow_weight=flow_weight, pixel_weight=pixel_weight,
-                      blocked=blocked, gray=gray, pix_step=pstep)
-    if stride > 1:
-        steps.append(("уточнение", PASS,
-                      f"окон {fine['windows']}, снято поз {fine['poses']} на "
-                      f"полной частоте", fine["elapsed"]))
+    # 7. Финалисты: уточнение границ и опрос головы у каждого, с добором.
+    fine_poses = [0]
+
+    def refine_one(cand):
+        got_fine = refine_all([cand], paths, stride=stride, reader=reader,
+                              cache=cache, fps=fps, min_frames=min_frames,
+                              flow_weight=flow_weight, pixel_weight=pixel_weight,
+                              blocked=blocked, gray=gray, pix_step=pstep)
+        fine_poses[0] += got_fine["poses"]
+        return got_fine["loops"][0]
+
+    chosen = pick_with_head(
+        worthy, paths, median_score=median_score, advantage_min=advantage_min,
+        top=top, overlap_max=overlap_max, head=head, head_weight=head_weight,
+        scale=scale, refine=refine_one)
+    steps.append(("финалисты", PASS,
+                  f"принято {len(chosen['kept'])}, отвергнуто головой "
+                  f"{chosen['dropped_head']}, по пересечению "
+                  f"{chosen['dropped_overlap']}; голову спрашивали "
+                  f"{chosen['head_tried']} раз, кадров головы "
+                  f"{scale['frames'] + chosen['head_frames']}, поз на "
+                  f"уточнение {fine_poses[0]}",
+                  round(time.perf_counter() - t0, 4) - scale["elapsed"]))
 
     loops = []
-    for rank, c in enumerate(fine["loops"], 1):
+    for rank, c in enumerate(chosen["kept"], 1):
         loop = dict(c)
         loop["rank"] = rank
         loop["seconds"] = None if fps is None else round(c["frames"] / fps, 2)
@@ -1409,7 +1619,9 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
              f"движения нельзя.")
     note = (f"петель принято {len(loops)} из {len(worthy)} прошедших планку "
             f"преимущества {advantage_min}x (всего пар с оценкой {len(cands)}, "
-            f"отброшено по пересечению {chosen['dropped_overlap']}); кадров "
+            f"отброшено по пересечению {chosen['dropped_overlap']}, головой "
+            f"{chosen['dropped_head']}, не проверено головой "
+            f"{chosen['unchecked']}); кадров "
             f"{n}, опрошено {len(index)} ({scan}), поза снята на "
             f"{got['taken']}, резов {len(cut_set)}, пар разобрано "
             f"{sim['measured']}, не смогли {sim['unmeasurable']}.{short} Это "
@@ -1425,11 +1637,16 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
                    stride=stride, asked=top,
                    candidates=len(cands), worthy=len(worthy),
                    dropped_overlap=chosen["dropped_overlap"],
+                   dropped_head=chosen["dropped_head"],
+                   head_step=None if scale["step"] is None else round(scale["step"], 3),
+                   head_tried=chosen["head_tried"],
+                   head_frames=scale["frames"] + chosen["head_frames"],
+                   head_unchecked=chosen["unchecked"],
                    advantage=round(advantage, 3),
                    typical_score=round(median_score, 3),
                    typical_step=round(step_info["step"], 4),
-                   pose_seconds=got["elapsed"] + fine["elapsed"],
-                   pose_frames=len(index) + fine["poses"],
+                   pose_seconds=got["elapsed"],
+                   pose_frames=len(index) + fine_poses[0],
                    cut_seconds=cut["elapsed"], cached=got["cached"],
                    loops=loops)
 
