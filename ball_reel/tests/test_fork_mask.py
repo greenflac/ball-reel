@@ -455,6 +455,30 @@ class TheThreeArmsAreNamedNotRemembered(unittest.TestCase):
         self.assertEqual((got["arm"], got["grow_px"]), ("wider", 64))
 
 
+
+def _one_person_frame(case):
+    """Один кадр с человеком; сегментатор подменён на время теста (Т4).
+
+    Настоящий сегментатор в сьюте не зовём: он стоит секунды на кадр, и
+    тест краснел бы от чужой аварии.
+    """
+    import numpy as np
+    from PIL import Image
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    root = Path(tmp.name)
+    path = root / "frame.png"
+    Image.fromarray(np.zeros((256, 256, 3), "uint8")).save(path)
+    body = np.zeros((256, 256), bool)
+    body[64:192, 96:160] = True
+    # `model` у `sequence` — ПУТЬ к весам, а не вызываемое; точка внедрения
+    # здесь одна — сам сегментатор. Настоящий в сьюте не зовём (Т4).
+    real = fm.person_mask
+    fm.person_mask = lambda *a, **k: body
+    case.addCleanup(lambda: setattr(fm, "person_mask", real))
+    return [path]
+
+
 class TheSequenceReportsNumbersNotAFlag(unittest.TestCase):
 
     def test_an_empty_run_is_unmeasured_and_says_zero_of_zero(self):
@@ -487,6 +511,43 @@ class TheSequenceReportsNumbersNotAFlag(unittest.TestCase):
         self.assertIn("temporal", got)
         self.assertIsNot(got["temporal"], got["outcome"])
         self.assertEqual(got["temporal"]["outcome"], fm.UNMEASURED)
+
+    def test_nothing_to_grow_is_its_own_basket_not_a_miss(self):
+        """НАЙДЕНО НА БОЕВОМ ПРОГОНЕ, а не рассуждением.
+
+        Роутер штатно выбрал плечо narrow (0 px). Расширять было НЕЧЕГО, и
+        шаг отчитался «не дошло на 362 ... ИТОГ не годно» — провал на ровном
+        месте, ровно на продуктовом пути. Причина: раскладка «PASS сюда, ВСЁ
+        ОСТАЛЬНОЕ туда» сворачивала третий исход во второй, хотя сам
+        `growth_verdict` отвечает тремя.
+        """
+        frames = _one_person_frame(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fm.sequence(frames, tmp, arm_name="narrow")
+        self.assertEqual(got["invisible"], [])
+        self.assertEqual(len(got["nothing_to_grow"]), 1)
+
+    def test_a_run_with_nothing_to_grow_is_not_a_failure(self):
+        frames = _one_person_frame(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fm.sequence(frames, tmp, arm_name="narrow")
+        self.assertEqual(got["outcome"], "не смогли проверить")
+
+    def test_the_note_counts_the_third_basket_out_loud(self):
+        frames = _one_person_frame(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fm.sequence(frames, tmp, arm_name="narrow")
+        self.assertIn("расширять было нечего на 1", got["note"])
+
+    def test_a_real_expansion_still_reaches_the_model(self):
+        # Негативный контроль (И5): широкое плечо обязано доехать, иначе
+        # тесты выше проходили бы и на модуле, который расширения не делает.
+        frames = _one_person_frame(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fm.sequence(frames, tmp, arm_name="wider")
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(len(got["delivered"]), 1)
+        self.assertEqual(got["nothing_to_grow"], [])
 
     def test_the_note_says_whose_floor_the_block_is(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -648,7 +648,7 @@ def sequence(frame_paths, out_dir: str | Path, *, grow_px: int | None = None,
     out.mkdir(parents=True, exist_ok=True)
 
     frames = [Path(p) for p in frame_paths]
-    delivered, invisible, no_person = [], [], []
+    delivered, invisible, no_person, nothing_to_grow = [], [], [], []
     finals = []
     for i, p in enumerate(frames):
         with Image.open(p) as im:
@@ -661,7 +661,18 @@ def sequence(frame_paths, out_dir: str | Path, *, grow_px: int | None = None,
         points = fork_channels.wholebody_points(p)
         grown = grow_selective(base, points, grow_px, width=w, height=h)
         verdict = growth_verdict(base, grown, block=block)
-        (delivered if verdict["outcome"] == PASS else invisible).append(p.name)
+        # ТРИ КОРЗИНЫ, А НЕ ДВЕ. `growth_verdict` честно отвечает тремя
+        # исходами, а раскладка `PASS -> delivered, всё остальное -> invisible`
+        # сворачивала «не смогли» в «не дошло». НАЙДЕНО НА БОЕВОМ ПРОГОНЕ:
+        # роутер штатно выбрал плечо narrow (0 px), расширять было НЕЧЕГО, и
+        # шаг отчитался «не дошло на 362, итог не годно» — провал на ровном
+        # месте, ровно на продуктовом пути.
+        if verdict["outcome"] == PASS:
+            delivered.append(p.name)
+        elif verdict["outcome"] == FAIL:
+            invisible.append(p.name)
+        else:
+            nothing_to_grow.append(p.name)
         final = blockify(grown, block)
         finals.append(final)
         Image.fromarray((final * 255).astype("uint8"), mode="L").save(
@@ -673,16 +684,20 @@ def sequence(frame_paths, out_dir: str | Path, *, grow_px: int | None = None,
     return {
         "total": total, "written": total - len(no_person),
         "delivered": delivered, "invisible": invisible, "no_person": no_person,
+        "nothing_to_grow": nothing_to_grow,
         "grow_px": grow_px, "block": block, "dir": str(out),
         "arm": arm_name, "model_token_px": MODEL_TOKEN_PX,
         "temporal": temporal,
-        "outcome": (UNMEASURED if not delivered and not invisible else
-                    PASS if not invisible else FAIL),
+        # «Расширять было нечего» — не провал и не успех: подать модели нечего,
+        # и сказать «не сработало» тут не о чем. Плечо narrow заведено штатно.
+        "outcome": (FAIL if invisible else
+                    PASS if delivered else UNMEASURED),
         "note": (f"масок записано {total - len(no_person)} из {total}; "
                  f"расширение {grow_px}px"
                  + (f" (плечо {arm_name})" if arm_name else "")
                  + f" дошло до модели на "
                  f"{len(delivered)}, не дошло на {len(invisible)}, "
+                 f"расширять было нечего на {len(nothing_to_grow)}, "
                  f"персонаж не найден на {len(no_person)}. "
                  f"ВРЕМЕННАЯ РЕШЁТКА: маска доезжает четырьмя каналами на ОДНУ "
                  f"латентную ячейку, шаг {TEMPORAL_GROUP} кадра — "
