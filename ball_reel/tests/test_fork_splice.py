@@ -469,6 +469,58 @@ class TheEntryPoint(unittest.TestCase):
         self.assertEqual(sorted(fs.EXIT_BY_OUTCOME.values()), [0, 1, 2])
 
 
+class WritingNeverEatsTheSource(unittest.TestCase):
+    """Дефект, найденный прогоном: назначение = источник -> материала нет.
+
+    ИЗМЕРЕНО до починки на 6 кадрах: остаётся 121 файл, читается 0, вердикт
+    «годно», код 0, в отчёте «своих байт на диске 0» — читается как экономия
+    на жёстких ссылках. Стирание идёт ДО чтения источника, а `os.symlink`
+    удаётся на несуществующую цель, поэтому склейка ещё и рапортует «легло».
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_source_directory_is_refused_as_destination(self):
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1, 2, 0], self.root / "src",
+                                overwrite=True)
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertEqual(rep["written"], 0)
+
+    def test_the_source_frames_are_still_on_disk_and_readable(self):
+        src = make_frames(self.root / "src", 6)
+        before = [Path(p).read_text() for p in src]
+        fs.write_sequence(src, [0, 1, 2, 0], self.root / "src", overwrite=True)
+        after = sorted((self.root / "src").glob("*.png"))
+        self.assertEqual(len(after), 6)
+        self.assertEqual([p.read_text() for p in after], before)
+
+    def test_the_refusal_names_how_many_frames_clashed(self):
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1], self.root / "src", overwrite=True)
+        self.assertIn("6 из 6", rep["note"])
+
+    def test_a_different_directory_still_writes(self):
+        # Негативный контроль (И5): проверка обязана пропускать нормальный ход.
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1, 2, 0], self.root / "out")
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["written"], 4)
+
+    def test_a_dangling_symlink_is_not_reported_as_placed(self):
+        # Е2: отчёт о том, что ИСПОЛНИЛОСЬ. Ссылка на несуществующий файл
+        # создаётся успешно; «символическая» про неё — ложь в вердикте.
+        missing = self.root / "нет-такого.png"
+        dst = self.root / "куда.png"
+        with self.assertRaises(OSError):
+            fs.place(missing, dst, prefer="символическая")
+        self.assertFalse(dst.is_symlink())
+        self.assertFalse(dst.exists())
+
+
 class TheModuleDoesNotPromiseSeamlessness(unittest.TestCase):
     """Слова, которых у склейки нет права говорить: она не судит стык."""
 

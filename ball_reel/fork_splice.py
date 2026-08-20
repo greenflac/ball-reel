@@ -310,6 +310,12 @@ def place(src: Path, dst: Path, *, prefer=None) -> str:
                 os.link(src, dst)
             elif mode == LINK_SYM:
                 os.symlink(os.path.abspath(src), dst)
+                # os.symlink молча удаётся на несуществующую цель: сообщать
+                # «символическая» про битую ссылку — нарушение Е2 (отчёт о
+                # том, что исполнилось). Проверяем, что ссылка читается.
+                if not dst.exists():
+                    dst.unlink()
+                    raise OSError(f"ссылка на {src} не разыменовывается")
             else:
                 shutil.copyfile(src, dst)
             return mode
@@ -331,6 +337,30 @@ def write_sequence(paths, indices, out_dir, *, prefer=None,
     if out.exists() and not out.is_dir():
         return {"outcome": FAIL, "written": 0, "bytes": 0, "paths": [],
                 "modes": {}, "note": f"{out} — не каталог"}
+    # Кадры источника стираются ниже ДО того, как их прочитают. Если
+    # назначение — тот же каталог, материал владельца уничтожается, а отчёт
+    # при этом выходит «годно». Дешёвая проверка раньше дорогой записи (П2).
+    if out.is_dir():
+        try:
+            here = out.resolve()
+        except OSError:
+            here = out.absolute()
+        clash = 0
+        for raw in paths:
+            try:
+                parent = Path(raw).resolve().parent
+            except OSError:
+                parent = Path(raw).absolute().parent
+            if parent == here:
+                clash += 1
+        if clash:
+            return {"outcome": FAIL, "written": 0, "bytes": 0, "paths": [],
+                    "modes": {},
+                    "note": (f"каталог назначения {out} — он же каталог "
+                             f"источника (совпало кадров: {clash} из "
+                             f"{len(paths)}). Запись начинается со стирания "
+                             f"*{fork_video.FRAME_SUFFIX} и уничтожила бы "
+                             f"исходный материал. Задайте другой каталог")}
     already = sorted(out.glob(f"*{fork_video.FRAME_SUFFIX}")) if out.is_dir() else []
     if already and not overwrite:
         return {"outcome": UNMEASURED, "written": 0, "bytes": 0, "paths": [],
