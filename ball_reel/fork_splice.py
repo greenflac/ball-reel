@@ -637,6 +637,67 @@ def _report(outcome, note, t0, steps, **extra) -> dict:
     return out
 
 
+def write_cycle(paths, plan: dict, out_dir, *, prefer=None, overwrite=False,
+                bridge_build=None) -> dict:
+    """Разложить раскладку круга в каталог: снятые кадры и кадры моста.
+
+    `plan` — то, что вернул `cycle_plan`. Снятые кадры кладутся ссылками (своих
+    байт на диске ноль), кадры моста СТРОЯТСЯ `fork_bridge` и потому занимают
+    место по-настоящему: выдумать их ссылкой нельзя.
+
+    ТРИ ИСХОДА (Р1), и они наследуются от того шага, который не смог:
+    отказ моста — отказ всей раскладки, потому что круг без моста не
+    замыкается, а молча положить на его место лишний снятый кадр значило бы
+    подменить измеренный переход выдуманным.
+    """
+    from . import fork_bridge
+
+    t0 = time.perf_counter()
+    bridge_build = fork_bridge.build if bridge_build is None else bridge_build
+    out = Path(out_dir)
+    want = plan.get("frames") or []
+    if not want:
+        return {"outcome": FAIL, "written": 0, "paths": [], "modes": {},
+                "note": "раскладка пуста — класть нечего"}
+
+    # Мост строится ПЕРВЫМ и в свой каталог: он единственный шаг, который может
+    # отказать по существу, и платить за раскладку снятых кадров до его отказа
+    # незачем (П2). Каталог отдельный ещё и потому, что имена у обоих
+    # производителей одинаковые — общий каталог склеил бы их молча.
+    count = sum(1 for kind, _ in want if kind == "мост")
+    made = []
+    if count:
+        i = next(n for kind, n in want if kind == "кадр"
+                 and n == plan["frames"][plan["loop_start"]][1])
+        last = max(n for kind, n in want if kind == "кадр")
+        got = bridge_build(paths, last, i, count, out / "мост")
+        if got["outcome"] != PASS:
+            return {"outcome": got["outcome"], "written": 0, "paths": [],
+                    "modes": {}, "note": f"мост не построен: {got['note']}"}
+        made = list(got["paths"])
+        if len(made) != count:
+            return {"outcome": UNMEASURED, "written": 0, "paths": [],
+                    "modes": {},
+                    "note": (f"мост обещал {count} кадр(ов), построил "
+                             f"{len(made)} — раскладка и производство "
+                             f"разъехались")}
+
+    order = []
+    for kind, n in want:
+        order.append(Path(paths[n]) if kind == "кадр" else made[n - 1])
+    rep = write_sequence(order, list(range(len(order))), out, prefer=prefer,
+                         overwrite=overwrite)
+    rep["elapsed"] = round(time.perf_counter() - t0, 4)
+    rep["bridge"] = count
+    rep["loop_start"] = plan.get("loop_start")
+    if rep["outcome"] == PASS:
+        rep["note"] = (f"{rep['note']}; из них снятых {len(order) - count}, "
+                       f"кадров моста {count}. Круг начинается с кадра "
+                       f"{plan.get('loop_start')} — всё до него играется один "
+                       f"раз, дальше круг крутится плеером")
+    return rep
+
+
 def splice(source, loop, seconds, out_dir, *, fps=None, decode=None,
            prober=None, prefer=None, overwrite=False) -> dict:
     """Собрать кадры драйвинга из петли. Дешёвое раньше дорогого (П2).

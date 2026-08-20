@@ -723,6 +723,94 @@ class TheToleranceIsAsymmetricAndAgreesWithTheNextInstrument(unittest.TestCase):
         self.assertEqual(wrong, 0, f"проверено {checked}, расхождений {wrong}")
 
 
+class TheCycleIsMaterialisedWithItsBridge(unittest.TestCase):
+    """Раскладка превращается в кадры: снятые ссылками, мост построенный.
+
+    ИЗМЕРЕНО на боевом материале (петля 114..162, мост 2, 101 кадр):
+    замыкание круга 1.24 уровня против обычного шага внутри круга 1.65-1.71,
+    без моста было бы 2.88. То есть стык стал ГЛАДЧЕ обычного перехода, и
+    одинаковых соседних кадров в круге ноль.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.src = make_frames(self.root / "src", 200)
+
+    def fake_bridge(self, outcome="годно", count=None):
+        made = []
+
+        def build(paths, j, i, k, out_dir, **kw):
+            n = k if count is None else count
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            made[:] = [Path(out_dir) / f"b{t}.png" for t in range(n)]
+            for t, path in enumerate(made):
+                path.write_text(f"мост {t}", encoding="utf-8")
+            return {"outcome": outcome, "paths": made, "note": "подставной мост"}
+
+        return build
+
+    def test_the_cycle_lands_on_disk_with_its_bridge(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge())
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["written"], 101)
+        self.assertEqual(got["bridge"], 2)
+
+    def test_the_report_says_where_the_loop_starts(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge())
+        self.assertEqual(got["loop_start"], 51)
+        self.assertIn("играется один раз", got["note"])
+
+    def test_the_order_is_the_order_of_the_plan(self):
+        # Кадры собираются дальше `sorted(glob)`, и перепутанный порядок дал бы
+        # каталог нужной длины и правдоподобного вида.
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        fs.write_cycle(self.src, plan, self.root / "out",
+                       bridge_build=self.fake_bridge())
+        laid = sorted((self.root / "out").glob("*.png"))
+        self.assertEqual(laid[0].read_text(encoding="utf-8"), "кадр 63")
+        # Граница круга пиннится с ОБЕИХ сторон: 50-й — последний кадр
+        # подводки, 51-й — первый кадр круга. Одна сторона пропустила бы
+        # сдвиг на кадр, а он и есть самая дорогая ошибка раскладки.
+        self.assertEqual(laid[50].read_text(encoding="utf-8"), "кадр 113")
+        self.assertEqual(laid[51].read_text(encoding="utf-8"), "кадр 114")
+        self.assertEqual(laid[-1].read_text(encoding="utf-8"), "мост 1")
+
+    def test_a_bridge_that_failed_stops_the_whole_layout(self):
+        # Круг без моста не замыкается, а положить на его место лишний снятый
+        # кадр значит подменить измеренный переход выдуманным.
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge(outcome="не годно"))
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertEqual(got["written"], 0)
+
+    def test_a_bridge_that_built_the_wrong_count_is_unmeasured(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge(count=1))
+        self.assertEqual(got["outcome"], "не смогли проверить")
+
+    def test_a_cycle_without_a_bridge_never_calls_the_builder(self):
+        # Негативный контроль (И5): мост в ноль кадров — законный случай, и
+        # звать ради него производителя незачем.
+        called = []
+        plan = fs.cycle_plan(114, 162, bridge=0, n_frames=200)
+        fs.write_cycle(self.src, plan, self.root / "out",
+                       bridge_build=lambda *a, **k: called.append(a) or {})
+        self.assertEqual(called, [])
+
+    def test_an_empty_plan_is_refused(self):
+        got = fs.write_cycle(self.src, {"frames": [], "loop_start": None},
+                             self.root / "out")
+        self.assertEqual(got["outcome"], "не годно")
+
+
 class WritingNeverEatsTheSource(unittest.TestCase):
     """Дефект, найденный прогоном: назначение = источник -> материала нет.
 
