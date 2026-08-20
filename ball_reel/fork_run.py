@@ -71,7 +71,7 @@ def seconds_for(frame_count: int, *, fps: float | None = None) -> float:
 
 
 def length_fits_driving(frame_count: int, *, seconds: float | None = None,
-                        fps: int | None = None) -> dict:
+                        fps: int | None = None, bench: bool = False) -> dict:
     """Хватит ли кадров драйвинга на заказанную длину. Три исхода.
 
     НАЙДЕНО НА НАСТОЯЩЕМ МАТЕРИАЛЕ, а не рассуждением. В репозитории лежит
@@ -90,7 +90,7 @@ def length_fits_driving(frame_count: int, *, seconds: float | None = None,
     """
     fps = fork_comfy.WRAP_FPS if fps is None else fps
     want = seconds_for(frame_count, fps=fps) if seconds is None else seconds
-    need = fork_comfy.frames_for_seconds(want, fps=fps)["frames"]
+    need = fork_comfy.frames_for_seconds(want, fps=fps, bench=bench)["frames"]
     short = need - frame_count
     return {
         "outcome": PASS if short <= 0 else UNMEASURED,
@@ -143,7 +143,8 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         seconds: float | None = None,
         driving_fps: float | None = None,
         lock: dict | None = None,
-        wrap: dict | None = None) -> dict:
+        wrap: dict | None = None,
+        bench: bool = False) -> dict:
     """Сквозной путь на моке. Возвращает отчёт по шагам, а не «получилось».
 
     `photo` — ЗАГРУЖЕННАЯ фотография, она же якорь оси личности. Медоид сюда
@@ -213,7 +214,7 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
     # дальше — она мешает верить готовому ролику, поэтому исход «не смогли»,
     # а не отказ.
     t = time.perf_counter()
-    fits = length_fits_driving(len(frames), seconds=seconds)
+    fits = length_fits_driving(len(frames), seconds=seconds, bench=bench)
     steps.append(_step("длина", fits["outcome"], fits["note"],
                        time.perf_counter() - t))
 
@@ -343,7 +344,8 @@ def run(photo: str | Path, driving_frames, out_dir: str | Path, *,
         # платил за прогон и получал ролик вдвое короче заказанного.
         want = (seconds_for(len(frames), fps=driving_fps)
                 if seconds is None else float(seconds))
-        derived = fork_comfy.derive_wrapper(seconds=want, lock=lock, **wrap)
+        derived = fork_comfy.derive_wrapper(seconds=want, lock=lock,
+                                            bench=bench, **wrap)
         # Один аудит вместо трёх ПОТОМУ, ЧТО он их в себя включает: внутри
         # `audit_wrapper` зовёт и `audit_weights` (имена файлов против лока), и
         # `audit_loader_formats` (прочитает ли загрузчик поданный ему формат).
@@ -574,6 +576,11 @@ def from_template(path: str | Path, out_dir: str | Path, *,
                 grow_px=armed["grow_px"] if desc.get("arm") != "auto" else None,
                 seconds=desc.get("seconds"), driving_fps=driving_fps,
                 wrap=wrap,
+                # МЕТКА СТЕНДА ДОЕЗЖАЕТ ДО ГРАФА, а не остаётся в карточке.
+                # Она послабляет НИЖНЮЮ границу длины (5 с) и обязывает
+                # прогон называть себя стендовым во всех отчётах. Верхняя
+                # граница ею не трогается — там вопрос памяти карты.
+                bench=bool(desc.get("bench")),
                 props=(root / desc["props"]) if "props" in desc else None,
                 **kw)
     return _report(steps + inner["steps"], out)

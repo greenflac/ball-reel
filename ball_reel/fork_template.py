@@ -300,8 +300,26 @@ def check(desc: dict, *, root=None, prober=None) -> dict:
     sec = desc.get("seconds")
     numeric = isinstance(sec, (int, float)) and not isinstance(sec, bool)
     ok_sec = numeric and SECONDS_MIN <= sec <= SECONDS_MAX
-    add(_finding("длина", PASS if ok_sec else FAIL,
+    # КОРОЧЕ ПОЛА — ТОЛЬКО ИСПЫТАТЕЛЬНОМУ ОПИСАНИЮ, и это не смягчение пола.
+    # Первый прогон на арендованной карте идёт на материале из репозитория:
+    # 96 кадров, то есть 3.2 с. Пол продукта — 5 с, и опустить его вслед за
+    # материалом значило бы навсегда потерять способность заметить, что ролик
+    # короче заказанного. Поэтому пол остаётся, а короткий прогон обязан
+    # НАЗВАТЬ СЕБЯ стендовым: метка `bench` уже есть в формате и уже
+    # запрещает такому описанию уехать в прод (`assert_production`).
+    #
+    # Исход при этом «не смогли», а не «годно»: длина вне продуктовой полосы
+    # — это отсутствие продуктового заявления, а не выполненное требование.
+    short_bench = (numeric and desc.get("bench") is True
+                   and 0 < sec < SECONDS_MIN)
+    add(_finding("длина",
+                 PASS if ok_sec else UNMEASURED if short_bench else FAIL,
                  f"{sec} с" if ok_sec else
+                 f"{sec} с — КОРОЧЕ ПОЛА {SECONDS_MIN} с, допущено только "
+                 f"потому, что описание помечено испытательным (bench). "
+                 f"Продуктовое заявление про длину этим прогоном НЕ "
+                 f"проверяется, и в прод такое описание не пойдёт"
+                 if short_bench else
                  f"{sec!r} вне {SECONDS_MIN}-{SECONDS_MAX} с"
                  if numeric else f"{sec!r}: длина не число"))
 
@@ -389,8 +407,21 @@ def check(desc: dict, *, root=None, prober=None) -> dict:
     if drv is None:
         skipped.append("частота драйвинга: драйвинга нет, мерить нечего")
     else:
-        measured = prober(_resolve(root, drv))
-        if measured is None:
+        drv_path = _resolve(root, drv)
+        if drv_path.is_dir():
+            # КАТАЛОГ КАДРОВ — ЭТО НЕ «ffprobe не смог». У набора PNG частоты
+            # НЕТ ВООБЩЕ: она задана тем, с какой снимали, и в файлах не
+            # записана. Прежний текст говорил «нет ffprobe или файл не
+            # читается» и посылал оператора чинить то, что не сломано.
+            add(_finding("частота драйвинга", UNMEASURED,
+                         f"{drv} — КАТАЛОГ КАДРОВ, частоты в нём нет вовсе: "
+                         f"её не с чего снять, а не «прибор не справился». "
+                         f"Требование к съёмке (не ниже {FPS_OUT} к/с) "
+                         f"остаётся НЕПРОВЕРЕННЫМ и держится на слове того, "
+                         f"кто раскладывал кадры. Подайте видеофайл, и "
+                         f"частота будет снята и сверена"))
+            measured = None
+        elif (measured := prober(drv_path)) is None:
             add(_finding("частота драйвинга", UNMEASURED,
                          "частоту исходника снять не удалось (нет ffprobe или "
                          "файл не читается). Это НЕ «годно»: требование к "

@@ -1545,7 +1545,8 @@ def snap_frames(requested: int) -> int:
     return ((requested - LENGTH_BASE) // LENGTH_STEP) * LENGTH_STEP + LENGTH_BASE
 
 
-def frames_for_seconds(seconds: float, *, fps: int | None = None) -> dict:
+def frames_for_seconds(seconds: float, *, fps: int | None = None,
+                       bench: bool = False) -> dict:
     """Длина ролика в кадрах, с честной разницей между «просили» и «выйдет».
 
     Умолчание частоты разрешается в теле, а не в сигнатуре: значение по
@@ -1553,10 +1554,20 @@ def frames_for_seconds(seconds: float, *, fps: int | None = None) -> dict:
     (И7, эту форму на проекте уже выгребали).
     """
     fps = WRAP_FPS if fps is None else fps
-    if not SECONDS_MIN <= seconds <= SECONDS_MAX:
+    # `bench` РАЗРЕШАЕТ ТОЛЬКО НИЖНЮЮ ГРАНИЦУ, и это несимметрично нарочно.
+    # Короче пола — вопрос продуктового заявления: ролик выйдет, просто он не
+    # тот, что продаётся. Длиннее потолка — вопрос ПАМЯТИ И ВРЕМЕНИ карты, и
+    # никакая метка описания их не отменяет: там прогон не «не тот», там он
+    # не доедет. Поэтому верхняя граница остаётся жёсткой при любом флаге.
+    floor = 0 if bench else SECONDS_MIN
+    if not floor < seconds <= SECONDS_MAX if bench else \
+            not SECONDS_MIN <= seconds <= SECONDS_MAX:
         raise ValueError(
-            f"длина {seconds} с вне полосы {SECONDS_MIN}-{SECONDS_MAX} с "
-            f"(решение владельца, §«Формат выдачи»)")
+            f"длина {seconds} с вне полосы "
+            f"{'>0' if bench else SECONDS_MIN}-{SECONDS_MAX} с "
+            f"(решение владельца, §«Формат выдачи»)"
+            + (" — стендовому описанию послаблена только нижняя граница"
+               if bench else ""))
     requested = int(round(seconds * fps))
     frames = snap_frames(requested)
     return {
@@ -1566,7 +1577,10 @@ def frames_for_seconds(seconds: float, *, fps: int | None = None) -> dict:
         "seconds_actual": round(frames / fps, 4),
         "note": (f"{seconds} с при {fps} к/с = {requested} кадров, обёртка "
                  f"прижмёт к {frames} (шаг {LENGTH_STEP} от {LENGTH_BASE}); "
-                 f"пропадёт молча кадров: {requested - frames}"),
+                 f"пропадёт молча кадров: {requested - frames}"
+                 + ("" if not bench or seconds >= SECONDS_MIN else
+                    f". КОРОЧЕ ПОЛА {SECONDS_MIN} с — стендовый прогон, "
+                    f"продуктовое заявление про длину им не проверяется")),
     }
 
 
@@ -1712,7 +1726,7 @@ def _lock_files(lock: dict) -> dict:
             for w in lock.get("weights", []) if w.get("path")}
 
 
-def derive_wrapper(*, seconds: float | None = None,
+def derive_wrapper(*, seconds: float | None = None, bench: bool = False,
                    pose_strength: float | None = None,
                    face_strength: float | None = None,
                    colormatch: str | None = None,
@@ -1763,7 +1777,7 @@ def derive_wrapper(*, seconds: float | None = None,
         if side < MIN_SIDE:
             raise ValueError(f"{name}={side} меньше блока маски {MIN_SIDE} px")
 
-    length = frames_for_seconds(seconds, fps=fps)
+    length = frames_for_seconds(seconds, fps=fps, bench=bench)
     plan = window_plan(length["frames"])
     files = _lock_files(lock)
     missing = [r for r in ("diffusion", "text_encoder", "vae", "clip_vision",
