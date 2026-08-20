@@ -90,7 +90,8 @@ class Material:
     """
 
     def __init__(self, poses, *, size=(32, 32), missing=(), broken=False,
-                 people=None, cuts=(), blank=False):
+                 people=None, cuts=(), blank=False, head_mode="возвращается",
+                 head_blind=(), head_broken=False):
         from PIL import Image
 
         self.dir = Path(tempfile.mkdtemp(prefix="looper_frames_"))
@@ -101,6 +102,10 @@ class Material:
         self.broken = broken
         self.people = people or {}
         self.cuts = set(cuts)
+        self.head_mode = head_mode
+        self.head_blind = set(head_blind)
+        self.head_broken = head_broken
+        self.head_calls = []
         for k in range(len(poses)):
             f = self.dir / f"{k:04d}.png"
             if blank:
@@ -150,6 +155,36 @@ class Material:
         base = body + sum(5.0 for c in self.cuts if idx > c)
         return np.full((8, 8), base, dtype="float64")
 
+    def head(self, path):
+        """Голова, ТРЕТЬЯ ТОЧКА ВНЕДРЕНИЯ (Т4). Настоящий детектор 133 точек
+        стоит 0.436 с/кадр, и один его вызов из сьюта превратил четыре секунды
+        прогона в пять минут — поймано прогоном, а не рассуждением.
+
+        Три поведения головы, и все три нужны (И5):
+            `возвращается` — голова выводится из позы, петля закрывается точно;
+            `уезжает`      — голова монотонно сползает, петля не закрывается;
+            `рывок`        — голова стоит, но один раз прыгает на середине.
+        """
+        import numpy as np
+
+        self.head_calls.append(path)
+        idx = int(Path(path).stem)
+        if self.head_broken:
+            return {"head": None, "why": "весов DWPose нет (фикстура)"}
+        if idx in self.head_blind:
+            return {"head": None, "why": ""}
+        pts = self.poses[idx]
+        if pts is None:
+            return {"head": None, "why": ""}
+        # Голова — над серединой плеч, в пикселях кадра 720x1278.
+        x = 720 * (pts["l_shoulder"][0] + pts["r_shoulder"][0]) / 2
+        y = 1278 * (pts["l_shoulder"][1] + pts["r_shoulder"][1]) / 2 - 60
+        if self.head_mode == "уезжает":
+            y += 0.7 * idx
+        elif self.head_mode == "рывок":
+            y += 0.0 if idx < NFRAMES // 2 else 40.0
+        return {"head": (float(x), float(y)), "why": ""}
+
     def paths(self):
         return fl.frame_paths(self.dir)
 
@@ -160,9 +195,16 @@ FIXTURE_FPS = 30
 
 
 def analyse(material, **kw):
-    """Прогон прибора на фикстуре: обе точки внедрения подменены (Т4)."""
+    """Прогон прибора на фикстуре: ВСЕ ТРИ точки внедрения подменены (Т4).
+
+    Третью (голову) забыли подать в первой редакции, и настоящий детектор 133
+    точек по 0.436 с на кадр растянул сьют с четырёх секунд до пяти с лишним
+    минут. Умолчание здесь — не удобство, а сторож: прогон, зовущий сеть весов,
+    краснеет от чужой аварии и зеленеет от кэша.
+    """
     kw.setdefault("fps", FIXTURE_FPS)
     kw.setdefault("gif", False)
+    kw.setdefault("head", material.head)
     return fl.find_loops(material.dir, reader=material.reader,
                          gray=material.gray, **kw)
 
@@ -821,12 +863,25 @@ class LongMaterial(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def many_exercises(count, *, each=50):
+    """РАЗНЫЕ упражнения: разная конфигурация тела, а не разная амплитуда.
+
+    Первая редакция этой фикстуры меняла только амплитуду маха, и подавление
+    дублей схлопнуло её — правильно схлопнуло: ИЗМЕРЕНО, соседние «упражнения»
+    расходились на 8.3 типичных шага при пороге 12, то есть это было одно
+    движение с разным размахом. Здесь у каждого своя конфигурация: что
+    движется (руки, ноги, вертикаль), с каким размахом и с каким наклоном —
+    16.4..33.9 типичных шага друг от друга.
+    """
+    plans = [("arms", 0.10, 0.0), ("legs", 0.14, 0.0), ("line", 0.12, 0.10),
+             ("arms", 0.06, -0.12), ("legs", 0.08, 0.14), ("line", 0.16, -0.06)]
+    anchor = ("l_hip", "r_hip", "l_shoulder", "r_shoulder")
     out = []
     for e in range(count):
+        mode, amp, tilt = plans[e]
         for t in range(each):
-            out.append(skeleton((e * 7 + t) / PERIOD,
-                                mode=("arms", "legs")[e % 2],
-                                amp=0.05 + 0.03 * e))
+            sk = skeleton((e * 7 + t) / PERIOD, mode=mode, amp=amp)
+            out.append({k: (x, y if k in anchor else y + tilt, v)
+                        for k, (x, y, v) in sk.items()})
     return out
 
 
@@ -847,12 +902,21 @@ class FiveOnTheOutput(unittest.TestCase):
         self.assertEqual(len(got["loops"]), 5)
         self.assertEqual(got["asked"], 5)
 
-    def test_a_shortfall_is_reported_as_a_number_not_padded(self):
+    def test_a_pendulum_is_one_movement_and_not_three_cards(self):
+        """Маятник — ОДНО упражнение, сколько бы раз он ни повторился.
+
+        Прежняя редакция теста принимала три петли из одного маятника: сито
+        диапазонов их пропускало, потому что кадры 0..44, 23..67 и 46..90
+        перекрываются меньше чем наполовину. Сито содержания видит, что
+        движение одно, и оставляет одну карточку.
+        """
         m = Material(loop_sequence(), blank=True)
         got = analyse(m)
-        self.assertLess(len(got["loops"]), 5)
-        self.assertIn("ПЕТЕЛЬ МЕНЬШЕ ЗАКАЗАННЫХ 5", got["note"])
-        self.assertIn(f"принято {len(got['loops'])}", got["note"])
+        self.assertEqual(len(got["loops"]), 1, got["note"])
+        self.assertGreater(got["dropped_duplicate"], 0)
+        self.assertIn("РАЗНЫХ ДВИЖЕНИЙ МЕНЬШЕ ЗАКАЗАННЫХ 5", got["note"])
+        self.assertIn(f"схлопнуто как повтор того же движения "
+                      f"{got['dropped_duplicate']}", got["note"])
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +1005,8 @@ class SourceFps(unittest.TestCase):
     def test_a_directory_alone_has_no_frame_rate_and_says_so(self):
         """Третий исход (Р1): не «30 по умолчанию», а «неизвестна»."""
         m = Material(loop_sequence(), blank=True)
-        got = fl.find_loops(m.dir, reader=m.reader, gray=m.gray, gif=False)
+        got = fl.find_loops(m.dir, reader=m.reader, gray=m.gray,
+                            head=m.head, gif=False)
         self.assertEqual(got["outcome"], PASS, got["note"])
         self.assertIsNone(got["fps"])
         self.assertEqual(got["fps_source"], fl.FPS_UNKNOWN)
@@ -966,8 +1031,8 @@ class SourceFps(unittest.TestCase):
             return {"outcome": PASS, "paths": [str(p) for p in m.paths()],
                     "fps_in": 24, "fps_out": 24, "note": "фикстура"}
 
-        got = fl.find_loops(movie, reader=m.reader, gray=m.gray, gif=False,
-                            decode=decode)
+        got = fl.find_loops(movie, reader=m.reader, gray=m.gray,
+                            head=m.head, gif=False, decode=decode)
         self.assertEqual(got["fps"], 24)
         self.assertEqual(got["fps_source"], fl.FPS_PROBED)
         self.assertEqual(got["loops"][0]["seconds"], 1.88)
@@ -983,8 +1048,8 @@ class SourceFps(unittest.TestCase):
             return {"outcome": PASS, "paths": [str(p) for p in m.paths()],
                     "fps_in": 24, "fps_out": 24, "note": "фикстура"}
 
-        got = fl.find_loops(movie, reader=m.reader, gray=m.gray, gif=False,
-                            decode=decode, fps=30)
+        got = fl.find_loops(movie, reader=m.reader, gray=m.gray,
+                            head=m.head, gif=False, decode=decode, fps=30)
         self.assertEqual(got["fps"], 30)
         self.assertEqual(got["fps_source"], fl.FPS_GIVEN)
 

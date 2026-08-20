@@ -228,6 +228,24 @@ SEAM_SCORE = ("max(поза, вес_потока*поток, вес_пиксел
 #: считаются разными, если больше половины короткой из них не общая».
 OVERLAP_MAX = 0.5
 
+#: ВЫБРАНО: сколькими точками по фазе описывается петля при сверке «одно ли это
+#: движение». ОДНОГО НАЧАЛА МАЛО: два разных упражнения могут начинаться из
+#: одной стойки и разойтись дальше — на боевом ролике сверка только по началу
+#: даёт 2.1 типичных шага между петлями 1 и 3, а по четырём фазам 5.5, то есть
+#: втрое честнее. Восемь фаз меряют то же (2.6..4.8 против 2.0..5.7) и стоят
+#: вдвое дороже, поэтому взято 4.
+DUP_PHASES = 4
+
+#: ВЫБРАНО: во сколько раз позы двух петель должны разойтись, чтобы считаться
+#: РАЗНЫМИ упражнениями. Мера относительная, как все оси: в типичных
+#: межкадровых шагах ЭТОГО клипа. Зажата двумя замерами на боевом ролике:
+#:     одно движение, показанное четырежды  ->  2.0 .. 5.7 шага
+#:     другое упражнение                    ->  36.7 .. 38.0 шага
+#: Между ними шестикратный разрыв; 12.0 стоит внутри него, ближе к дублям:
+#: ошибиться в сторону «схлопнули лишнее» дешевле, чем показать клиенту пять
+#: карточек одного и того же движения.
+DUPLICATE_MAX_STEPS = 12.0
+
 #: ВЫБРАНО: сколько петель показывать оператору. Пять — это уже выбор и ещё не
 #: свалка; больше пяти GIF-ов подряд человек не сравнивает.
 TOP_LOOPS = 5
@@ -1013,6 +1031,56 @@ def select(cands, *, overlap_max=None, top=None) -> dict:
             "considered": len(cands)}
 
 
+def loop_signature(state_at, i, j, *, phases=None) -> list | None:
+    """Чем описывается петля при сверке «одно ли это движение».
+
+    Не диапазоном кадров и не одной позой, а НЕСКОЛЬКИМИ ПОЗАМИ ПО ФАЗЕ цикла.
+    Диапазон кадров — не движение: кадры 58..106 и 308..356 боевого ролика не
+    пересекаются вовсе, а упражнение в них одно и то же.
+
+    Возвращает список приведённых поз или None, если хоть одной из них нет:
+    судить о совпадении по половине подписи нельзя (Р1).
+    """
+    phases = DUP_PHASES if phases is None else phases
+    length = j - i + 1
+    out = []
+    for k in range(phases):
+        frame = i + round(k * (length - 1) / phases)
+        st = state_at(frame)
+        if st is None:
+            return None
+        out.append(st)
+    return out
+
+
+def signature_gap(a, b):
+    """Расхождение двух петель как ДВИЖЕНИЙ, в длинах торса.
+
+    МАКСИМУМ ПО ФАЗАМ: петли считаются одним движением, только если они близки
+    ВО ВСЕХ сверяемых точках цикла. Совпадения в одной точке недостаточно —
+    это и есть довод против сверки «только начало».
+
+    МИНИМУМ ПО ЦИКЛИЧЕСКИМ СДВИГАМ: то же упражнение, снятое с другой точки
+    цикла, — это то же упражнение, и клиенту оно второй карточкой не нужно. На
+    боевом ролике сдвиг сближает четыре показа одного движения с 3.6..9.2
+    типичных шагов до 2.0..5.7, а другое упражнение остаётся на 36.7.
+
+    Возвращает None, если сравнить не удалось.
+    """
+    if not a or not b or len(a) != len(b):
+        return None
+    best = None
+    for r in range(len(b)):
+        rotated = b[r:] + b[:r]
+        gaps = [pose_gap(x, y) for x, y in zip(a, rotated)]
+        if any(g is None for g in gaps):
+            continue
+        worst = max(gaps)
+        if best is None or worst < best:
+            best = worst
+    return best
+
+
 def repeat_plan(length, *, fps=None) -> list:
     """Сколько повторов петли даёт продуктовую длину 5-10 с.
 
@@ -1241,10 +1309,25 @@ def _flow_between(st, i, j):
          for k in shared])), 6)
 
 
-def pick_with_head(worthy, paths, *, median_score, advantage_min, top=None,
+def pick_finalists(worthy, paths, *, median_score, advantage_min, top=None,
                    overlap_max=None, head=None, head_weight=None, tries=None,
-                   scale=None, refine=None) -> dict:
-    """Набрать финалистов, проверяя ГОЛОВУ у каждого, и добирать вместо отсева.
+                   scale=None, refine=None, state_at=None, typical=None,
+                   phases=None, duplicate_max=None) -> dict:
+    """Набрать финалистов: три сита подряд, от бесплатного к дорогому (П2).
+
+        1. ДИАПАЗОН КАДРОВ (бесплатно) — ловит сдвиги на кадр-два внутри
+           одного места клипа: 0..44 и 4..48 это одна и та же петля.
+        2. СОДЕРЖАНИЕ (дёшево, позы уже сняты) — ловит ПОВТОР УПРАЖНЕНИЯ в
+           разных местах клипа, чего первое сито не видит в принципе: кадры
+           58..106 и 308..356 не пересекаются вовсе, а движение одно.
+           ИЗМЕРЕНО на боевом ролике: из пяти выданных петель четыре были одним
+           упражнением, показанным четыре раза (2.0..5.7 типичных шага между
+           ними), и клиент увидел бы пять карточек вместо двух вариантов.
+        3. ГОЛОВА (0.436 с/кадр) — только у тех, кто прошёл первые два.
+
+    ОТВЕРГНУТЫЙ КАНДИДАТ НЕ ЗАНИМАЕТ МЕСТО ни на одном из сит: берётся
+    следующий. Иначе клиент получил бы четыре карточки вместо пяти просто
+    потому, что одна оказалась дублем.
 
     ПОРЯДОК РАБОТ ЗДЕСЬ — ЭТО ЦЕНА (П2). Три первые оси стоят миллисекунды и
     считаются по всем парам; голова стоит 0.436 с/кадр, поэтому её спрашивают
@@ -1271,20 +1354,42 @@ def pick_with_head(worthy, paths, *, median_score, advantage_min, top=None,
     overlap_max = OVERLAP_MAX if overlap_max is None else overlap_max
     head_weight = HEAD_WEIGHT if head_weight is None else head_weight
     tries = HEAD_MAX_TRIES if tries is None else tries
+    duplicate_max = DUPLICATE_MAX_STEPS if duplicate_max is None else duplicate_max
     head = read_head if head is None else head
     refine = (lambda c: c) if refine is None else refine
     cache: dict = {}
 
     kept, dropped_overlap, dropped_head, tried, unchecked = [], 0, 0, 0, 0
+    dropped_duplicate, dup_unmeasured = 0, 0
     for cand in worthy:
         if len(kept) >= top:
             break
         if any(overlap(cand, k) > overlap_max for k in kept):
             dropped_overlap += 1
             continue
+        # СИТО СОДЕРЖАНИЯ. Считается на исходных (неуточнённых) границах: сдвиг
+        # уточнения — единицы кадров, а речь о том, ТО ЖЕ ЛИ ЭТО ДВИЖЕНИЕ, и
+        # платить уточнением за кандидата, который окажется дублем, незачем.
+        same_as = None
+        if state_at is not None and typical:
+            sig = loop_signature(state_at, cand["i"], cand["j"], phases=phases)
+            if sig is None:
+                dup_unmeasured += 1
+            else:
+                for k in kept:
+                    other = k.get("signature")
+                    gap = signature_gap(sig, other) if other else None
+                    if gap is not None and gap / typical <= duplicate_max:
+                        same_as = (k["i"], k["j"], round(gap / typical, 1))
+                        break
+            if same_as is not None:
+                dropped_duplicate += 1
+                continue
+            cand = {**cand, "signature": sig}
         # Границы уточняются ДО опроса головы: судить надо тот стык, который
         # увидит клиент, а уточнение сдвигает края на прорежённом проходе.
         loop = dict(refine(cand))
+        loop["signature"] = cand.get("signature")
         if scale is None or scale.get("step") in (None, 0):
             loop["head_state"] = UNMEASURED
             loop["head_note"] = ((scale or {}).get("reason")
@@ -1322,7 +1427,11 @@ def pick_with_head(worthy, paths, *, median_score, advantage_min, top=None,
         loop["seam_head"] = round(ratio, 3)
         loop["score"] = round(score, 3)
         kept.append(loop)
+    for loop in kept:
+        loop.pop("signature", None)
     return {"kept": kept, "dropped_overlap": dropped_overlap,
+            "dropped_duplicate": dropped_duplicate,
+            "dup_unmeasured": dup_unmeasured,
             "dropped_head": dropped_head, "head_tried": tried,
             "head_frames": len(cache), "unchecked": unchecked,
             "considered": len(worthy)}
@@ -1580,14 +1689,34 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
         fine_poses[0] += got_fine["poses"]
         return got_fine["loops"][0]
 
-    chosen = pick_with_head(
+    # Позы по НОМЕРУ ИСХОДНОГО КАДРА для сверки движений. При прорежённом
+    # проходе берётся ближайший опрошенный кадр: между двумя снятыми лежит
+    # stride-1 неснятых, и подпись движения от сдвига на пару кадров не меняется
+    # (сама сверка идёт с допуском в 12 типичных шагов).
+    by_frame = {f: v for f, v in zip(index, st)}
+    known = sorted(by_frame)
+
+    def state_at(frame):
+        if frame in by_frame:
+            return by_frame[frame]
+        pos = bisect.bisect_left(known, frame)
+        near = [k for k in (pos - 1, pos) if 0 <= k < len(known)]
+        if not near:
+            return None
+        pick = min((known[k] for k in near), key=lambda k: abs(k - frame))
+        return by_frame[pick] if abs(pick - frame) <= stride else None
+
+    chosen = pick_finalists(
         worthy, paths, median_score=median_score, advantage_min=advantage_min,
         top=top, overlap_max=overlap_max, head=head, head_weight=head_weight,
-        scale=scale, refine=refine_one)
+        scale=scale, refine=refine_one, state_at=state_at,
+        typical=step_info["step"])
     steps.append(("финалисты", PASS,
-                  f"принято {len(chosen['kept'])}, отвергнуто головой "
-                  f"{chosen['dropped_head']}, по пересечению "
-                  f"{chosen['dropped_overlap']}; голову спрашивали "
+                  f"принято {len(chosen['kept'])}; отвергнуто: по пересечению "
+                  f"кадров {chosen['dropped_overlap']}, КАК ПОВТОР ТОГО ЖЕ "
+                  f"ДВИЖЕНИЯ {chosen['dropped_duplicate']}, головой "
+                  f"{chosen['dropped_head']}; движение не сверялось у "
+                  f"{chosen['dup_unmeasured']}; голову спрашивали "
                   f"{chosen['head_tried']} раз, кадров головы "
                   f"{scale['frames'] + chosen['head_frames']}, поз на "
                   f"уточнение {fine_poses[0]}",
@@ -1614,12 +1743,14 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
         loops.append(loop)
 
     short = ("" if len(loops) >= top else
-             f" ПЕТЕЛЬ МЕНЬШЕ ЗАКАЗАННЫХ {top}: набралось {len(loops)} "
-             f"существенно разных, добивать список ухудшенными копиями того же "
-             f"движения нельзя.")
+             f" РАЗНЫХ ДВИЖЕНИЙ МЕНЬШЕ ЗАКАЗАННЫХ {top}: набралось "
+             f"{len(loops)}, схлопнуто как повтор того же движения "
+             f"{chosen['dropped_duplicate']}. Добивать список повторами нельзя: "
+             f"клиент увидит пять карточек и решит, что у него пять вариантов.")
     note = (f"петель принято {len(loops)} из {len(worthy)} прошедших планку "
             f"преимущества {advantage_min}x (всего пар с оценкой {len(cands)}, "
-            f"отброшено по пересечению {chosen['dropped_overlap']}, головой "
+            f"отброшено по пересечению {chosen['dropped_overlap']}, как повтор "
+            f"движения {chosen['dropped_duplicate']}, головой "
             f"{chosen['dropped_head']}, не проверено головой "
             f"{chosen['unchecked']}); кадров "
             f"{n}, опрошено {len(index)} ({scan}), поза снята на "
@@ -1638,6 +1769,8 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
                    candidates=len(cands), worthy=len(worthy),
                    dropped_overlap=chosen["dropped_overlap"],
                    dropped_head=chosen["dropped_head"],
+                   dropped_duplicate=chosen["dropped_duplicate"],
+                   dup_unmeasured=chosen["dup_unmeasured"],
                    head_step=None if scale["step"] is None else round(scale["step"], 3),
                    head_tried=chosen["head_tried"],
                    head_frames=scale["frames"] + chosen["head_frames"],
@@ -1660,8 +1793,8 @@ def table(report) -> str:
     """
     fps = report.get("fps")
     head = (f"{'#':>2} {'кадры':>11} {'кадров':>6} {'сек':>6} {'суст':>4} "
-            f"{'стык':>6} {'поза':>6} {'поток':>6} {'пиксели':>7} {'выигрыш':>8}"
-            f"  повторы -> с        GIF")
+            f"{'стык':>6} {'поза':>6} {'поток':>6} {'пиксели':>7} {'голова':>7} "
+            f"{'выигрыш':>8}  повторы -> с        GIF")
     rows = [head]
     for lp in report.get("loops", []):
         rep = (", ".join(f"{r['repeats']}x={r['frames']}к/{r['seconds']}с"
@@ -1673,13 +1806,24 @@ def table(report) -> str:
                 if g.get("path") else "-")
         secs = "—" if lp.get("seconds") is None else f"{lp['seconds']}"
         pix = "—" if lp.get("seam_pixel") is None else f"{lp['seam_pixel']}"
+        hd = ("н/п" if lp.get("seam_head") is None else f"{lp['seam_head']}")
         rows.append(f"{lp['rank']:>2} {lp['i']:>5}..{lp['j']:<5} "
                     f"{lp['frames']:>6} {secs:>6} {str(lp.get('joints')):>4} "
                     f"{lp['score']:>6} {lp['seam_pose']:>6} {lp['seam_flow']:>6} "
-                    f"{pix:>7} {str(lp['advantage']) + 'x':>8}  {rep}  {gtxt}")
+                    f"{pix:>7} {hd:>7} {str(lp['advantage']) + 'x':>8}  {rep}  "
+                    f"{gtxt}")
     if fps is None:
         rows.append("    секунды и план повторов не печатаются: частота "
                     "источника неизвестна (см. шаг «частота»)")
+    for lp in report.get("loops", []):
+        if lp.get("head_state") == UNMEASURED:
+            rows.append(f"    петля {lp['rank']}: ГОЛОВА НЕ ПРОВЕРЕНА — "
+                        f"{lp.get('head_note')}")
+    if report.get("dropped_duplicate"):
+        rows.append(f"    схлопнуто как повтор того же движения: "
+                    f"{report['dropped_duplicate']} (сверка по "
+                    f"{DUP_PHASES} точкам фазы, порог "
+                    f"{DUPLICATE_MAX_STEPS} типичных шага)")
     if any(lp.get("joints") not in (None, len(pose.BODY_POINTS))
            for lp in report.get("loops", [])):
         rows.append(f"    «суст» — сколько суставов из {len(pose.BODY_POINTS)} "
