@@ -597,7 +597,14 @@ class TheOperatorEntryPoint(unittest.TestCase):
             got = fork_run.from_template(self._bench(tmp), Path(tmp) / "out")
         self.assertEqual(got["steps"][0]["step"], "описание")
         self.assertEqual(got["steps"][0]["outcome"], FAIL)
-        self.assertIn("не раскодирован", got["steps"][0]["note"])
+        # ~~«не раскодирован»~~ -> «не читается как видео». Формулировка
+        # изменилась вместе с правилом частоты: теперь путь останавливается
+        # РАНЬШЕ, на снятии метаданных, и называет ПРИЧИНУ, а не только факт.
+        # Разница не косметическая: «не раскодирован» посылает оператора
+        # чинить раскодировщик, а негоден вход.
+        self.assertIn("не читается как видео", got["steps"][0]["note"])
+        self.assertIn("driving.mp4", got["steps"][0]["note"],
+                      "не назван файл, из-за которого остановились")
         self.assertEqual(len(got["steps"]), 1,
                          "путь поехал дальше по нераскодированному драйвингу")
 

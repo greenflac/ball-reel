@@ -2250,5 +2250,75 @@ class TheApiFormatMatchesARealComfyExport(unittest.TestCase):
 
 
 
+
+
+class TheOutputRateFollowsTheDrivingBelowThirty(unittest.TestCase):
+    """Правило владельца 20.08.2026: ниже 30 наследуем, 30 и выше фиксируем.
+
+    ~~«Драйвинг не ниже 30, вверх не приводим»~~ снято: то правило выросло из
+    посылки «все сурсы будут выше 24 кадра», а первый же боевой ролик проекта
+    снят на 24. Правило отвергало собственный материал.
+
+    Литералы здесь — числа решения владельца (Т2), импортировать их из
+    проверяемого модуля значило бы сверять значение само с собой.
+    """
+
+    def test_below_thirty_is_inherited(self):
+        for src in (12, 24, 25, 29.97):
+            with self.subTest(fps=src):
+                got = fk.output_fps(src)
+                self.assertEqual(got["fps"], src)
+                self.assertTrue(got["inherited"])
+
+    def test_thirty_exactly_is_fixed_not_inherited(self):
+        """Граница именно здесь, и она названа в правиле словом «и выше»."""
+        got = fk.output_fps(30)
+        self.assertEqual(got["fps"], 30.0)
+        self.assertFalse(got["inherited"])
+
+    def test_above_thirty_is_capped(self):
+        for src in (50, 60, 120):
+            with self.subTest(fps=src):
+                self.assertEqual(fk.output_fps(src)["fps"], 30.0)
+
+    def test_an_unknown_rate_is_unmeasured_and_never_thirty(self):
+        """Пережило первый заход мутаций: свёртка None в 30 не краснела.
+
+        Подставленная частота молча растянет или ускорит движение — и в
+        отчёте это сойдётся, потому что все дальнейшие числа посчитаны по
+        ней же. Единственный честный ответ — «назвать нечем».
+        """
+        got = fk.output_fps(None)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIsNone(got["fps"])
+        self.assertIn("НЕ «берём 30»", got["note"])
+
+    def test_zero_and_negative_are_refused_not_inherited(self):
+        """Тоже пережило первый заход: ноль проходил как годная частота.
+
+        Ноль означает «метаданные не прочитаны», а не «ролик мгновенный», и
+        унаследовать его значит поделить на него ниже по пути.
+        """
+        for bad in (0, -1, -30):
+            with self.subTest(fps=bad):
+                with self.assertRaises(ValueError):
+                    fk.output_fps(bad)
+
+    def test_a_string_is_refused(self):
+        for bad in ("тридцать", True):
+            with self.subTest(fps=bad):
+                with self.assertRaises(TypeError):
+                    fk.output_fps(bad)
+
+    def test_the_note_says_what_the_capping_costs(self):
+        """Оператор должен видеть, за что платит, а не только что решено."""
+        self.assertIn("2.00x", fk.output_fps(60)["note"])
+
+    def test_the_note_of_an_exact_match_does_not_talk_about_thinning(self):
+        """Негативный контроль (И5): при 30 прореживать нечего."""
+        self.assertNotIn("прореживаются", fk.output_fps(30)["note"])
+
+
+
 if __name__ == "__main__":
     unittest.main()

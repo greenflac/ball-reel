@@ -21,10 +21,20 @@
     не годно           поза снята, петель в материале нет (монотонный дрейф)
     не смогли          позу снять нечем/не с чего, или клип не движется
 
-ДВЕ ВЕЛИЧИНЫ НА СТЫКЕ, И ОДНОЙ МАЛО. Совпадение поз необходимо, но недостаточно:
+ТРИ ВЕЛИЧИНЫ НА СТЫКЕ, И КАЖДАЯ ЗАВЕДЕНА ЗАМЕРОМ, А НЕ РАССУЖДЕНИЕМ. Совпадение поз необходимо, но недостаточно:
 человек в кадре i приседает, а в кадре j встаёт — поза та же, направление
 противоположное, склейка даёт отскок, видимый глазом. Поэтому сверяется ещё и
-производная позы. Как две величины сводятся в одну оценку — см. `SEAM_SCORE`.
+производная позы.
+
+ТРЕТЬЯ ОСЬ — ПИКСЕЛИ, и она добавлена ПОСЛЕ ТОГО, КАК ОШИБЛИСЬ ПЕРВЫЕ ДВЕ. На
+`chain_frames` две позные оси выбрали петлю, которая глазом не замыкается;
+независимый судья (попиксельная разница на стыке, нормированная типичным
+пиксельным шагом клипа) поставил этот выбор на 42-е место из 406 и первым
+назвал другой — тот, который замыкается. Причина видна из замера: скелет из
+двенадцати точек не знает про руки, которых детектор не видит (на драйвинге
+правое запястье видно на 46 кадрах из 96), не знает про предмет в руках, про
+свет и про фон. Пиксели знают, но не знают направления движения — поэтому осей
+три, а не одна. Как они сводятся в одну оценку — см. `SEAM_SCORE`.
 
 ОПЕРАТОРА В КОНТУРЕ НЕТ (решение владельца, финальный продукт). Пользователь
 кидает ссылку на своё видео и получает пять GIF-петель на согласование ещё до
@@ -106,13 +116,55 @@ ADVANTAGE_MIN = 2.0
 #: разнородных величин здесь нет: см. `SEAM_SCORE`.
 FLOW_WEIGHT = 1.0
 
-#: Как две приведённые величины сводятся в одну оценку. МАКСИМУМ, а не сумма и
-#: не среднее: это два НЕЗАВИСИМЫХ дефекта стыка, и хороший показатель по одной
+#: ВЫБРАНО: вес ПИКСЕЛЬНОГО стыка. Как и у потока, величина уже приведена к
+#: своему типичному шагу, поэтому 1.0 означает: один типичный пиксельный переход
+#: расхождения так же плох, как один типичный шаг позы.
+#:
+#: ЧТО ЭТА ОСЬ ПОЧИНИЛА, ИЗМЕРЕНО (`looper_third_axis.py`, оба материала):
+#:     chain_frames без пикселей -> петля 30..90, по независимому судье 42-е
+#:                                  место из 406, глазом НЕ замыкается;
+#:     с пикселями               -> петля 0..40, по судье 1-е место, глазом
+#:                                  замыкается; её преимущество 1.62 планку 2.0
+#:                                  не проходит, то есть клип честно получает
+#:                                  «петель не нашлось» вместо негодной петли;
+#:     demo/bench/driving        -> выбор НЕ ИЗМЕНИЛСЯ (2..54), преимущество
+#:                                  7.06 -> 3.79, планку проходит с запасом.
+PIXEL_WEIGHT = 1.0
+
+#: ПОЧЕМУ СУСТАВЫ СВОДЯТСЯ СРЕДНИМ, А НЕ ХУДШИМ — ОТРИЦАТЕЛЬНЫЙ РЕЗУЛЬТАТ (И6).
+#: Гипотеза была разумная: человек смотрит на самое непохожее место, значит и
+#: суставы надо сводить худшим, как две оси сводятся максимумом. ПРОВЕРЕНО на
+#: восьми правилах сводки против независимого пиксельного судьи, 406 пар на
+#: каждом материале (`looper_reduce_sweep.py`, `looper_judge.py`):
+#:
+#:     правило           согласие с судьёй   его выбор по мнению судьи
+#:     среднее (взято)   rho +0.580          1-е место из 406
+#:     max(ср, худш/3)   rho +0.571          1-е место
+#:     0.5*ср+0.5*худш   rho +0.544          4-е место
+#:     худший            rho +0.510          4-е место
+#:
+#: Худший сустав РАЗДЕЛЯЕТ ХУЖЕ: на `chain_frames` он поднимает преимущество
+#: негодной петли с 2.70 до 5.22, то есть уводит её от планки, а не к ней.
+#: Требование видеть все 12 суставов (вместо пола в 4) убивает материал: на
+#: драйвинге остаётся 40 пар из 406 и преимущество падает до 1.14. Настоящая
+#: причина промаха по рукам оказалась не в сводке: правое запястье на драйвинге
+#: видно детектору на 46 кадрах из 96, то есть в среднее оно попросту не входит.
+#: Поэтому число сравненных суставов ПЕЧАТАЕТСЯ рядом с каждой петлёй, а чинится
+#: это не сводкой, а третьей осью.
+
+#: Как три приведённые величины сводятся в одну оценку. МАКСИМУМ, а не сумма и
+#: не среднее: это три НЕЗАВИСИМЫХ дефекта стыка, и хороший показатель по одной
 #: оси не выкупает провал по другой. Сумма позволила бы отскоку (поза сошлась,
 #: направление противоположно) обменять свой провал на идеальную позу и
 #: подняться в рейтинге — то есть ровно на тот дефект, ради которого вторая ось
 #: и заведена. Максимум такого обмена не допускает.
-SEAM_SCORE = "max(поза, вес*поток), обе в единицах обычного шага клипа"
+#:
+#: Каждая величина ДО сведения поделена на СВОЙ типичный межкадровый шаг этого
+#: же клипа, поэтому все три безразмерны и однородны: «во столько раз стык
+#: дороже обычного перехода». Складывать длины торса с яркостью было бы тем
+#: самым молчаливым сложением разнородного.
+SEAM_SCORE = ("max(поза, вес_потока*поток, вес_пикселей*пиксели), "
+              "все три в единицах обычного шага клипа")
 
 #: ВЫБРАНО: какую долю более короткой из двух петель разрешено делить с уже
 #: принятой. Без подавления сортировка по качеству даёт десяток вариантов
@@ -182,6 +234,15 @@ COARSE_STRIDE = 5
 #: прорежённой последовательности это 7200 снятий позы, 3.7-7 минут CPU.
 #: Выше — исход «не смогли, слишком длинное», а не молчаливое ожидание.
 MAX_FRAMES = 36000
+
+#: ТРИ ИСХОДА У ЧАСТОТЫ ИСТОЧНИКА (Р1), и «неизвестна» не сворачивается в наши
+#: 30 к/с. Секунды — это то, что видит платящий человек рядом с GIF, и по ним же
+#: считается число повторов до продуктовой полосы 5-10 с. Подставив свою
+#: выходную частоту вместо чужой входной, прибор ошибается на 25% при источнике
+#: 24 к/с и предлагает пятикратный повтор там, где он вылетает за потолок.
+FPS_PROBED = "снята с файла"
+FPS_GIVEN = "подана руками"
+FPS_UNKNOWN = "неизвестна"
 
 #: Три слова о том, ЧЕМ считали. Едут в отчёт: «петель не нашлось на полной
 #: частоте» и «не нашлось на прорежённой» — разные утверждения.
@@ -296,6 +357,72 @@ def cuts(paths, *, gray=None, jump=None) -> dict:
                      f"(планка {jump}x типичного скачка, самый резкий переход "
                      f"{worst:.2f}x)"
                      + (f"; кадры-швы: {found[:10]}" if found else ""))}
+
+
+def keep_grays(paths, *, gray=None) -> dict:
+    """Серые кадры для ПИКСЕЛЬНОГО СТЫКА, сложенные в память как uint8.
+
+    ПОЧЕМУ uint8, А НЕ float. `motion._gray` отдаёт float64 восьмибитной
+    картинки, то есть 9216 чисел по 8 байт на кадр ради значений 0..255. На
+    потолке материала (36000 кадров, прорежённых до 7200) это 530 МБ против
+    66 МБ — при полном отсутствии потери: значения целые по построению.
+    Разности считаются во float уже на паре.
+
+    Хранятся ТОЛЬКО опрошенные кадры: пары строятся между ними же. Резы этим
+    складом не пользуются — они идут потоком (см. `cuts`), потому что им нужны
+    все соседние переходы на полной частоте.
+    """
+    import numpy as np
+
+    gray = read_gray if gray is None else gray
+    t = time.perf_counter()
+    out = {}
+    for k, p in paths:
+        arr = np.asarray(gray(str(p)))
+        # СТОРОЖ ДИАПАЗОНА, И ОН НЕ ФОРМАЛЬНОСТЬ. Приведение к uint8 законно
+        # ровно потому, что серый кадр восьмибитен; значение вне 0..255
+        # завернулось бы по модулю 256 МОЛЧА, и стык считался бы по мусору.
+        # Поймано на своей же фикстуре: подменная «камера» отдавала 1400, и все
+        # пиксельные числа были остатком от деления.
+        lo, hi = float(arr.min()), float(arr.max())
+        if lo < 0 or hi > 255:
+            raise ValueError(
+                f"серый кадр {p} вне восьмибитного диапазона: {lo}..{hi}. "
+                f"`read_gray` обязан отдавать яркость 0..255 — склад хранит "
+                f"кадры как uint8, и другое значение завернулось бы молча")
+        out[k] = arr.astype("uint8")
+    return {"grays": out, "frames": len(out),
+            "bytes": sum(a.nbytes for a in out.values()),
+            "elapsed": round(time.perf_counter() - t, 4)}
+
+
+def pixel_gap(grays, i, j):
+    """Насколько РАЗНАЯ КАРТИНКА в двух кадрах, в средней яркости.
+
+    Третья ось стыка. Она видит то, чего не видит скелет из двенадцати точек:
+    руки, которые детектор потерял, предмет в руках, свет, фон, план. И не
+    видит того, что видит поза, — направления движения. Поэтому ни одна из них
+    не заменяет другую, и обе входят в оценку максимумом (`SEAM_SCORE`).
+    """
+    import numpy as np
+
+    a, b = grays.get(i), grays.get(j)
+    if a is None or b is None:
+        return None
+    return round(float(np.abs(a.astype("float64") - b.astype("float64")).mean()), 6)
+
+
+def pixel_step(grays, order) -> float | None:
+    """Типичный ПИКСЕЛЬНЫЙ переход между соседними опрошенными кадрами.
+
+    Единица, в которой меряется пиксельный стык, — своя, а не позная: это
+    разные величины, и общий знаменатель у них был бы выдуманным.
+    """
+    import numpy as np
+
+    steps = [g for g in (pixel_gap(grays, order[k], order[k + 1])
+                         for k in range(len(order) - 1)) if g is not None]
+    return float(np.median(steps)) if steps else None
 
 
 # ---------------------------------------------------------------------------
@@ -524,10 +651,16 @@ def length_is_admissible(length, *, fps=None, min_frames=None) -> bool:
     ОДНО ЗНАНИЕ — ОДНО МЕСТО (Е1): и перечисление длин, и перебор пар спрашивают
     здесь. Разъехавшись, они дали бы кандидата, которого обёртка прижмёт.
     """
-    fps = fork_comfy.WRAP_FPS if fps is None else fps
     min_frames = LOOP_MIN_FRAMES if min_frames is None else min_frames
-    return (min_frames <= length <= int(fork_comfy.SECONDS_MAX * fps)
-            and (length - fork_comfy.LENGTH_BASE) % fork_comfy.LENGTH_STEP == 0)
+    if length < min_frames:
+        return False
+    # ПОТОЛОК ЕСТЬ ТОЛЬКО ПРИ ИЗВЕСТНОЙ ЧАСТОТЕ. Он продуктовый — «петля не
+    # длиннее ролика» — то есть выражен в СЕКУНДАХ, а перевести кадры в секунды
+    # без частоты источника нельзя. Подставить сюда свою выходную частоту
+    # значило бы судить чужой материал нашей меркой (см. FPS_UNKNOWN).
+    if fps is not None and length > int(fork_comfy.SECONDS_MAX * fps):
+        return False
+    return (length - fork_comfy.LENGTH_BASE) % fork_comfy.LENGTH_STEP == 0
 
 
 def admissible_lengths(n_frames, *, fps=None, min_frames=None) -> list:
@@ -548,21 +681,37 @@ def admissible_pairs(index, *, fps=None, min_frames=None) -> list:
     позиции отстоят на шаг, поэтому длина считается по исходным номерам, а не
     по расстоянию в списке: прижатие обёртки к 4k+1 живёт в исходных кадрах.
     """
-    fps = fork_comfy.WRAP_FPS if fps is None else fps
-    top = int(fork_comfy.SECONDS_MAX * fps)
+    top = None if fps is None else int(fork_comfy.SECONDS_MAX * fps)
     out = []
     for a in range(len(index)):
         for b in range(a + 1, len(index)):
             L = index[b] - index[a] + 1
-            if L > top:
+            if top is not None and L > top:
                 break
             if length_is_admissible(L, fps=fps, min_frames=min_frames):
                 out.append((a, b))
     return out
 
 
+def shared_joints(states_list, a, b) -> int:
+    """Сколько суставов реально участвовало в сравнении пары.
+
+    ЧИСЛО СРАВНЕННЫХ СУСТАВОВ — ЧАСТЬ ОТВЕТА, А НЕ ПОДРОБНОСТЬ, и на этом
+    проекте это уже написано в `pose.pose_delta`. Здесь оно доехало до отчёта
+    после разбора: на драйвинге правое запястье видно детектору на 46 кадрах из
+    96, стык лучшей петли посчитан по 8 суставам из 12, и руки в него не вошли —
+    ровно те руки, расхождение которых видно глазом.
+    """
+    a_st, b_st = states_list[a], states_list[b]
+    if a_st is None or b_st is None:
+        return 0
+    return sum(1 for n in a_st
+               if a_st[n][1] >= pose.MIN_VISIBILITY
+               and b_st[n][1] >= pose.MIN_VISIBILITY)
+
+
 def similarity(states_list, *, fps=None, min_frames=None, index=None,
-               blocked=None) -> dict:
+               blocked=None, grays=None) -> dict:
     """Матрица самоподобия поз — в разреженном виде, по допустимым парам.
 
     ПОЧЕМУ РАЗРЕЖЕННО. Плотная матрица n×n на десятиминутном драйвинге (18000
@@ -580,7 +729,7 @@ def similarity(states_list, *, fps=None, min_frames=None, index=None,
     """
     index = list(range(len(states_list))) if index is None else list(index)
     pairs = admissible_pairs(index, fps=fps, min_frames=min_frames)
-    pose_m, flow_m = {}, {}
+    pose_m, flow_m, pix_m, joints_m = {}, {}, {}, {}
     unmeasurable = 0
     rejected: dict = {}
     for a, b in pairs:
@@ -591,17 +740,22 @@ def similarity(states_list, *, fps=None, min_frames=None, index=None,
             continue
         pg = pose_gap(states_list[a], states_list[b])
         fg = flow_gap(states_list, a, b)
+        xg = None if grays is None else pixel_gap(grays, i, j)
         pose_m[(i, j)] = pg
         flow_m[(i, j)] = fg
-        if pg is None or fg is None:
+        pix_m[(i, j)] = xg
+        joints_m[(i, j)] = shared_joints(states_list, a, b)
+        if pg is None or fg is None or (grays is not None and xg is None):
             unmeasurable += 1
-    return {"pose": pose_m, "flow": flow_m, "index": index,
+    return {"pose": pose_m, "flow": flow_m, "pixel": pix_m, "joints": joints_m,
+            "index": index,
             "pairs": len(pairs), "rejected": rejected,
             "kept": len(pose_m), "unmeasurable": unmeasurable,
             "measured": len(pose_m) - unmeasurable}
 
 
-def score_pairs(sim, step, *, flow_weight=None) -> list:
+def score_pairs(sim, step, *, flow_weight=None, pix_step=None,
+                pixel_weight=None) -> list:
     """Оценка стыка по каждой паре, в единицах обычного шага клипа.
 
     Две величины приводятся к одной единице ДО сведения, и сводятся максимумом
@@ -609,6 +763,7 @@ def score_pairs(sim, step, *, flow_weight=None) -> list:
     кандидаты не попадает: судить стык по половине свидетельства нельзя.
     """
     flow_weight = FLOW_WEIGHT if flow_weight is None else flow_weight
+    pixel_weight = PIXEL_WEIGHT if pixel_weight is None else pixel_weight
     if not step or step <= 0:
         raise ValueError(
             f"обычный шаг клипа {step!r}: делить на него нельзя. Клип, который "
@@ -616,16 +771,29 @@ def score_pairs(sim, step, *, flow_weight=None) -> list:
     out = []
     for key, pg in sim["pose"].items():
         fg = sim["flow"].get(key)
+        xg = sim.get("pixel", {}).get(key)
         if pg is None or fg is None:
+            continue
+        # Пиксельная ось необязательна ТОЛЬКО когда её не спрашивали. Если склад
+        # серых кадров есть, а стык по нему не считается — пара не измерена, и
+        # судить её по двум осям из трёх нельзя.
+        if pix_step and xg is None:
             continue
         i, j = key
         seam_pose = pg / step
         seam_flow = fg / step
+        seam_pix = (xg / pix_step) if (pix_step and xg is not None) else None
+        score = max(seam_pose, flow_weight * seam_flow)
+        if seam_pix is not None:
+            score = max(score, pixel_weight * seam_pix)
         out.append({
             "i": i, "j": j, "frames": j - i + 1,
             "pose_gap": round(pg, 4), "flow_gap": round(fg, 4),
+            "pixel_gap": None if xg is None else round(xg, 4),
             "seam_pose": round(seam_pose, 3), "seam_flow": round(seam_flow, 3),
-            "score": round(max(seam_pose, flow_weight * seam_flow), 3),
+            "seam_pixel": None if seam_pix is None else round(seam_pix, 3),
+            "joints": sim.get("joints", {}).get(key),
+            "score": round(score, 3),
         })
     out.sort(key=lambda c: (c["score"], c["i"]))
     return out
@@ -667,11 +835,18 @@ def select(cands, *, overlap_max=None, top=None) -> dict:
 def repeat_plan(length, *, fps=None) -> list:
     """Сколько повторов петли даёт продуктовую длину 5-10 с.
 
+    Считается в ЧАСТОТЕ ИСТОЧНИКА: при 24 к/с четыре повтора петли в 53 кадра
+    дают 8.71 с, а не 6.97 с, и пять повторов уже вылетают за потолок в 10 с.
+
     Склейка N повторов без дублирования стыкового кадра — N*(L-1)+1 кадров.
     Длина при этом остаётся вида 4k+1 автоматически, раз L-1 кратно 4; это
     проверяется `fork_comfy.snap_frames`, а не утверждается (Е1).
     """
-    fps = fork_comfy.WRAP_FPS if fps is None else fps
+    # Частоты нет — плана нет. Полоса 5-10 с задана в СЕКУНДАХ; сказать, сколько
+    # повторов в неё попадёт, не зная, сколько секунд в кадре, невозможно, а
+    # посчитать по своей частоте — значит выдать клиенту чужое число за его.
+    if fps is None:
+        return []
     out = []
     for n in range(1, 200):
         total = n * (length - 1) + 1
@@ -752,7 +927,8 @@ def _report(outcome, note, t0, steps, **extra) -> dict:
 
 
 def refine_all(loops, paths, *, stride, reader=None, cache=None, fps=None,
-               min_frames=None, flow_weight=None, blocked=None) -> dict:
+               min_frames=None, flow_weight=None, pixel_weight=None,
+               blocked=None, gray=None, pix_step=None) -> dict:
     """Уточнить границы петель на ПОЛНОЙ частоте в окне ±шаг вокруг найденного.
 
     Коарс-ту-файн: прорежённый проход отвечает на вопрос «где в клипе повтор»,
@@ -764,6 +940,21 @@ def refine_all(loops, paths, *, stride, reader=None, cache=None, fps=None,
     между собой, а тонкие оценки посчитаны в окнах и сравнимы только внутри
     своей петли. Смешать два масштаба в один рейтинг — это тот самый дефект
     «сложили разнородное», от которого модуль лечится в оценке стыка.
+
+    ЧЕГО УТОЧНЕНИЕ НЕ ОБЕЩАЕТ, И ЭТО ИСПРАВЛЕННОЕ ЗАВЫШЕНИЕ. Раньше здесь
+    стояло «вернёт ровно ту петлю, которую нашёл бы полный проход», и тест это
+    подтверждал — но подтверждал на фикстуре, где все выравнивания периода были
+    одинаково идеальны, то есть на ничьей. С третьей осью ничья пропала, и
+    видно честное: прорежённый проход выбирает СВОЙ период на сетке шага, а
+    уточнение доводит его границы. ИЗМЕРЕНО на маятнике 200 кадров с периодом
+    44: полный проход даёт 0..44, прорежённый — 35..79 при 124 снятых позах
+    против 200. Обе петли — настоящие периоды, но это РАЗНЫЕ петли. Экономия
+    покупается качеством границ, а не даётся даром.
+
+    И ЕЩЁ ОДНО, ЧЕГО НЕЛЬЗЯ ОБЕЩАТЬ: тонкая оценка нормирована медианами ВНУТРИ
+    ОКОН, а оценка полного прохода — медианами всего клипа. Это близкие, но
+    разные единицы (на замере выше 0.614 против 0.617), поэтому числа двух
+    проходов сравнимы приблизительно, а не порядково.
     """
     if stride <= 1 or not loops:
         return {"loops": loops, "poses": 0, "elapsed": 0.0, "windows": 0}
@@ -780,6 +971,8 @@ def refine_all(loops, paths, *, stride, reader=None, cache=None, fps=None,
     order = sorted(wanted)
     got = read_all([paths[k] for k in order], reader=reader, cache=cache)
     st = {k: v for k, v in zip(order, states(got["poses"]))}
+    grays = (keep_grays([(k, paths[k]) for k in order], gray=gray)["grays"]
+             if pix_step else {})
 
     # Шаг ПОЛНОЙ частоты — по соседним парам внутри окон, то есть по настоящим
     # соседям, а не по прорежённым. Одно число на клип, чтобы тонкие оценки
@@ -788,12 +981,21 @@ def refine_all(loops, paths, *, stride, reader=None, cache=None, fps=None,
 
     fine = [g for g in (pose_gap(st.get(k), st.get(k + 1)) for k in order)
             if g is not None]
+    # ЕДИНИЦА ОБЯЗАНА БЫТЬ ТОЙ ЖЕ ЧАСТОТЫ, ЧТО И ИЗМЕРЯЕМОЕ. Пиксельный шаг с
+    # прорежённого прохода — это переход через `stride` кадров, он в разы
+    # крупнее односкадрового; поделив на него тонкий стык, мы получили бы
+    # систематически заниженные оценки и сравнивали бы их с грубыми как с
+    # однородными. Поэтому оба типичных шага здесь пересчитываются на ПОЛНОЙ
+    # частоте, по соседним кадрам внутри окон.
+    fine_pix = [g for g in (pixel_gap(grays, k, k + 1) for k in order)
+                if g is not None] if pix_step else []
     if not fine:
         return {"loops": loops, "poses": len(order),
                 "elapsed": round(time.perf_counter() - t, 4),
                 "windows": len(windows),
                 "note": "уточнение не состоялось: на полной частоте поз нет"}
     step = float(np.median(fine))
+    pstep = float(np.median(fine_pix)) if fine_pix else None
     out = []
     for lp, (wi, wj) in zip(loops, windows):
         best = None
@@ -809,19 +1011,35 @@ def refine_all(loops, paths, *, stride, reader=None, cache=None, fps=None,
                       else _flow_between(st, i, j))
                 if pg is None or fg is None or step <= 0:
                     continue
-                sc = round(max(pg / step, (FLOW_WEIGHT if flow_weight is None
-                                           else flow_weight) * fg / step), 3)
+                xg = pixel_gap(grays, i, j) if pstep else None
+                if pstep and xg is None:
+                    continue
+                fw = FLOW_WEIGHT if flow_weight is None else flow_weight
+                xw = PIXEL_WEIGHT if pixel_weight is None else pixel_weight
+                sc = max(pg / step, fw * fg / step)
+                if xg is not None:
+                    sc = max(sc, xw * xg / pstep)
+                sc = round(sc, 3)
                 if best is None or sc < best["score"]:
                     best = {"i": i, "j": j, "frames": j - i + 1,
                             "pose_gap": round(pg, 4), "flow_gap": round(fg, 4),
+                            "pixel_gap": None if xg is None else round(xg, 4),
                             "seam_pose": round(pg / step, 3),
-                            "seam_flow": round(fg / step, 3), "score": sc}
+                            "seam_flow": round(fg / step, 3),
+                            "seam_pixel": (None if xg is None
+                                           else round(xg / pstep, 3)),
+                            "joints": sum(
+                                1 for nm in (st.get(i) or {})
+                                if st[i][nm][1] >= pose.MIN_VISIBILITY
+                                and st[j][nm][1] >= pose.MIN_VISIBILITY),
+                            "score": sc}
         item = dict(lp)
         if best is not None:
             item["coarse"] = {"i": lp["i"], "j": lp["j"], "score": lp["score"]}
             item.update(best)
         out.append(item)
     return {"loops": out, "poses": len(order), "fine_step": round(step, 4),
+            "fine_pixel_step": None if pstep is None else round(pstep, 4),
             "elapsed": round(time.perf_counter() - t, 4), "windows": len(windows)}
 
 
@@ -844,14 +1062,18 @@ def _flow_between(st, i, j):
 
 def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
                cache=None, min_frames=None, overlap_max=None, top=None,
-               advantage_min=None, flow_weight=None, gif=True, decode=None,
-               stride=None, max_frames=None) -> dict:
+               advantage_min=None, flow_weight=None, pixel_weight=None,
+               gif=True, decode=None, stride=None, max_frames=None) -> dict:
     """Найти петли в драйвинге. Дешёвое раньше дорогого (П2), три исхода (Р1).
 
     `source` — каталог кадров или видеофайл. Видео раскодируется
     `fork_video.frames` (Е1: своего раскодировщика здесь нет).
     """
-    fps = fork_comfy.WRAP_FPS if fps is None else fps
+    # ЧАСТОТА — ВХОД, А НЕ УМОЛЧАНИЕ. Подана руками — берём её; видеофайл —
+    # снимаем с него (Е1: снимает `fork_video`, своего разбора здесь нет);
+    # каталог кадров без указания — она НЕИЗВЕСТНА, и это третий исход, а не
+    # повод подставить нашу выходную `WRAP_FPS`.
+    fps_source = FPS_UNKNOWN if fps is None else FPS_GIVEN
     min_frames = LOOP_MIN_FRAMES if min_frames is None else min_frames
     advantage_min = ADVANTAGE_MIN if advantage_min is None else advantage_min
     top = TOP_LOOPS if top is None else top
@@ -875,6 +1097,12 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
                           time.perf_counter() - t0))
             return _report(got["outcome"], got["note"], t, steps, frames=0)
         paths = [Path(p) for p in got["paths"]]
+        if fps is None:
+            # Кадры раскодированы КАК ЕСТЬ, значит частота выхода равна
+            # частоте источника; второй раз спрашивать ffprobe незачем (П2).
+            probed = got.get("fps_out") or got.get("fps_in")
+            if probed:
+                fps, fps_source = probed, FPS_PROBED
     else:
         note = f"{src} — не каталог кадров и не файл"
         steps.append(("кадры", UNMEASURED, note, time.perf_counter() - t0))
@@ -888,12 +1116,22 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
         steps.append(("кадры", FAIL, note, time.perf_counter() - t0))
         return _report(FAIL, note, t, steps, frames=n, scan=SCAN_FULL)
     if n > max_frames:
-        note = (f"кадров {n}, потолок {max_frames} ({max_frames / fps / 60:.0f} "
-                f"минут при {fps} к/с). Даже по прорежённой это "
+        note = (f"кадров {n}, потолок {max_frames} "
+                f"({max_frames / fork_comfy.WRAP_FPS / 60:.0f} минут при наших "
+                f"{fork_comfy.WRAP_FPS} к/с). Даже по прорежённой это "
                 f"{n / (COARSE_STRIDE or 1) * 0.031 / 60:.0f}+ минут одного "
                 f"только снятия поз — разбирать не беремся. Нарежьте материал")
         steps.append(("кадры", UNMEASURED, note, time.perf_counter() - t0))
         return _report(UNMEASURED, note, t, steps, frames=n, scan=SCAN_TOO_LONG)
+
+    steps.append(("частота",
+                  PASS if fps is not None else UNMEASURED,
+                  (f"частота источника {fps} к/с ({fps_source})"
+                   if fps is not None else
+                   f"частота источника {FPS_UNKNOWN}: у каталога кадров её не "
+                   f"записано нигде. Длины петель печатаются В КАДРАХ, секунды "
+                   f"и план повторов — НЕТ. Задайте --fps, если знаете её"),
+                  0.0))
 
     stride = (COARSE_STRIDE if n > COARSE_ABOVE_FRAMES else 1) \
         if stride is None else stride
@@ -988,9 +1226,18 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
         return None
 
     t0 = time.perf_counter()
+    store = keep_grays([(k, paths[k]) for k in index], gray=gray)
+    pstep = pixel_step(store["grays"], index)
+    steps.append(("картинка", PASS if pstep else UNMEASURED,
+                  f"серых кадров в памяти {store['frames']}, "
+                  f"{store['bytes'] / 1048576:.1f} МБ; типичный пиксельный "
+                  f"переход " + (f"{pstep:.3f}" if pstep else
+                                 "НЕ ИЗМЕРЕН — пиксельная ось выключена"),
+                  store["elapsed"]))
     sim = similarity(st, fps=fps, min_frames=min_frames, index=index,
-                     blocked=blocked)
-    cands = score_pairs(sim, step_info["step"], flow_weight=flow_weight)
+                     blocked=blocked, grays=store["grays"] if pstep else None)
+    cands = score_pairs(sim, step_info["step"], flow_weight=flow_weight,
+                        pix_step=pstep, pixel_weight=pixel_weight)
     sim_elapsed = time.perf_counter() - t0
     blocked_note = ("; ".join(f"{why}: {cnt}"
                               for why, cnt in sorted(sim["rejected"].items()))
@@ -1045,7 +1292,8 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
     # 6. Уточнение на полной частоте — только вокруг найденного.
     fine = refine_all(chosen["kept"], paths, stride=stride, reader=reader,
                       cache=cache, fps=fps, min_frames=min_frames,
-                      flow_weight=flow_weight, blocked=blocked)
+                      flow_weight=flow_weight, pixel_weight=pixel_weight,
+                      blocked=blocked, gray=gray, pix_step=pstep)
     if stride > 1:
         steps.append(("уточнение", PASS,
                       f"окон {fine['windows']}, снято поз {fine['poses']} на "
@@ -1055,7 +1303,7 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
     for rank, c in enumerate(fine["loops"], 1):
         loop = dict(c)
         loop["rank"] = rank
-        loop["seconds"] = round(c["frames"] / fps, 2)
+        loop["seconds"] = None if fps is None else round(c["frames"] / fps, 2)
         loop["advantage"] = (round(median_score / c["score"], 2)
                              if c["score"] > 0 else None)
         loop["repeats"] = repeat_plan(c["frames"], fps=fps)
@@ -1064,6 +1312,11 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
             loop["gif"] = make_gif(
                 paths, c["i"], c["j"],
                 Path(out_dir) / f"loop_{c['i']:04d}_{c['j']:04d}.gif", fps=fps)
+            if fps is None and loop["gif"]:
+                loop["gif"]["note"] = (
+                    f"скорость показа взята {fork_comfy.WRAP_FPS} к/с, потому "
+                    f"что частота источника неизвестна: движение на GIF может "
+                    f"идти быстрее или медленнее настоящего")
         loops.append(loop)
 
     short = ("" if len(loops) >= top else
@@ -1079,6 +1332,8 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
             f"РАНГ, а не вердикт: планки бесшовности для расстояния поз у "
             f"проекта нет")
     return _report(PASS, note, t, steps, frames=n, taken=got["taken"],
+                   fps=fps, fps_source=fps_source,
+                   pixel_step=None if pstep is None else round(pstep, 4),
                    coverage=round(coverage, 3), pairs=sim["pairs"],
                    measured_pairs=sim["measured"],
                    unmeasurable_pairs=sim["unmeasurable"],
@@ -1096,19 +1351,39 @@ def find_loops(source, *, out_dir=None, fps=None, reader=None, gray=None,
 
 
 def table(report) -> str:
-    """Таблица петель для человека."""
-    rows = [f"{'#':>2} {'кадры':>11} {'длина':>6} {'сек':>5} {'стык':>6} "
-            f"{'поза':>6} {'поток':>6} {'выигрыш':>8}  повторы -> с        GIF"]
+    """Таблица петель для человека.
+
+    СЕКУНДЫ ПЕЧАТАЮТСЯ, ТОЛЬКО ЕСЛИ ЧАСТОТА ИСТОЧНИКА ИЗВЕСТНА. Клиент выбирает
+    петлю в том числе по длине, а длина в секундах без частоты — это наше число,
+    выданное за его. Кадры печатаются всегда: они измерены.
+    """
+    fps = report.get("fps")
+    head = (f"{'#':>2} {'кадры':>11} {'кадров':>6} {'сек':>6} {'суст':>4} "
+            f"{'стык':>6} {'поза':>6} {'поток':>6} {'пиксели':>7} {'выигрыш':>8}"
+            f"  повторы -> с        GIF")
+    rows = [head]
     for lp in report.get("loops", []):
-        rep = ", ".join(f"{r['repeats']}x={r['frames']}к/{r['seconds']}с"
-                        for r in lp["repeats"]) or "нет в полосе 5-10 с"
+        rep = (", ".join(f"{r['repeats']}x={r['frames']}к/{r['seconds']}с"
+                         for r in lp["repeats"])
+               or ("частота неизвестна — план не считается"
+                   if fps is None else "нет в полосе 5-10 с"))
         g = lp.get("gif") or {}
         gtxt = (f"{Path(g['path']).name} {g['frames']}к {g['bytes']}Б"
                 if g.get("path") else "-")
+        secs = "—" if lp.get("seconds") is None else f"{lp['seconds']}"
+        pix = "—" if lp.get("seam_pixel") is None else f"{lp['seam_pixel']}"
         rows.append(f"{lp['rank']:>2} {lp['i']:>5}..{lp['j']:<5} "
-                    f"{lp['frames']:>6} {lp['seconds']:>5} {lp['score']:>6} "
-                    f"{lp['seam_pose']:>6} {lp['seam_flow']:>6} "
-                    f"{str(lp['advantage']) + 'x':>8}  {rep}  {gtxt}")
+                    f"{lp['frames']:>6} {secs:>6} {str(lp.get('joints')):>4} "
+                    f"{lp['score']:>6} {lp['seam_pose']:>6} {lp['seam_flow']:>6} "
+                    f"{pix:>7} {str(lp['advantage']) + 'x':>8}  {rep}  {gtxt}")
+    if fps is None:
+        rows.append("    секунды и план повторов не печатаются: частота "
+                    "источника неизвестна (см. шаг «частота»)")
+    if any(lp.get("joints") not in (None, len(pose.BODY_POINTS))
+           for lp in report.get("loops", [])):
+        rows.append(f"    «суст» — сколько суставов из {len(pose.BODY_POINTS)} "
+                    f"реально сравнивалось: остальные детектор не видел, и в "
+                    f"оценку позы они не вошли")
     return "\n".join(rows)
 
 

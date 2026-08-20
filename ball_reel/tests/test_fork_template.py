@@ -264,24 +264,71 @@ class Frames(Base):
 
 
 class Fps(Base):
-    def test_a_frequency_other_than_thirty_is_caught(self):
+    def test_a_card_below_thirty_is_allowed_because_it_can_be_inherited(self):
+        """~~Прежде поле требовало ровно 30.~~
+
+        Поле `fps` карточки — это частота ВЫХОДА, а она при источнике ниже 30
+        наследуется. Для ролика 24 к/с честное значение здесь 24, и требовать
+        30 значило бы требовать невозможного: такой ролик не прошёл бы
+        карточку НИКОГДА — ни с 24 (отказ поля), ни с 30 (расхождение с
+        источником). Это противоречие я создал сам, правя соседнее правило.
+        """
         rep = self.check(self.fixture(fps=24).desc)
+        self.assertEqual(self.axis(rep, "частота")["outcome"], PASS)
+
+    def test_above_the_ceiling_is_still_refused(self):
+        """Потолок жёсткий: выше 30 не отдаём никогда."""
+        rep = self.check(self.fixture(fps=60).desc)
         self.assertEqual(self.axis(rep, "частота")["outcome"], FAIL)
+        self.assertIn("потолка", self.axis(rep, "частота")["note"])
+
+    def test_a_nonsense_frequency_is_refused(self):
+        for value in (0, -30, "тридцать", True):
+            with self.subTest(fps=value):
+                rep = self.check(self.fixture(fps=value).desc)
+                self.assertEqual(self.axis(rep, "частота")["outcome"], FAIL)
 
     def test_thirty_is_silent(self):
         rep = self.check(self.fixture(fps=30).desc)
         self.assertEqual(self.axis(rep, "частота")["outcome"], PASS)
 
-    def test_a_source_below_thirty_is_caught(self):
-        rep = self.check(self.fixture().desc, prober=_fps(25))
-        self.assertOnlyBroken(rep, "частота драйвинга")
+    def test_a_source_below_thirty_is_inherited_not_refused(self):
+        """~~Прежде ниже 30 был отказ.~~ Правило владельца 20.08.2026.
 
-    def test_a_source_at_or_above_thirty_is_silent(self):
+        Отказ вырос из посылки «все сурсы будут выше 24 кадра», и она не
+        подтвердилась на первом же боевом ролике проекта: 24 к/с. Карточка
+        отвергала собственный материал. Теперь ниже 30 частота НАСЛЕДУЕТСЯ.
+        """
+        rep = self.check(self.fixture(fps=24).desc, prober=_fps(24))
+        got = self.axis(rep, "частота драйвинга")
+        self.assertEqual(got["outcome"], PASS)
+        # Литералы, не импорт (Т2): 24 и 30 — числа решения владельца.
+        self.assertIn("НАСЛЕДУЕТ", got["note"])
+        self.assertIn("24", got["note"])
+
+    def test_a_source_at_or_above_thirty_is_fixed_at_thirty(self):
         for value in (30, 60):
             with self.subTest(fps=value):
-                rep = self.check(self.fixture().desc, prober=_fps(value))
-                self.assertEqual(
-                    self.axis(rep, "частота драйвинга")["outcome"], PASS)
+                rep = self.check(self.fixture(fps=30).desc, prober=_fps(value))
+                got = self.axis(rep, "частота драйвинга")
+                self.assertEqual(got["outcome"], PASS)
+                self.assertIn("ФИКСИРОВАН", got["note"])
+
+    def test_the_card_fps_that_disagrees_with_the_output_is_named(self):
+        """Карточка говорит 30, источник 24 — выход будет 24, и это скажут.
+
+        Молчание здесь стоило бы длины ролика: оператор заказал бы по 30, а
+        получил по 24, и разошлось бы всё, что считается через частоту.
+        """
+        rep = self.check(self.fixture(fps=30).desc, prober=_fps(24))
+        got = self.axis(rep, "частота драйвинга")
+        self.assertIn("РАСХОДИТСЯ", got["note"])
+
+    def test_a_matching_card_says_nothing_about_disagreement(self):
+        """Негативный контроль (И5): проверка обязана уметь и молчать."""
+        rep = self.check(self.fixture(fps=24).desc, prober=_fps(24))
+        self.assertNotIn("РАСХОДИТСЯ",
+                         self.axis(rep, "частота драйвинга")["note"])
 
     def test_no_prober_is_unmeasured_and_not_a_pass(self):
         rep = self.check(self.fixture().desc, prober=_blind)
