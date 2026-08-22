@@ -6,6 +6,25 @@
 **Существующие модули `ball_reel/*` не правятся.** Заменитель `ffprobe`
 подаётся через объявленную точку внедрения `prober=`, а не правкой модуля (Ц2).
 
+## Начинать с приёмки — она стоит секунды и называет блокер
+
+```bash
+python3 -m fork_bench.fork_bench_preflight
+```
+
+Дешёвая проверка раньше дорогой (П2). Две смены подряд выясняли блокеры
+вручную и обе потратили на это основное время. Прибор спрашивает домены (с
+негативным контролем `pypi.org`), ключи, **баланс обоих вендоров** и наличие
+входа, и печатает `проверено N, блокирует M, не смогли K`.
+
+Состояние на 22.08.2026, вторая смена:
+
+    [годно   ] домены         все 5 хостов открыты; контроль pypi.org 200
+    [годно   ] ключи          оба ключа заданы
+    [не годно] баланс fal.ai  баланс = 0.0
+    [не годно] баланс Kling   code 1102 «Account balance not enough»
+    [не годно] вход           assets/driving_yogaball.mp4 нет на диске
+
 ## Ключи
 
 Только из окружения. В код, в лог, в карточку и в имя файла они не попадают
@@ -14,17 +33,18 @@
 
     export FAL_KEY=...
     export KLING_KEY=...
-    export KLING_BASE=...   # база API Kling, из кабинета
-    export KLING_PATH=...   # путь метода Motion Control, из документации
 
-`KLING_BASE`/`KLING_PATH` обязательны намеренно: непроверенное внешнее имя в
-код не вписывается (Ц10), поэтому скрипт скорее откажется работать, чем
-угадает путь и молча отправит запрос не туда.
+`KLING_BASE`/`KLING_PATH` больше НЕ обязательны: база и путь подтверждены
+ответом сервиса (см. докстринг `fork_bench_kling.py`), с негативным контролем
+на четырёх выдуманных путях. Переменные остались как переопределение.
 
 ## Порядок
 
 ```bash
-pip install fal-client insightface onnxruntime numpy opencv-python-headless av
+pip install fal-client insightface onnxruntime numpy opencv-python-headless av httpx
+
+# 0. что блокирует прямо сейчас
+python3 -m fork_bench.fork_bench_preflight
 
 # 1. один и тот же вход для всех, с проверкой ПОСЛЕ реза
 python3 -m fork_bench.fork_bench_input assets/driving_yogaball.mp4 work/bench_driving.mp4
@@ -33,8 +53,8 @@ python3 -m fork_bench.fork_bench_input assets/driving_yogaball.mp4 work/bench_dr
 python3 -m fork_bench.fork_bench_fal 480p
 python3 -m fork_bench.fork_bench_fal 720p
 
-# 3. планка тир-1
-python3 -m fork_bench.fork_bench_kling
+# 3. планка тир-1. Драйвинг уходит ССЫЛКОЙ: base64 в video_url отвергается
+python3 -m fork_bench.fork_bench_kling https://.../bench_driving.mp4
 
 # 4. судим ЛЮБОЙ полученный ролик нашими приборами
 python3 -m fork_bench.fork_bench_measure work/fal_out.mp4 work/fal_frames
@@ -48,7 +68,7 @@ python3 -m fork_bench.fork_bench_measure work/fal_out.mp4 work/fal_frames
 ## Три исхода, а не два
 
 Каждый прибор возвращает `годно` / `не годно` / **`не смогли проверить`**.
-Третий не сворачивается ни в первый, ни во второй: «домен закрыт», «файла
-нет» и «лицо мельче планки» — это НЕ «плохой ролик».
+Третий не сворачивается ни в первый, ни во второй: «баланс пуст», «файла нет»
+и «лицо мельче планки» — это НЕ «плохой ролик».
 
 Рядом с вердиктом всегда числа: `проверено N`, `в баре M`, `не смогли K`.
