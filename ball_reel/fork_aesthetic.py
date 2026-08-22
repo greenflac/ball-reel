@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -61,6 +62,146 @@ IDENTITY_CLAUSE = (
     "identity and the description applies only to wardrobe, hairstyling, "
     "setting, lens, lighting, pose and mood"
 )
+
+# ---------------------------------------------------------------------------
+# АНТРОПОМЕТРИЯ. Решение владельца 22.08: «антропометрию мы всю вырезаем»
+# ---------------------------------------------------------------------------
+#
+# ПОЧЕМУ ЭТОГО НЕ РЕШИТЬ ОДНОЙ СТРОКОЙ В ПРОМТЕ. Строка «личность идёт с
+# картинки» уже стояла и ПРОИГРАЛА: ИЗМЕРЕНО на шести эстетиках — те, где
+# промт описывает лицо, ушли в среднюю полосу (y2k 0.3966, country 0.4399 при
+# планке 0.35), а где не описывает — остались (icecream 0.1310, tomatoes
+# 0.1458). Глазом на y2k видно то же: наша блондинка стала шатенкой, потому
+# что «brunette hair» весит больше, чем «same hair colour».
+#
+# ДВА РАЗНЫХ РЕЗА, ПОТОМУ ЧТО АНТРОПОМЕТРИЯ СИДИТ ДВУМЯ РАЗНЫМИ СПОСОБАМИ:
+#   оборотом целиком   «she has warm tanned skin with visible freckles»
+#   одним словом внутри нужного оборота  «brunette hair styled in a messy bun»
+# Резать всё оборотами значило бы унести причёску вместе с цветом волос.
+
+#: ВЫБРАНО (кем: этот модуль; из чего: обороты шести промтов владельца).
+#:
+#: ОБРАЗЦЫ, А НЕ СЛОВА, и это ИСПРАВЛЕНИЕ ИЗМЕРЕННОЙ ОШИБКИ. Первая редакция
+#: резала оборот по голому слову и унесла три невиновных:
+#:   «one hand raised near her lips holding a lip gloss applicator» — поза,
+#:      сердце эстетики y2k, унесена из-за слова «lips»
+#:   «high contrast yet natural skin texture» — качество рендера, не человек
+#:   «highly detailed textures of fabric skin and accessories» — то же
+#: Голое слово «skin» встречается и в описании кожи, и в требовании к
+#: текстуре. Различает их не слово, а оборот вокруг него.
+ANTHROPOMETRY_CLAUSES = (
+    r"\bhas\b[^,]*\bskin\b",                 # she has warm tanned skin
+    r"\b\w+ skin with\b",                     # flawless skin with ...
+    r"\bflawless skin\b",
+    r"\bfreckles?\b",
+    r"\bcomplexion\b",
+    r"\b(green|blue|brown|hazel|grey|gray|dark|light|piercing) eyes\b",
+    r"\bfacial features?\b",
+    r"\bcheekbones?\b",
+    r"\bjawline\b",
+    r"\bbody type\b",
+    r"\bphysique\b",
+)
+
+#: ВЫБРАНО: то, что уносится ПООДИНОЧКЕ, оставляя оборот на месте. Здесь
+#: живут прилагательные: «extremely beautiful woman seated in a minimal
+#: armchair placed in a vast Scottish landscape» — оборот несёт ВСЮ сцену, и
+#: унести его целиком значило бы выбросить эстетику вместе с антропометрией.
+#: Усилитель уносится вместе с прилагательным, иначе остаётся висеть
+#: «extremely person».
+ANTHROPOMETRY_WORDS = (
+    r"\b(?:extremely|very|incredibly|stunningly|exceptionally)?\s*beautiful\b",
+    r"\bsupermodel-level\b", r"\bsupermodel\b", r"\bbeauty\b",
+    r"\b(?:extremely|very)?\s*(?:gorgeous|stunning|attractive|pretty)\b",
+    r"\bbrunette\b", r"\bblonde?\b", r"\bplatinum\b", r"\bginger\b",
+    r"\bauburn\b", r"\bredhead\b", r"\b(?:red|dark|fair)-haired\b",
+    r"\btanned\b", r"\b(?:olive|pale|fair)-skinned\b",
+    r"\bslavic\b", r"\bnordic\b", r"\bscandinavian\b", r"\basian\b",
+    r"\bafrican\b", r"\blatina\b", r"\bcaucasian\b",
+    r"\bslim\b", r"\bcurvy\b", r"\bpetite\b", r"\bathletic\b",
+)
+
+#: ВЫБРАНО: пол — тоже антропометрия. Клиентом может оказаться кто угодно, а
+#: слово «woman» воюет с картинкой ровно так же, как «brunette».
+#: Порядок значим: длинные формы раньше коротких, иначе «her» съест «hers».
+GENDER_SWAPS = (
+    ("women", "people"), ("woman", "person"), ("men", "people"),
+    ("man", "person"), ("girl", "person"), ("boy", "person"),
+    ("lady", "person"), ("female", "person"), ("male", "person"),
+    ("herself", "themselves"), ("himself", "themselves"),
+    ("hers", "theirs"), ("her", "their"), ("his", "their"),
+    ("she", "they"), ("he", "they"),
+)
+
+
+def _clause_is_anthropometric(clause: str) -> str | None:
+    """Образец, по которому оборот признан описанием человека, или None."""
+    for pattern in ANTHROPOMETRY_CLAUSES:
+        if re.search(pattern, clause, re.IGNORECASE):
+            return pattern
+    return None
+
+
+def strip_anthropometry(prompt: str) -> dict:
+    """Убрать из промта всё, что описывает ЧЕЛОВЕКА, оставив всё про КАДР.
+
+    Возвращает не только новый текст, но и ЧТО ИМЕННО унесено: рез, который
+    нельзя прочитать, неотличим от реза, которого не было.
+
+    Три исхода: `не смогли`, если резать нечего; `годно` в остальных случаях,
+    В ТОМ ЧИСЛЕ когда не унесено ничего — это не ошибка, а негативный контроль
+    резака на чистом промте.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {**tally(0, 0, 1), "prompt": None, "dropped": [], "words": [],
+                "genders": [], "cut_share": None,
+                "note": "промта нет: резать нечего"}
+
+    kept, dropped = [], []
+    for clause in prompt.split(","):
+        hit = _clause_is_anthropometric(clause)
+        if hit:
+            dropped.append({"clause": clause.strip(), "pattern": hit})
+        else:
+            kept.append(clause)
+    text = ",".join(kept)
+
+    words = []
+    for pattern in ANTHROPOMETRY_WORDS:
+        text, n = re.subn(pattern + r"\s*", "", text, flags=re.IGNORECASE)
+        if n:
+            words.append({"pattern": pattern, "times": n})
+
+    genders = []
+    for src, dst in GENDER_SWAPS:
+        text, n = re.subn(rf"\b{re.escape(src)}\b", dst, text,
+                          flags=re.IGNORECASE)
+        if n:
+            genders.append({"from": src, "to": dst, "times": n})
+
+    # СЛЕДЫ ОПЕРАЦИИ, а не часть промта. Каждый наблюдался на боевых промтах
+    # владельца, и каждый модель читает как значащий: сдвоенный пробел и
+    # висящая запятая — как паузу, «an person» и строчная буква после точки —
+    # как небрежность, за которой она тянется в остальном кадре.
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r"(,\s*){2,}", ", ", text).strip().strip(",").strip()
+    # Артикль после унесённого прилагательного: «an extremely beautiful woman»
+    # -> «an person». Согласуем по первой букве следующего слова.
+    text = re.sub(r"\ban\s+(?=[^aeiouAEIOU\s])", "a ", text)
+    text = re.sub(r"\ba\s+(?=[aeiouAEIOU])", "an ", text)
+    # Заглавная в начале предложения: «14mm lens. person with sleek hair».
+    text = re.sub(r"(^|[.!?]\s+)([a-z])",
+                  lambda m: m.group(1) + m.group(2).upper(), text)
+
+    return {**tally(1, 0, 0), "prompt": text,
+            "dropped": dropped, "words": words, "genders": genders,
+            "cut_share": round(1 - len(text.split()) / len(prompt.split()), 4),
+            "note": (f"оборотов унесено {len(dropped)}, слов тела "
+                     f"{sum(w['times'] for w in words)}, замен пола "
+                     f"{sum(g['times'] for g in genders)}; слов было "
+                     f"{len(prompt.split())}, стало {len(text.split())}")}
+
 
 #: Три исхода вместо двух живут и здесь: «эстетика не собралась» и «эстетика
 #: плохая» — разные события, и путать их дорого.
@@ -143,7 +284,7 @@ def no_brands_clause() -> str:
     return NO_BRANDS_CLAUSE
 
 
-def compose(aesthetic, *, with_ban: bool = True) -> dict:
+def compose(aesthetic, *, with_ban: bool = True, cut_body: bool = True) -> dict:
     """Промт эстетики: материал владельца + разрешение конфликта личности.
 
     Порядок ВЫБРАН и не случаен: промт владельца идёт ПЕРВЫМ и целиком, потому
@@ -155,18 +296,27 @@ def compose(aesthetic, *, with_ban: bool = True) -> dict:
     if not isinstance(aesthetic, dict) or not aesthetic.get("prompt"):
         return {**tally(0, 0, 1), "prompt": None,
                 "note": "эстетика без промта: собирать нечего"}
-    parts = [aesthetic["prompt"].strip(), IDENTITY_CLAUSE]
+    # РЕЗ ИДЁТ ПЕРВЫМ, до всех наших приписок. Иначе резак прошёлся бы и по
+    # IDENTITY_CLAUSE, где слова «same face» и «same skin tone» стоят намеренно
+    # и обязаны выжить: это единственное место, которому антропометрия нужна.
+    own = aesthetic["prompt"].strip()
+    cut = strip_anthropometry(own) if cut_body else None
+    body = cut["prompt"] if cut and cut["outcome"] == PASS else own
+
+    parts = [body, IDENTITY_CLAUSE]
     if with_ban:
         parts.append(no_brands_clause())
     text = ". ".join(parts)
+    how = ("промт владельца без антропометрии" if cut_body else
+           "промт владельца ДОСЛОВНО (РЕЗ ОТКЛЮЧЁН ЯВНО)")
     return {**tally(1, 0, 0), "prompt": text,
             "id": aesthetic.get("id"), "kind": aesthetic.get("kind"),
-            "words": len(text.split()),
+            "words": len(text.split()), "cut": cut,
             "brand_conflict": brand_conflict(aesthetic),
             "note": (f"эстетика {aesthetic.get('id')}: слов {len(text.split())}, "
-                     f"промт владельца дословно + личность"
-                     + ("+ запрет надписей" if with_ban else
-                        " (ЗАПРЕТ НАДПИСЕЙ ОТКЛЮЧЁН ЯВНО)"))}
+                     f"{how} + личность"
+                     + ("" if with_ban else " (ЗАПРЕТ НАДПИСЕЙ ОТКЛЮЧЁН ЯВНО)")
+                     + (f"; {cut['note']}" if cut else ""))}
 
 
 # ---------------------------------------------------------------------------
