@@ -103,9 +103,29 @@ KLING_LATENCY_S = (107.4, 190.0)
 #: тогда как ранний обрыв стоит ДЕНЕГ — заказ уже оплачен.
 KLING_WAIT_S = 1520
 
-#: ИЗМЕРЕНО на выходе обоих боевых заказов: 960x960, 30 к/с.
+#: ИЗМЕРЕНО на восьми боевых заказах до 22.08 включительно: 960x960, 30 к/с.
+#: Оставлено как ИСТОРИЯ, а не как требование — см. ниже, почему.
 KLING_OUT_SIZE = (960, 960)
 KLING_OUT_FPS = 30.0
+
+#: ЧТО ПРОВЕРЯЕТСЯ НА САМОМ ДЕЛЕ: ВЕРТИКАЛЬНОСТЬ, а не конкретные числа.
+#:
+#: ПОЧЕМУ ПЕРЕПИСАНО. Первая редакция сверяла выход с `KLING_OUT_SIZE` и
+#: забраковала боевой прогон, вернувший **816x1104** — то есть ВЕРТИКАЛЬ,
+#: которой мы весь день добивались и считали недостижимой. Прибор был прав по
+#: букве и неправ по существу: он сторожил старое знание и завернул самый
+#: желанный исход. Это ровно тот дефект, из-за которого планка не должна
+#: стоять на числе, если продукту важно СВОЙСТВО.
+#:
+#: ЧТО ИЗМЕНИЛОСЬ МЕЖДУ ЗАКАЗАМИ: на вход подавалось СТИЛИЗОВАННОЕ фото
+#: 768x1024 (вертикальное) вместо квадратного. Похоже, Kling наследует
+#: пропорции от ФОТОГРАФИИ, а не от драйвинга. НЕПРОВЕРЕНО: одно наблюдение,
+#: одна пара. Проверяется одним заказом с квадратным фото.
+#:
+#: ВЫБРАНО 1.0: выше — горизонталь, и это брак для вертикального продукта.
+#: Квадрат (ровно 1.0) допускается: восемь заказов его давали, и он режется
+#: в 9:16 кропом, просто дороже по потерям.
+OUT_RATIO_MAX = 1.0
 
 #: ИЗМЕРЕНО: гейт Kling отвергает «Video duration can not less than 3s», и все
 #: три обхода проверены и не работают (растяжка частоты вернула 88 кадров
@@ -939,7 +959,7 @@ def stage_kling(*, styled, window, out_path, upload=None, kling=None,
 
 def stage_output_acceptance(*, produced, client_photo, frames_dir,
                             probe=None, decode=None, distances=None,
-                            cuts=None) -> dict:
+                            cuts=None, operator_ok_identity=False) -> dict:
     """Геометрия, личность и монтажные резы на выходе Kling."""
     checks, numbers = [], {}
     probe = _default_probe() if probe is None else probe
@@ -951,13 +971,28 @@ def stage_output_acceptance(*, produced, client_photo, frames_dir,
     if not info.get("width"):
         checks.append(("геометрия выхода", UNMEASURED, str(info.get("note"))[:200]))
     else:
-        want_w, want_h = KLING_OUT_SIZE
-        same = ((info.get("width"), info.get("height")) == KLING_OUT_SIZE
-                and info.get("fps") == KLING_OUT_FPS)
-        checks.append(("геометрия выхода", PASS if same else FAIL,
-                       f"{info.get('width')}x{info.get('height')} при "
-                       f"{info.get('fps')} к/с; измерено на боевых заказах "
-                       f"{want_w}x{want_h} при {KLING_OUT_FPS} к/с"))
+        w, h = info.get("width"), info.get("height")
+        ratio = w / h
+        numbers["ratio"] = round(ratio, 4)
+        known = (w, h) == KLING_OUT_SIZE
+        fps_ok = info.get("fps") == KLING_OUT_FPS
+        if ratio > OUT_RATIO_MAX:
+            checks.append(("геометрия выхода", FAIL,
+                           f"{w}x{h}, соотношение {ratio:.4f} > "
+                           f"{OUT_RATIO_MAX}: ГОРИЗОНТАЛЬ, для вертикального "
+                           f"продукта это брак"))
+        elif not fps_ok:
+            checks.append(("геометрия выхода", UNMEASURED,
+                           f"{w}x{h} при {info.get('fps')} к/с вместо "
+                           f"{KLING_OUT_FPS}: частота не та, сборка звука "
+                           f"считает кадры по 30 — судить нечем"))
+        else:
+            was = "как на прежних заказах" if known else (
+                f"НОВАЯ геометрия, прежние восемь давали "
+                f"{KLING_OUT_SIZE[0]}x{KLING_OUT_SIZE[1]}")
+            checks.append(("геометрия выхода", PASS,
+                           f"{w}x{h}, соотношение {ratio:.4f} при потолке "
+                           f"{OUT_RATIO_MAX} — вертикаль или квадрат; {was}"))
 
     decode = _default_decode() if decode is None else decode
     try:
@@ -985,10 +1020,36 @@ def stage_output_acceptance(*, produced, client_photo, frames_dir,
     if d.get("outcome") == UNMEASURED:
         checks.append(("личность на выходе", UNMEASURED, str(d.get("note"))[:300]))
     else:
-        checks.append(("личность на выходе", d.get("outcome"),
-                       f"медиана {d.get('median')} при планке {SAME_PERSON_MAX}, "
-                       f"в баре {d.get('inside')} из {d.get('judged')} судимых "
-                       f"(лестница: 0.7137 другой, 1.0217 чужой)"))
+        # ТА ЖЕ ЛЕСТНИЦА, ЧТО НА СТИЛИЗОВАННОМ ФОТО (Е1: одно знание — одно
+        # место). Причина та же и измерена: аксессуар со стилевого референса
+        # доезжает до ролика и закрывает лицо на всех кадрах — боевой прогон
+        # 22.08 дал 0.5109 при 0 из 99 в баре, при том что тот же Kling на
+        # НЕстилизованном фото давал 0.2430 и 98 из 99. Это окклюзия, а не
+        # подмена личности, и «не годно» тут было бы неправдой.
+        med = d.get("median")
+        tail = (f"в баре {d.get('inside')} из {d.get('judged')} судимых "
+                f"(лестница: {LADDER_SAME} тот же, {LADDER_REJECTED} другой, "
+                f"{LADDER_STRANGER} чужой)")
+        if med is None:
+            checks.append(("личность на выходе", UNMEASURED,
+                           "медианы нет: судить нечем"))
+        elif med <= SAME_PERSON_MAX:
+            checks.append(("личность на выходе", PASS,
+                           f"медиана {med} при планке {SAME_PERSON_MAX}, {tail}"))
+        elif med < LADDER_REJECTED:
+            band = (f"медиана {med} между планкой {SAME_PERSON_MAX} и ступенью "
+                    f"«другой человек» {LADDER_REJECTED}: лицо ЧАСТИЧНО "
+                    f"ЗАКРЫТО, ArcFace здесь НЕ СУДЬЯ; {tail}")
+            if operator_ok_identity:
+                checks.append(("личность на выходе", PASS,
+                               band + "; ДОПУЩЕНО ОПЕРАТОРОМ явным флагом"))
+            else:
+                checks.append(("личность на выходе", UNMEASURED,
+                               band + ", судит оператор глазами"))
+        else:
+            checks.append(("личность на выходе", FAIL,
+                           f"медиана {med} выше ступени «другой человек» "
+                           f"{LADDER_REJECTED}: подмена личности; {tail}"))
 
     cuts = _default_cuts() if cuts is None else cuts
     try:
@@ -1165,7 +1226,8 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                             produced=r5.get("produced", produced),
                             client_photo=client_photo,
                             frames_dir=out / "out_frames", probe=probe,
-                            decode=decode, distances=distances, cuts=cuts))
+                            decode=decode, distances=distances, cuts=cuts,
+                            operator_ok_identity=operator_ok_identity))
                         if r6["outcome"] == PASS:
                             step(lambda: stage_finish(
                                 produced=r5.get("produced", produced),

@@ -446,15 +446,28 @@ class OutputAcceptance(unittest.TestCase):
         kw.update(over)
         return E.stage_output_acceptance(**kw)
 
-    def test_the_measured_geometry_passes_and_anything_else_is_a_defect(self):
+    def test_any_vertical_geometry_passes_and_landscape_is_a_defect(self):
+        # ПЕРЕПИСАН 22.08. Прежняя редакция требовала совпадения с
+        # `KLING_OUT_SIZE` и забраковала боевой выход 816x1104 — вертикаль,
+        # которой мы добивались весь день. Теперь сторожится СВОЙСТВО: 720x1280
+        # обязано ПРОХОДИТЬ (это вертикаль), а горизонталь — падать.
         self.assertEqual(self._accept()["outcome"], "годно")
-        other = lambda p: {"outcome": PASS, "fps": 30.0, "frames": 99,
-                           "width": 720, "height": 1280, "note": ""}
-        self.assertEqual(self._accept(probe=other)["outcome"], "не годно")
+        vertical = lambda p: {"outcome": PASS, "fps": 30.0, "frames": 99,
+                              "width": 720, "height": 1280, "note": ""}
+        self.assertEqual(self._accept(probe=vertical)["outcome"], "годно")
+        landscape = lambda p: {"outcome": PASS, "fps": 30.0, "frames": 99,
+                               "width": 1280, "height": 720, "note": ""}
+        self.assertEqual(self._accept(probe=landscape)["outcome"], "не годно")
 
-    def test_the_geometry_constant_moved_flips_the_verdict(self):
-        with mock.patch.object(E, "KLING_OUT_SIZE", (720, 1280)):
-            self.assertEqual(self._accept()["outcome"], "не годно")
+    def test_the_ratio_ceiling_moved_flips_the_verdict_both_ways(self):
+        # Мутация НОВОЙ константы-решения в обе стороны. `KLING_OUT_SIZE`
+        # больше не решает ничего — он остался историей восьми заказов.
+        square = lambda p: {"outcome": PASS, "fps": 30.0, "frames": 99,
+                            "width": 960, "height": 960, "note": ""}
+        with mock.patch.object(E, "OUT_RATIO_MAX", 0.9):
+            self.assertEqual(self._accept(probe=square)["outcome"], "не годно")
+        with mock.patch.object(E, "OUT_RATIO_MAX", 1.5):
+            self.assertEqual(self._accept(probe=square)["outcome"], "годно")
 
     def test_a_single_cut_on_the_output_is_a_defect(self):
         one = lambda paths, **kw: {"outcome": PASS, "cuts": [37], "note": ""}
@@ -868,3 +881,68 @@ class TheIdentityAxisHasAMiddleBandAndAnOperatorOverride(unittest.TestCase):
         self.assertEqual(E.LADDER_SAME, 0.0652)
         self.assertEqual(E.LADDER_REJECTED, 0.7137)
         self.assertEqual(E.LADDER_STRANGER, 1.0217)
+
+
+class TheGeometryCheckGuardsVerticalityNotExactNumbers(unittest.TestCase):
+    """Боевой прогон 22.08 вернул 816x1104 — ВЕРТИКАЛЬ, и прибор её забраковал.
+
+    Он сверял выход с измеренными 960x960 и завернул самый желанный исход.
+    Теперь сторожится СВОЙСТВО (вертикаль или квадрат), а не число.
+    """
+
+    def _geom(self, w, h, fps=30.0, **kw):
+        res = E.stage_output_acceptance(
+            produced="p.mp4", client_photo="c.png", frames_dir="d",
+            probe=lambda p: {"width": w, "height": h, "fps": fps, "frames": 99},
+            decode=_decode_ok,
+            distances=lambda fr, an: {"outcome": E.PASS, "median": 0.20,
+                                      "inside": 99, "judged": 99},
+            cuts=lambda p: {"outcome": E.PASS, "cuts": [], "note": ""}, **kw)
+        return [c for c in res["checks"] if "геометрия" in c["name"]][0]
+
+    def test_the_new_vertical_output_passes(self):
+        got = self._geom(816, 1104)
+        self.assertEqual(got["outcome"], E.PASS)
+        self.assertIn("НОВАЯ геометрия", got["note"])
+
+    def test_the_old_square_output_still_passes(self):
+        self.assertEqual(self._geom(960, 960)["outcome"], E.PASS)
+
+    def test_a_landscape_output_is_a_defect(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: прибор обязан уметь сказать «нет».
+        self.assertEqual(self._geom(1104, 816)["outcome"], E.FAIL)
+
+    def test_a_wrong_fps_is_UNMEASURED_not_failed(self):
+        # Сборка звука считает кадры по 30: другая частота — судить нечем.
+        self.assertEqual(self._geom(816, 1104, fps=24.0)["outcome"], E.UNMEASURED)
+
+    def test_the_ratio_ceiling_is_the_chosen_one(self):
+        self.assertEqual(E.OUT_RATIO_MAX, 1.0)
+
+
+class TheOutputIdentityUsesTheSameLadderAsTheStyledPhoto(unittest.TestCase):
+    """Одно знание — одно место: лестница на выходе та же, что на фото."""
+
+    def _axis(self, median, **kw):
+        res = E.stage_output_acceptance(
+            produced="p.mp4", client_photo="c.png", frames_dir="d",
+            probe=lambda p: {"width": 816, "height": 1104, "fps": 30.0,
+                             "frames": 99},
+            decode=_decode_ok,
+            distances=lambda fr, an: {"outcome": E.PASS, "median": median,
+                                      "inside": 0, "judged": 99},
+            cuts=lambda p: {"outcome": E.PASS, "cuts": [], "note": ""}, **kw)
+        return [c for c in res["checks"] if "личность" in c["name"]][0]
+
+    def test_the_measured_occluded_case_is_UNMEASURED(self):
+        # 0.5109 — ровно боевой случай с очками.
+        self.assertEqual(self._axis(0.5109)["outcome"], E.UNMEASURED)
+
+    def test_the_operator_can_let_the_occluded_case_through(self):
+        got = self._axis(0.5109, operator_ok_identity=True)
+        self.assertEqual(got["outcome"], E.PASS)
+        self.assertIn("ДОПУЩЕНО ОПЕРАТОРОМ", got["note"])
+
+    def test_a_real_swap_is_failed_even_for_the_operator(self):
+        self.assertEqual(self._axis(0.90, operator_ok_identity=True)["outcome"],
+                         E.FAIL)
