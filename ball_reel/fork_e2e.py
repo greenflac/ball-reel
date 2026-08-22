@@ -183,6 +183,32 @@ ROLE_CLAUSE = ("keep the person from the FIRST image unchanged — same face, "
                "take ONLY the lighting, colour grade, background and "
                "photographic look from the SECOND image")
 
+#: ЛЕСТНИЦА ArcFace. ИЗМЕРЕНО на нашем материале и живёт ОДНИМ местом (Е1):
+#: 0.0652 — то же лицо после стилизации; 0.7137 — отбракованный референс,
+#: то есть уже ДРУГОЙ человек; 1.0217 — заведомо чужой (актёр драйвинга
+#: против фото клиента).
+LADDER_SAME = 0.0652
+LADDER_REJECTED = 0.7137
+LADDER_STRANGER = 1.0217
+
+#: РЕШЕНИЕ ВЛАДЕЛЬЦА 22.08, ПОСЛЕ боевого прогона: «очки сели — это не баг, а
+#: фича; прибор сработал, это хорошо, но в целом не страшно, если со стиля
+#: берётся одежда». Значит ось личности на СТИЛИЗОВАННОМ фото перестаёт быть
+#: гейтом и становится трёхисходной по лестнице:
+#:
+#:   <= 0.35            годно — лицо на месте
+#:   0.35 .. 0.7137     НЕ СМОГЛИ — лицо частично закрыто аксессуаром;
+#:                      ArcFace здесь не судья, судит оператор глазами
+#:   >= 0.7137          НЕ ГОДНО — это уже другой человек, а не аксессуар
+#:
+#: ПОЧЕМУ НЕ ПРОСТО ПОДНЯТЬ ПЛАНКУ. Поднятая планка перестала бы ловить и
+#: настоящую подмену личности. Средняя полоса — это честный третий исход:
+#: «прибор не может судить», а не «плохо» и не «хорошо».
+#:
+#: ЧЕМ ЭТО ВЫЗВАНО, ИЗМЕРЕНО: стилизация надела очки со стилевого референса,
+#: ArcFace дал 0.3928. Окклюзия области глаз раздувает расстояние даже на том
+#: же человеке — то есть 0.3928 означало «лицо закрыто», а не «личность иная».
+
 #: Запрет протечки внешности из стилевого референса. Отдельной константой от
 #: `NO_BRANDS_CLAUSE`, потому что это РАЗНЫЕ решения с разной историей: бренды
 #: запрещены владельцем как продуктовая позиция, а аксессуары — как ответ на
@@ -643,7 +669,7 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
 # Ступень 3. Приёмка стилизованного фото: стиль И личность
 # ---------------------------------------------------------------------------
 
-def stage_style_acceptance(*, styled, style_ref, client_photo,
+def stage_style_acceptance(*, styled, style_ref, client_photo, operator_ok_identity=False,
                            similarity=None, distances=None) -> dict:
     """Попал ли в стиль (против ПОЛА) и уцелела ли личность (против планки).
 
@@ -684,10 +710,33 @@ def stage_style_acceptance(*, styled, style_ref, client_photo,
                        str(d.get("note"))[:300]))
     else:
         med = d.get("median")
-        ok = med is not None and med <= SAME_PERSON_MAX
-        checks.append(("личность на стилизованном", PASS if ok else FAIL,
-                       f"медиана {med} при планке {SAME_PERSON_MAX} "
-                       f"(лестница: 0.0652 тот же, 0.7137 другой, 1.0217 чужой)"))
+        if med is None:
+            checks.append(("личность на стилизованном", UNMEASURED,
+                           "медианы нет: судить нечем"))
+        elif med <= SAME_PERSON_MAX:
+            checks.append(("личность на стилизованном", PASS,
+                           f"медиана {med} при планке {SAME_PERSON_MAX} "
+                           f"(лестница: {LADDER_SAME} тот же, "
+                           f"{LADDER_REJECTED} другой, {LADDER_STRANGER} чужой)"))
+        elif med < LADDER_REJECTED:
+            # Средняя полоса: прибор не судья. Пройти её можно ТОЛЬКО явным
+            # допуском оператора, и допуск виден в отчёте (Е2: верим
+            # свидетельству). Молча она не проходится никогда.
+            band = (f"медиана {med} между планкой {SAME_PERSON_MAX} и ступенью "
+                    f"«другой человек» {LADDER_REJECTED}: лицо ЧАСТИЧНО "
+                    f"ЗАКРЫТО или изменено аксессуаром — ArcFace здесь НЕ СУДЬЯ")
+            if operator_ok_identity:
+                checks.append(("личность на стилизованном", PASS,
+                               band + "; ДОПУЩЕНО ОПЕРАТОРОМ явным флагом"))
+            else:
+                checks.append(("личность на стилизованном", UNMEASURED,
+                               band + ", судит оператор глазами"))
+        else:
+            checks.append(("личность на стилизованном", FAIL,
+                           f"медиана {med} выше ступени «другой человек» "
+                           f"{LADDER_REJECTED}: это подмена личности, а не "
+                           f"аксессуар (лестница: {LADDER_SAME} тот же, "
+                           f"{LADDER_STRANGER} чужой)"))
     return _result(STAGES[2], checks, numbers=numbers)
 
 
@@ -1052,7 +1101,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
         out_dir="work/e2e", intake=None, stylize=None, similarity=None,
         distances=None, probe=None, cutter=None, decode=None, cuts=None,
         upload=None, kling=None, finish=None, card_reader=None,
-        driving_frames=None,
+        driving_frames=None, operator_ok_identity: bool = False,
         orientation: str = CHARACTER_ORIENTATION, endpoint: str = KLING_ENDPOINT,
         log=None) -> dict:
     """Весь путь по ступеням. Печатает КАЖДУЮ сразу и стоит на первой «не годно».
@@ -1100,7 +1149,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
             r3 = step(lambda: stage_style_acceptance(
                 styled=r2.get("styled", styled), style_ref=style_ref,
                 client_photo=client_photo, similarity=similarity,
-                distances=distances))
+                distances=distances, operator_ok_identity=operator_ok_identity))
             if r3["outcome"] == PASS:
                 r4 = step(lambda: stage_window(driving=driving, first=first,
                                                last=last, out_path=window,

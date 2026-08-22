@@ -232,13 +232,21 @@ class IdentityBarIsGuarded(unittest.TestCase):
                                         client_photo="c.png",
                                         similarity=_similarity_ok, distances=d)
 
-    def test_just_inside_the_bar_passes_and_just_outside_fails(self):
+    def test_just_inside_the_bar_passes_and_just_outside_is_UNMEASURED(self):
+        # ПЕРЕПИСАН 22.08 под решение владельца: за планкой теперь НЕ «не
+        # годно», а «не смогли» — там начинается средняя полоса лестницы, где
+        # лицо закрыто аксессуаром и ArcFace не судья. «Не годно» переехало за
+        # ступень «другой человек» 0.7137 и проверяется отдельным классом.
         self.assertEqual(self._acceptance(0.34)["outcome"], "годно")
-        self.assertEqual(self._acceptance(0.36)["outcome"], "не годно")
+        self.assertEqual(self._acceptance(0.36)["outcome"], "не смогли проверить")
+        self.assertEqual(self._acceptance(0.80)["outcome"], "не годно")
 
     def test_the_bar_itself_moved_flips_the_verdict_both_ways(self):
+        # Мутация планки в обе стороны по-прежнему видна, только нижний исход
+        # теперь «не смогли», а не «не годно».
         with mock.patch.object(E, "SAME_PERSON_MAX", 0.30):
-            self.assertEqual(self._acceptance(0.32)["outcome"], "не годно")
+            self.assertEqual(self._acceptance(0.32)["outcome"],
+                             "не смогли проверить")
         with mock.patch.object(E, "SAME_PERSON_MAX", 0.40):
             self.assertEqual(self._acceptance(0.32)["outcome"], "годно")
 
@@ -818,3 +826,45 @@ class TheStyleReferenceLeaksAppearanceAndItIsGuarded(unittest.TestCase):
         # Мутация в слабую сторону: без запрета промт обязан стать другим.
         built = E.style_prompt("любой.png", card_reader=lambda p: None)
         self.assertIn(E.NO_LOOK_TRANSFER_CLAUSE, built["prompt"])
+
+
+class TheIdentityAxisHasAMiddleBandAndAnOperatorOverride(unittest.TestCase):
+    """Решение владельца 22.08: очки со стиля — не баг, а фича.
+
+    Планку НЕ подняли: поднятая перестала бы ловить настоящую подмену.
+    Вместо этого средняя полоса лестницы стала третьим исходом, а проход по
+    ней — ЯВНЫМ допуском оператора, который виден в отчёте.
+    """
+
+    def _stage(self, median, **kw):
+        return E.stage_style_acceptance(
+            styled="s.png", style_ref="r.png", client_photo="p.png",
+            similarity=lambda a, b: 0.9 if "s.png" in str(b) else 0.2,
+            distances=lambda fr, an: {"outcome": E.PASS, "median": median},
+            **kw)
+
+    def _axis(self, res):
+        return [c for c in res["checks"] if "личность" in c["name"]][0]
+
+    def test_below_the_bar_is_plainly_good(self):
+        self.assertEqual(self._axis(self._stage(0.0652))["outcome"], E.PASS)
+
+    def test_the_middle_band_is_UNMEASURED_not_failed(self):
+        # 0.3928 — ровно тот боевой случай с очками.
+        self.assertEqual(self._axis(self._stage(0.3928))["outcome"], E.UNMEASURED)
+
+    def test_the_middle_band_passes_only_with_an_explicit_operator_flag(self):
+        got = self._axis(self._stage(0.3928, operator_ok_identity=True))
+        self.assertEqual(got["outcome"], E.PASS)
+        self.assertIn("ДОПУЩЕНО ОПЕРАТОРОМ", got["note"])
+
+    def test_above_the_other_person_rung_stays_FAILED_even_for_the_operator(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ допуска: он не должен уметь пропустить подмену.
+        got = self._axis(self._stage(0.80, operator_ok_identity=True))
+        self.assertEqual(got["outcome"], E.FAIL)
+
+    def test_the_ladder_numbers_are_the_measured_ones(self):
+        # Литералы (Т2).
+        self.assertEqual(E.LADDER_SAME, 0.0652)
+        self.assertEqual(E.LADDER_REJECTED, 0.7137)
+        self.assertEqual(E.LADDER_STRANGER, 1.0217)
