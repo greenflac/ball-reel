@@ -532,15 +532,36 @@ def face_size_verdict(sizes: list, no_face: int, unmeasured: int,
                 "note": ("лицо не спрашивали ни на одном кадре: размер НЕ "
                          "ИЗМЕРЕН. Это не «лица нет»")}
     small = [v for v in sizes if v < bar]
-    return {**tally(checked, len(small) + no_face, unmeasured), "bar_px": bar,
-            "small": len(small), "no_face": no_face,
+    # РЕШЕНИЕ ВЛАДЕЛЬЦА 22.08: эта ось — ПРЕДУПРЕЖДЕНИЕ, а не отказ.
+    #
+    # ПОЧЕМУ. Планка отвечает на вопрос «чем мы будем мерить личность», а не
+    # «годится ли материал продукту». На трендовых танцевальных драйвингах
+    # человек снят в полный рост, лицо мелкое, и жёсткий отказ выбрасывал
+    # ЧЕТЫРЕ ГОДНЫХ ролика из четырёх (ИЗМЕРЕНО на b2..b5: сцена одна,
+    # склеек ноль, длина 14.6..31.5 с — по всем остальным осям чисто).
+    #
+    # ЧТО ВЗАМЕН. Мелкое лицо означает, что ArcFace на выходе ответит «не
+    # смогли измерить» — ровно как на `driving_yogaball` (87..96 px, планка
+    # выбросила 101 кадр из 101). Значит личность на таком материале СУДИТ
+    # ОПЕРАТОР ГЛАЗАМИ, как уже решено по фигуре, позе и стилю. Ось честно
+    # печатает числа и предупреждает, но прогон не роняет.
+    #
+    # ТРЕТИЙ ИСХОД СОХРАНЁН: если лицо не спрашивали вовсе — по-прежнему «не
+    # смогли» (ветка `checked == 0` выше), и это НЕ «лица нет».
+    hurt = len(small) + no_face
+    warn = (f"; ПРЕДУПРЕЖДЕНИЕ: {hurt} из {checked} кадров непригодны для "
+            f"ArcFace — личность на выходе СУДИТ ОПЕРАТОР ГЛАЗАМИ, прибор "
+            f"здесь не судья") if hurt else ""
+    return {**tally(checked, 0, unmeasured), "bar_px": bar,
+            "small": len(small), "no_face": no_face, "hurt": hurt,
             "min": min(sizes) if sizes else None,
             "max": max(sizes) if sizes else None,
             "note": (f"планка {bar}px: кадров {checked}, лицо найдено на "
                      f"{len(sizes)}, мельче планки {len(small)}, без лица "
                      f"{no_face}"
                      + (f"; размах {min(sizes)}..{max(sizes)} px" if sizes else "")
-                     + (f", не спросили {unmeasured}" if unmeasured else ""))}
+                     + (f", не спросили {unmeasured}" if unmeasured else "")
+                     + warn)}
 
 
 def window(scene_list, product_seconds: float, fps: float | None) -> dict:

@@ -332,16 +332,36 @@ class FaceSize(unittest.TestCase):
         self.assertEqual(v["outcome"], "годно")
         self.assertEqual((v["checked"], v["violations"]), (3, 0))
 
-    def test_the_yogaball_range_is_thrown_out_whole(self):
-        """ИЗМЕРЕНО: driving_yogaball 87..96 px — планка выбрасывает всё."""
-        v = fi.face_size_verdict([87, 90, 96], 0, 0)
-        self.assertEqual(v["outcome"], "не годно")
-        self.assertEqual(v["small"], 3)
+    def test_the_yogaball_range_is_counted_but_no_longer_sinks_the_run(self):
+        """ПЕРЕПИСАН 22.08 под решение владельца: ось — ПРЕДУПРЕЖДЕНИЕ.
 
-    def test_a_frame_without_a_face_is_a_violation_not_an_excuse(self):
+        ИЗМЕРЕНО: driving_yogaball 87..96 px — все три кадра мельче планки.
+        Числа обязаны остаться наблюдаемыми, вердикт больше не роняется:
+        личность на таком материале судит оператор глазами.
+        """
+        v = fi.face_size_verdict([87, 90, 96], 0, 0)
+        self.assertEqual(v["outcome"], "годно")
+        self.assertEqual(v["small"], 3)
+        self.assertEqual(v["hurt"], 3)
+        self.assertIn("ПРЕДУПРЕЖДЕНИЕ", v["note"])
+        self.assertIn("ОПЕРАТОР", v["note"])
+
+    def test_a_frame_without_a_face_is_counted_not_excused(self):
+        # Кадр без лица по-прежнему ИЗМЕРЕНИЕ, а не «не смогли»: он попадает
+        # в `hurt` и в предупреждение. Изменился только вес вердикта.
         v = fi.face_size_verdict([234], 5, 0)
-        self.assertEqual(v["outcome"], "не годно")
-        self.assertEqual(v["violations"], 5)
+        self.assertEqual(v["outcome"], "годно")
+        self.assertEqual(v["hurt"], 5)
+        self.assertEqual(v["no_face"], 5)
+        self.assertIn("ПРЕДУПРЕЖДЕНИЕ", v["note"])
+
+    def test_a_clean_set_gets_NO_warning(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ предупреждения: на годном материале оно обязано
+        # молчать, иначе предупреждает всегда и не значит ничего.
+        v = fi.face_size_verdict([234, 369], 0, 0)
+        self.assertEqual(v["outcome"], "годно")
+        self.assertEqual(v["hurt"], 0)
+        self.assertNotIn("ПРЕДУПРЕЖДЕНИЕ", v["note"])
 
     def test_a_detector_that_could_not_be_asked_is_the_third_outcome(self):
         v = fi.face_size_verdict([], 0, 7)
@@ -349,22 +369,23 @@ class FaceSize(unittest.TestCase):
         self.assertEqual(v["checked"], 0)
         self.assertEqual(v["violations"], 0)
 
-    def test_mutating_the_face_bar_both_ways_turns_the_verdict(self):
-        """Т1: MIN_FACE_PX строже и слабее, на измеренных 87..96 и 234..369."""
-        self.assertEqual(fi.face_size_verdict([87, 96], 0, 0,
-                                              min_face_px=80)["outcome"],
-                         "годно")
-        self.assertEqual(fi.face_size_verdict([234, 369], 0, 0,
-                                              min_face_px=400)["outcome"],
-                         "не годно")
+    def test_mutating_the_face_bar_both_ways_moves_the_counted_numbers(self):
+        """Т1: MIN_FACE_PX строже и слабее. Вердикт больше не двигается —
+        двигаются ЧИСЛА, и мутация видна по ним и по предупреждению."""
+        loose = fi.face_size_verdict([87, 96], 0, 0, min_face_px=80)
+        self.assertEqual(loose["small"], 0)
+        self.assertNotIn("ПРЕДУПРЕЖДЕНИЕ", loose["note"])
+        strict = fi.face_size_verdict([234, 369], 0, 0, min_face_px=400)
+        self.assertEqual(strict["small"], 2)
+        self.assertIn("ПРЕДУПРЕЖДЕНИЕ", strict["note"])
+        # Та же мутация, но через САМУ ОТГРУЖАЕМУЮ константу, а не через
+        # параметр: иначе тест сторожил бы аргумент, а не планку модуля.
         was = fi.MIN_FACE_PX
         try:
             fi.MIN_FACE_PX = 80
-            self.assertEqual(fi.face_size_verdict([87, 96], 0, 0)["outcome"],
-                             "годно")
+            self.assertEqual(fi.face_size_verdict([87, 96], 0, 0)["hurt"], 0)
             fi.MIN_FACE_PX = 400
-            self.assertEqual(fi.face_size_verdict([234, 369], 0, 0)["outcome"],
-                             "не годно")
+            self.assertEqual(fi.face_size_verdict([234, 369], 0, 0)["hurt"], 2)
         finally:
             fi.MIN_FACE_PX = was
         self.assertEqual(fi.MIN_FACE_PX, 100)
@@ -511,11 +532,14 @@ class DrivingIntake(unittest.TestCase):
         self.assertEqual(r["outcome"], "годно")
         self.assertIn("orphan_wrists", r["warnings"])
 
-    def test_small_faces_do_sink_the_verdict(self):
+    def test_small_faces_warn_but_no_longer_sink_the_run(self):
+        # ПЕРЕПИСАН 22.08: жёсткий отказ выбрасывал ЧЕТЫРЕ годных драйвинга
+        # из четырёх (b2..b5: одна сцена, склеек ноль, 14.6..31.5 с).
         r = self._run(plain=305, fixed=305, poses={},
                       faces={f"{i:05d}.png": {"face_px": 90} for i in range(95)})
-        self.assertEqual(r["axes"]["face_size"]["outcome"], "не годно")
-        self.assertEqual(r["outcome"], "не годно")
+        self.assertEqual(r["axes"]["face_size"]["outcome"], "годно")
+        self.assertEqual(r["axes"]["face_size"]["small"], 95)
+        self.assertIn("ПРЕДУПРЕЖДЕНИЕ", r["axes"]["face_size"]["note"])
 
     def test_a_cut_is_marked_up_and_short_scenes_are_refused(self):
         r = self._run(plain=305, fixed=305, poses={}, faces={}, n=6, cut_at=[2])
