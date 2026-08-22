@@ -325,11 +325,43 @@ PALETTE_BINS = 8
 PALETTE_SIDE = 256
 
 
-def palette_similarity(left, right) -> float | None:
-    """Косинус между палитрами двух картинок. `None` — измерить не смогли.
+def shipped_similarity(left, right) -> float | None:
+    """Прибор попадания в стиль, ОДИН на весь конвейер. `None` — не смогли.
 
-    ЭТО НЕ ТОТ ПРИБОР, которым сняты 0.8801/0.6409 в шапке модуля: тот жил в
-    смене замера стилизаторов и в дерево не попал. Здесь свой, и его числа
+    ПОЧЕМУ ОН ЗДЕСЬ ОДИН. 22.08 в дереве оказалось ДВА способа померить одно
+    и то же: этот и `creative_eval.style.similarity` из внешнего пакета,
+    которым сняты 0.8801/0.8156/0.6409. Их шкалы РАЗНЫЕ (пол 0.3170 против
+    0.6409), и смешивать их нельзя — это ровно тот дефект, от которого
+    защищает Е1. Пакет теперь виден среде, поэтому ОТГРУЖАЕТСЯ ВНЕШНИЙ, а
+    этот остаётся запасным на случай, когда пакета нет: без него ступень
+    ответила бы «не смогли» и стенд встал бы, как встал 22.08.
+
+    Порядок: сперва внешний, при неудаче импорта — свой. Какой сработал,
+    видно в `note` ступени, а не по догадке.
+    """
+    try:
+        from creative_eval.style import similarity as _external  # noqa: PLC0415
+    except Exception:                                            # noqa: BLE001
+        return palette_similarity(left, right)
+    try:
+        return float(_external(str(left), str(right)))
+    except Exception:                                            # noqa: BLE001
+        return palette_similarity(left, right)
+
+
+def similarity_source() -> str:
+    """Каким прибором меряем СЕЙЧАС. Печатается в отчёт (Е2: верим свидетельству)."""
+    try:
+        from creative_eval.style import similarity  # noqa: F401,PLC0415
+        return "creative_eval.style.similarity (внешний, отгружаемый)"
+    except Exception:                               # noqa: BLE001
+        return "palette_similarity (запасной: внешнего пакета нет)"
+
+
+def palette_similarity(left, right) -> float | None:
+    """ЗАПАСНОЙ прибор: косинус между палитрами. `None` — не смогли.
+
+    Используется, только когда внешнего пакета нет в среде. Его числа
     ИЗМЕРЕНЫ 22.08.2026 на нашем же материале:
 
         styleref_bluesky против st_img_gpt-image-2 (стилизованное)   0.8547
@@ -600,7 +632,7 @@ def stage_style_acceptance(*, styled, style_ref, client_photo,
     НЕстилизованное фото)`. Всё, что не бьёт пол с запасом `STYLE_MARGIN_MIN`,
     стилем НЕ ЯВЛЯЕТСЯ — так отвергнут текстовый путь, давший +0.0364 к полу.
     """
-    similarity = palette_similarity if similarity is None else similarity
+    similarity = shipped_similarity if similarity is None else similarity
     checks, numbers = [], {}
 
     floor = similarity(style_ref, client_photo)
