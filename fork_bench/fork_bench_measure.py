@@ -92,11 +92,17 @@ def measure(video_path, frames_dir, anchor="assets/photoref_profile.jpg",
             "face_px_max": max(rep["face_px"].values()) if rep["face_px"] else None,
             "outcome": rep["outcome"], "note": rep["note"],
         }
-    return {"outcome": modes[str(bars[0])]["outcome"],
+    # Агрегатный вердикт берётся от режима БЕЗ отсева и это НАЗЫВАЕТСЯ вслух:
+    # режимы дают разные ответы (на боевом куске «не годно» против «не смогли»),
+    # и молчаливый выбор одного из них — ровно то, что запрещено. Печатаются оба.
+    lead = str(bars[0])
+    return {"outcome": modes[lead]["outcome"], "outcome_from": lead,
             "frames_decoded": len(paths), "modes": modes,
             "prober": prober_name,
             "note": (f"разложено {len(paths)} кадров прибором «{prober_name}», "
-                     f"режимов отсева {len(modes)}")}
+                     f"режимов отсева {len(modes)}; агрегатный вердикт взят от "
+                     f"режима отсева «{'выключен' if lead == 'None' else lead + 'px'}», "
+                     f"остальные режимы приведены ниже и НЕ сворачиваются в него")}
 
 
 def render(rep: dict) -> str:
@@ -123,3 +129,8 @@ if __name__ == "__main__":
     Path("work").mkdir(exist_ok=True)
     Path(f"work/measure_{Path(v).stem}.json").write_text(
         json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+    # ТРИ ИСХОДА РАЗЛИЧИМЫ КОДОМ ВОЗВРАТА (Р2). До 22.08 прибор возвращал 0
+    # ВСЕГДА — то есть в CI был бы вечно зелёным и на «не годно» тоже.
+    # 2, а не 1, намеренно: «не смогли измерить» не должно сниматься тем же
+    # способом, что «измерили и плохо».
+    raise SystemExit({PASS: 0, FAIL: 1, UNMEASURED: 2}.get(r["outcome"], 2))
