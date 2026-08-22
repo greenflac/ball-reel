@@ -14,7 +14,10 @@
      мутируется в обе стороны (2 и 5), и в обе стороны наблюдаемо меняется
      число запущенных ячеек.
 
-Ожидаемые числа — ЛИТЕРАЛЫ (Т2): 50, 5, 0.21, 10.5, 1.05, 3, 0/1/2.
+Ожидаемые числа — ЛИТЕРАЛЫ (Т2): 50, 5, 0.35, 17.5, 1.75, 3, 0/1/2.
+ПЕРЕСЧИТАНЫ 22.08: цена ячейки уехала с $0.21 на $0.35, потому что Kling
+берёт посекундно ($0.07/с), а продуктовая длина стала 5 с вместо 3 с.
+Замер: баланс fal 10.8490375 -> 10.1490375 за два пятисекундных вызова.
 Импортированное ожидание уехало бы вместе с кодом и промолчало.
 """
 
@@ -170,35 +173,42 @@ class TheCoverageModesGiveTheNumbersTheyPromise(unittest.TestCase):
 
 class TheMoneyGuardHasThreeOutcomes(unittest.TestCase):
 
-    def test_fifty_cells_cost_ten_dollars_fifty(self):
-        self.assertEqual(B.plan_cost(50), 10.5)
+    def test_fifty_cells_cost_seventeen_fifty(self):
+        # ПЕРЕПИСАН 22.08: было 10.5 по цене $0.21 за трёхсекундный ролик.
+        # Полный крест владельца на продуктовых 5 с в $10 НЕ ВЛЕЗАЕТ.
+        self.assertEqual(B.plan_cost(50), 17.5)
 
-    def test_five_cells_cost_one_dollar_five(self):
-        self.assertEqual(B.plan_cost(5), 1.05)
+    def test_five_cells_cost_one_seventy_five(self):
+        self.assertEqual(B.plan_cost(5), 1.75)
+
+    def test_the_matrix_we_actually_ship_does_fit_ten_dollars(self):
+        # 20 ячеек: b1 выброшен приёмом (13 склеек), плюс правило пола.
+        self.assertEqual(B.plan_cost(20), 7.0)
+        self.assertEqual(B.afford(20, 10.1490375)["outcome"], PASS)
 
     def test_an_empty_wallet_against_the_full_cross_names_the_shortfall(self):
         got = B.afford(50, 0.0)
         self.assertEqual(got["outcome"], FAIL)
-        self.assertEqual(got["short"], 10.5)
+        self.assertEqual(got["short"], 17.5)
 
     def test_the_real_balance_of_the_shift_against_the_full_cross(self):
         """$0.8490 — остаток счёта на момент написания модуля."""
         got = B.afford(50, 0.8490)
         self.assertEqual(got["outcome"], FAIL)
-        self.assertEqual(got["short"], 9.651)
+        self.assertEqual(got["short"], 16.651)
 
     def test_enough_money_is_a_pass_the_guard_can_move(self):
         """Негативный контроль прибора (И5): он умеет и сказать «да»."""
         got = B.afford(5, 2.0)
         self.assertEqual(got["outcome"], PASS)
-        self.assertEqual(got["need"], 1.05)
+        self.assertEqual(got["need"], 1.75)
 
     def test_exactly_enough_is_a_pass_and_not_a_rounding_refusal(self):
-        got = B.afford(4, 0.84)
+        got = B.afford(4, 1.4)
         self.assertEqual(got["outcome"], PASS)
 
     def test_one_cent_short_is_a_refusal(self):
-        got = B.afford(4, 0.83)
+        got = B.afford(4, 1.39)
         self.assertEqual(got["outcome"], FAIL)
         self.assertEqual(got["short"], 0.01)
 
@@ -231,7 +241,7 @@ class TheBatchDoesNotStartWithoutMoney(unittest.TestCase):
         self.assertEqual(got["attempted"], 0)
         self.assertEqual(got["planned"], 50)
         self.assertEqual(got["exit_code"], 1)
-        self.assertEqual(got["money"]["short"], 10.5)
+        self.assertEqual(got["money"]["short"], 17.5)
         self.assertEqual(got["spent_expected"], 0.0)
 
     def test_an_unknown_balance_stops_the_batch_with_code_two(self):
@@ -252,7 +262,7 @@ class TheBatchDoesNotStartWithoutMoney(unittest.TestCase):
             self.assertIsNone(B.live_balance())
 
     def test_a_pro_endpoint_is_refused_before_the_balance_is_even_asked(self):
-        """Сторож `pro` стоит ДО денег: $2.688 против $0.21 за вызов."""
+        """Сторож `pro` стоит ДО денег: $0.8960 против $0.0700 за секунду."""
         run = _Runner()
         asked = []
         with _no_network(), TemporaryDirectory() as td:
@@ -463,7 +473,7 @@ class TheReportCarriesNumbersNextToTheVerdict(unittest.TestCase):
         self.assertEqual(got["balance_before"], 2.0)
         self.assertEqual(got["balance_after"], 0.95)
         self.assertEqual(got["spent_actual"], 1.05)
-        self.assertEqual(got["spent_expected"], 1.05)
+        self.assertEqual(got["spent_expected"], 1.75)
 
     def test_an_unknown_balance_after_leaves_the_spend_unmeasured_not_zero(self):
         run = _Runner()
@@ -471,7 +481,7 @@ class TheReportCarriesNumbersNextToTheVerdict(unittest.TestCase):
             got = _batch(td, mode="cover", balance=_balance(2.0, None),
                          cell_runner=run)
         self.assertIsNone(got["spent_actual"])
-        self.assertEqual(got["spent_expected"], 1.05)
+        self.assertEqual(got["spent_expected"], 1.75)
 
     def test_a_stopped_batch_expects_only_what_it_actually_launched(self):
         run = _Runner({2: FAIL, 3: FAIL, 4: FAIL})
@@ -479,7 +489,7 @@ class TheReportCarriesNumbersNextToTheVerdict(unittest.TestCase):
             got = _batch(td, mode="cover", balance=_balance(2.0, 1.16),
                          cell_runner=run)
         self.assertEqual(got["attempted"], 4)
-        self.assertEqual(got["spent_expected"], 0.84)
+        self.assertEqual(got["spent_expected"], 1.4)
 
     def test_the_log_prints_the_three_counts_next_to_the_verdict(self):
         log = _Log()

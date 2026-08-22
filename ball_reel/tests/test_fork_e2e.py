@@ -1081,3 +1081,39 @@ class TheFramesChannelReachesRunFromTheCommandLine(unittest.TestCase):
             (Path(td) / "report.json").write_text("{}")
             with self.assertRaises(ValueError):
                 E.frame_paths(td)
+
+
+class ThePriceIsPerSecondNotPerCall(unittest.TestCase):
+    """Вторая ИЗМЕРЕННАЯ цена исправляет первую, и число сторожится литералом.
+
+    ИЗМЕРЕНО по балансу fal 22.08: 10.8490375 -> 10.1490375 за два
+    пятисекундных вызова, то есть $0.35 за вызов, а не $0.21. Прежние $0.21
+    были измерены на ТРЁХСЕКУНДНЫХ заказах. Оба делятся на длину в одно
+    число, и «цена вызова» без длины оказалась величиной без смысла.
+    """
+
+    def test_the_measured_numbers_are_the_ones_shipped(self):
+        # Литералы, а не арифметика из проверяемого модуля (Т2).
+        self.assertEqual(E.KLING_PRICE_PER_SECOND_USD, 0.07)
+        self.assertEqual(E.PRODUCT_SECONDS, 5.0)
+        self.assertEqual(E.KLING_PRICE_USD, 0.35)
+        self.assertEqual(E.KLING_PRICE_3S_USD, 0.21)
+
+    def test_both_measurements_land_on_the_same_per_second_price(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ гипотезы «берут посекундно»: если бы она была
+        # неверна, два независимых замера не сошлись бы в одну точку.
+        self.assertEqual(E.kling_price(3), 0.21)
+        self.assertEqual(E.kling_price(5), 0.35)
+
+    def test_the_owner_matrix_now_costs_seven_dollars_not_four_twenty(self):
+        # Ради чего правка: 20 ячеек по старой цене считались как $4.20.
+        self.assertEqual(round(20 * E.KLING_PRICE_USD, 2), 7.0)
+        self.assertEqual(round(20 * E.KLING_PRICE_3S_USD, 2), 4.2)
+
+    def test_a_nonsense_duration_is_refused_not_guessed(self):
+        for bad in (0, -5):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                E.kling_price(bad)
+        for bad in ("5", None, True):
+            with self.subTest(bad=bad), self.assertRaises(TypeError):
+                E.kling_price(bad)
