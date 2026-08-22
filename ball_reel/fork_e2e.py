@@ -125,6 +125,8 @@ KLING_OUT_FPS = 30.0
 #: ВЫБРАНО 1.0: выше — горизонталь, и это брак для вертикального продукта.
 #: Квадрат (ровно 1.0) допускается: восемь заказов его давали, и он режется
 #: в 9:16 кропом, просто дороже по потерям.
+FRAME_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
 OUT_RATIO_MAX = 1.0
 
 #: ИЗМЕРЕНО: гейт Kling отвергает «Video duration can not less than 3s», и все
@@ -1291,6 +1293,25 @@ def parse_window(text: str) -> tuple:
     return first, last
 
 
+def frame_paths(directory) -> list | None:
+    """Кадры каталога по порядку. Пустой каталог — исключение, а не тишина.
+
+    Молчаливый пустой список неотличим от «кадров не просили», и разница
+    стоит ступени приёма: с ним четыре оси из пяти отвечают «не смогли».
+    """
+    if directory is None:
+        return None
+    root = Path(directory)
+    if not root.is_dir():
+        raise ValueError(f"каталог кадров {directory!r} не существует")
+    got = sorted(str(p) for p in root.iterdir()
+                 if p.suffix.lower() in FRAME_SUFFIXES)
+    if not got:
+        raise ValueError(f"каталог кадров {directory!r} пуст: "
+                         f"ждали файлы {', '.join(sorted(FRAME_SUFFIXES))}")
+    return got
+
+
 def main(argv=None) -> int:
     """Тонкая точка входа: разбор аргументов и вызов `run` (Т5)."""
     import argparse                                      # noqa: PLC0415
@@ -1301,6 +1322,14 @@ def main(argv=None) -> int:
     ap.add_argument("--driving", required=True)
     ap.add_argument("--window", required=True, help="первый:последний, напр. 100:199")
     ap.add_argument("--out", default="work/e2e")
+    # Кадры драйвинга РАСПАКОВЫВАЕТ `fork_video.frames`, а не мы: второй
+    # распаковщик в проекте был бы вторым способом узнать известное (Е1).
+    # Без этого канала приёмщик честно отвечает «не смогли» по четырём осям
+    # из пяти, и стенд встаёт на ступени 1 — ИЗМЕРЕНО двумя прогонами 22.08
+    # (b2 и b4: «приём драйвинга — не смогли, не смогли 3»). Деньги при этом
+    # не тратятся, но и работа не делается.
+    ap.add_argument("--frames", default=None,
+                    help="каталог с уже распакованными кадрами драйвинга")
     # Канал ОПЕРАТОРСКОГО ВЕРДИКТА по личности. Он существует потому, что на
     # средней полосе лестницы (между планкой и ступенью «другой человек»)
     # ArcFace измеряет окклюзию, а не подмену, и решение там принимает глаз.
@@ -1312,6 +1341,7 @@ def main(argv=None) -> int:
     first, last = parse_window(a.window)
     got = run(client_photo=a.client, style_ref=a.style, driving=a.driving,
               first=first, last=last, out_dir=a.out,
+              driving_frames=frame_paths(a.frames),
               operator_ok_identity=a.operator_ok_identity)
     return got["exit_code"]
 

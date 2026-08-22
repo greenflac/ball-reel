@@ -1029,3 +1029,55 @@ class TheDeliverableIsBuiltEvenWhenIdentityCannotBeMeasured(unittest.TestCase):
             E.main(["--client", "c.png", "--style", "s.png", "--driving",
                     "d.mp4", "--window", "100:199"])
         self.assertIs(seen["operator_ok_identity"], False)
+
+
+class TheFramesChannelReachesRunFromTheCommandLine(unittest.TestCase):
+    """Канал, который разбирается и теряется, выглядит рабочим до прогона.
+
+    ИЗМЕРЕНО 22.08: без него оба боевых прогона (b2 и b4) встали на ступени 1
+    с «приём драйвинга — не смогли, не смогли 3», хотя тот же приёмщик с теми
+    же кадрами отдельно давал «годно, проверено 887, нарушений 0».
+    """
+
+    def _seen(self, argv):
+        seen = {}
+
+        def fake_run(**kw):
+            seen.update(kw)
+            return {"exit_code": 0}
+
+        with mock.patch.object(E, "run", fake_run):
+            E.main(["--client", "c.png", "--style", "s.png", "--driving",
+                    "d.mp4", "--window", "100:199", *argv])
+        return seen
+
+    def test_the_frames_arrive_sorted_and_whole(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            for i in (3, 1, 2):                  # вперемешку: порядок задаём мы
+                (root / f"f{i:05d}.png").write_bytes(b"\x00")
+            got = self._seen(["--frames", str(root)])
+        self.assertEqual([Path(p).name for p in got["driving_frames"]],
+                         ["f00001.png", "f00002.png", "f00003.png"])
+
+    def test_without_the_flag_the_frames_are_None_not_an_empty_list(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: «кадров не просили» и «кадров нет» — разные
+        # вещи, и приёмщик отвечает на них по-разному.
+        self.assertIsNone(self._seen([])["driving_frames"])
+
+    def test_a_missing_directory_is_refused_not_silently_ignored(self):
+        with self.assertRaises(ValueError):
+            E.frame_paths("нет-такого-каталога")
+
+    def test_an_empty_directory_is_refused_not_silently_ignored(self):
+        with TemporaryDirectory() as td:
+            with self.assertRaises(ValueError):
+                E.frame_paths(td)
+
+    def test_non_frames_do_not_count_as_frames(self):
+        # Каталог с одним отчётом — это ПУСТОЙ каталог кадров, а не каталог
+        # с одним кадром: иначе приёмщик получит на вход json.
+        with TemporaryDirectory() as td:
+            (Path(td) / "report.json").write_text("{}")
+            with self.assertRaises(ValueError):
+                E.frame_paths(td)
