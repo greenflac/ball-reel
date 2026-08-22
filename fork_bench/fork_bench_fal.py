@@ -5,28 +5,58 @@
 лучше нашего, дефект у нас, а не в модели. И это единственный способ узнать,
 какие числа бывают у ГОДНОГО ролика, — своих у нас нет ни одного.
 
-## ЧТО ЗДЕСЬ ДОКАЗАНО ПРОГОНОМ, А ЧТО НЕТ (Ц4/Ц10)
+## СОСТОЯНИЕ НА 22.08.2026, ВТОРАЯ СМЕНА: домены открылись, деньги кончились
 
-ДОКАЗАНО командой 22.08.2026 в этой песочнице:
-  - пакет `fal-client` существует, версия 1.0.1;
-  - `fal_client.subscribe(application, arguments, ...)` существует;
-  - `fal_client.upload_file(path) -> str` СУЩЕСТВУЕТ. Этим закрыт пункт
-    мануала «fal.ai принимает URL, а не байты, либо загрузка клиентом
-    (НЕПРОВЕРЕНО)»: загрузка клиентом есть, и переменные `BENCH_VIDEO_URL` /
-    `BENCH_PHOTO_URL` больше не нужны;
-  - хосты, которые клиент реально дёргает, вынуты из констант пакета:
-        queue.fal.run    очередь: постановка и опрос
-        rest.fal.ai      REST
-        v3.fal.media     CDN: загруженные файлы и выдача
-        auth.fal.ai      только OAuth-вход, при FAL_KEY не нужен
+Прошлая редакция этого файла числила блокером сетевую политику. ПЕРЕМЕРЕНО:
 
-НЕ ДОКАЗАНО, потому что домены закрыты сетевой политикой (CONNECT -> 403):
-  - имя эндпоинта `fal-ai/wan/v2.2-14b/animate/replace`;
-  - имена полей `video_url`, `image_url`, `resolution`;
-  - что счёт и латентность именно такие, как в прайсе.
-Всё это взято из мануала, то есть из поиска. ПЕРВЫЙ ЖЕ ВЫЗОВ их подтвердит
-или опровергнет — ради этого скрипт печатает ответ и ошибку ЦЕЛИКОМ, включая
-имена полей, которые вернёт сервис.
+    queue.fal.run     404 на корне  -> туннель работает, хост ОТКРЫТ
+    rest.fal.ai       404 на корне  -> ОТКРЫТ
+    v3.fal.media      404 на корне  -> ОТКРЫТ
+    fal.ai            соединения нет -> сайт и его OpenAPI ЗАКРЫТЫ политикой
+    pypi.org          200            -> негативный контроль (И5): сеть цела
+
+Новый блокер, и он ВЫШЕ прежнего:
+
+    GET  rest.fal.ai/billing/user_balance   200, тело «0.0»
+    POST queue.fal.run/<любой эндпоинт>     403 «User is locked.
+                                            Reason: Exhausted balance.»
+
+Баланс аккаунта — НОЛЬ, и сервис запирает пользователя ДО всякой валидации
+схемы. Загрузка входа заперта тем же: `rest.fal.ai/storage/auth/token` тоже
+отдаёт 403 lock. То есть без пополнения нельзя даже выложить файл.
+
+## ИМЯ ЭНДПОИНТА: ПОДТВЕРДИТЬ НЕ УДАЛОСЬ, И ПОЧТИ ОШИБЛИСЬ
+
+Соблазнительное наблюдение: `fal-ai/wan/v2.2-14b/animate/replace` отвечает
+403 (lock), а `fal-ai/nosuchvendor/...` — 404 «Application not found». Похоже
+на подтверждение имени. НЕГАТИВНЫЙ КОНТРОЛЬ ЭТО ОПРОВЕРГ (И5):
+
+    fal-ai/wan/v2.2-14b/animate/replace      403 lock
+    fal-ai/wan/v2.2-14b/animate/replaceXX    403 lock   <- ВЫДУМАННЫЙ, тоже 403
+    fal-ai/wan/v9.9-99b/animate/replace      403 lock   <- ВЫДУМАННЫЙ, тоже 403
+    fal-ai/nosuchvendor/nosuchmodel/...      404 «Application "nosuchvendor" not found»
+
+Без ключа сервис говорит прямо: «Cannot access application "fal-ai/wan"».
+Значит резолвится ТОЛЬКО первый сегмент. Подтверждено существование
+приложения `fal-ai/wan` — и НИЧЕГО не подтверждено про хвост
+`v2.2-14b/animate/replace` и про имена полей.
+
+**Вывод, который надо держать: имя эндпоинта и поля `video_url`/`image_url`/
+`resolution` ПО-ПРЕЖНЕМУ НЕПРОВЕРЕНЫ (Ц10).** Они взяты из поиска. Первый же
+вызов после пополнения баланса их подтвердит или опровергнет, и ошибка тут
+ЦЕННЕЕ успеха: в ней приезжают настоящие имена. Ради этого скрипт печатает
+ответ и ошибку ЦЕЛИКОМ.
+
+Достать схему в обход lock'а не вышло ничем: без ключа 401, с ключом 403,
+OpenAPI живёт на закрытом `fal.ai`. Обходить политику нельзя (Ц3).
+
+## ДОКАЗАНО КОМАНДОЙ (держится с прошлой смены)
+
+  - пакет `fal-client` 1.0.1, `fal_client.subscribe(application, arguments)`;
+  - `fal_client.upload_file(path) -> str` СУЩЕСТВУЕТ — выкладывать вход на
+    сторонний HTTP-хост не нужно, `BENCH_VIDEO_URL`/`BENCH_PHOTO_URL` не нужны;
+  - `FAL_KEY` ВАЛИДЕН: с ним 403 lock, с испорченным — 401 «No user found
+    for Key ID and Secret». То есть отказ именно про деньги, а не про ключ.
 
 ## КЛЮЧ
 Только из окружения (`FAL_KEY`). В код, в лог и в карточку он не попадает
@@ -36,8 +66,8 @@
 ## ЗАПУСК
     pip install fal-client
     export FAL_KEY=...
-    python3 fork_bench/fork_bench_fal.py 480p
-    python3 fork_bench/fork_bench_fal.py 720p
+    python3 -m fork_bench.fork_bench_fal 480p
+    python3 -m fork_bench.fork_bench_fal 720p
 """
 
 from __future__ import annotations
@@ -48,7 +78,7 @@ import sys
 import time
 from pathlib import Path
 
-#: НЕПРОВЕРЕНО: имя из мануала (поиск), не из ответа сервиса.
+#: НЕПРОВЕРЕНО: хвост пути из поиска. Подтверждён только сегмент `fal-ai/wan`.
 ENDPOINT = "fal-ai/wan/v2.2-14b/animate/replace"
 #: НЕПРОВЕРЕНО: имена полей из мануала, не из ответа сервиса.
 FIELD_VIDEO, FIELD_IMAGE, FIELD_RESOLUTION = "video_url", "image_url", "resolution"
@@ -61,15 +91,22 @@ PASS, FAIL, UNMEASURED = "годно", "не годно", "не смогли п�
 
 
 def journal(record: dict) -> None:
-    """Пишем ДО просмотра ролика и независимо от исхода.
-
-    Отрицательный результат с числом и условиями — тоже запись (И6): серия
-    неудач это измеренная граница, а без записи следующая сессия переставит
-    те же ручки заново.
-    """
+    """Пишем ДО просмотра ролика и независимо от исхода (И6)."""
     Path(JOURNAL).parent.mkdir(parents=True, exist_ok=True)
     with open(JOURNAL, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def classify(exc: Exception) -> tuple[str, str]:
+    """Три исхода, а не два. «Денег нет» — это НЕ «схема плохая»."""
+    text = str(exc)
+    if "Exhausted balance" in text or "User is locked" in text:
+        return UNMEASURED, ("баланс fal.ai исчерпан: сервис запирает аккаунт "
+                            "ДО валидации схемы. Это НЕ «схема неверна» и НЕ "
+                            "«ролик плохой» — это «померить нечем»")
+    if "No user found" in text or "401" in text:
+        return UNMEASURED, "FAL_KEY не принят сервисом"
+    return FAIL, f"{type(exc).__name__}: {text[:600]}"
 
 
 def run(resolution: str = "480p") -> dict:
@@ -97,12 +134,13 @@ def run(resolution: str = "480p") -> dict:
         waited = time.time() - started
     except Exception as exc:                       # noqa: BLE001 — печатаем ЦЕЛИКОМ
         # Ошибка здесь ЦЕННЕЕ успеха: в ней приезжают настоящие имена полей.
-        rec = {"outcome": FAIL, "resolution": resolution, "endpoint": ENDPOINT,
+        outcome, note = classify(exc)
+        rec = {"outcome": outcome, "resolution": resolution, "endpoint": ENDPOINT,
                "sent_fields": [FIELD_VIDEO, FIELD_IMAGE, FIELD_RESOLUTION],
                "waited_s": round(time.time() - started, 1),
                "error_type": type(exc).__name__, "error": str(exc)[:4000]}
         journal(rec)
-        return {**rec, "note": f"{type(exc).__name__}: {str(exc)[:600]}"}
+        return {**rec, "note": note}
 
     rec = {"outcome": PASS, "resolution": resolution, "endpoint": ENDPOINT,
            "upload_s": round(uploaded, 1), "waited_s": round(waited, 1),
