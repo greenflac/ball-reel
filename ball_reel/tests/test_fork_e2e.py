@@ -753,3 +753,35 @@ class ReportIsAlwaysWritten(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheStyliserWasChosenByEyeNotByNumber(unittest.TestCase):
+    """Решение владельца 22.08: `nanobanana-2`, ВОПРЕКИ числу.
+
+    Гейт стоит на самом решении, а не на его следствиях: замер награждал
+    перерисовку, и модель с бОльшим числом утащила из референса одежду и позу.
+    Если кто-то вернёт `gpt-image-2` обратно «потому что 0.8801 больше», этот
+    тест покраснеет и заставит прочитать, почему так делать нельзя.
+    """
+
+    def test_the_chosen_styliser_is_the_one_the_owner_picked(self):
+        # Литерал, а не импорт из проверяемого модуля (Т2).
+        self.assertEqual(E.STYLE_MODEL, "nanobanana-2")
+
+    def test_the_rejected_styliser_scored_HIGHER_and_is_still_rejected(self):
+        # Негативный контроль решения: отвергнутый обязан быть ВЫШЕ по числу,
+        # иначе история «выбрали вопреки мере» не воспроизводится и правило
+        # выглядит произволом.
+        self.assertGreater(E.STYLE_HIT_REJECTED,
+                           E.STYLE_HIT_REFERENCE)
+        self.assertNotEqual(E.STYLE_MODEL, "gpt-image-2")
+
+    def test_the_chosen_styliser_still_beats_the_floor(self):
+        # Выбор глазами не отменяет требования: стиль обязан доехать.
+        self.assertGreater(E.STYLE_HIT_REFERENCE,
+                           E.STYLE_FLOOR_REFERENCE)
+
+    def test_the_text_route_stays_below_the_floor_margin(self):
+        # Текстовый путь отвергнут числом, и это по-прежнему верно.
+        self.assertLess(E.STYLE_TEXT_ROUTE_REFERENCE
+                        - E.STYLE_FLOOR_REFERENCE, 0.05)
