@@ -785,3 +785,36 @@ class TheStyliserWasChosenByEyeNotByNumber(unittest.TestCase):
         # Текстовый путь отвергнут числом, и это по-прежнему верно.
         self.assertLess(E.STYLE_TEXT_ROUTE_REFERENCE
                         - E.STYLE_FLOOR_REFERENCE, 0.05)
+
+
+class TheStyleReferenceLeaksAppearanceAndItIsGuarded(unittest.TestCase):
+    """Боевой прогон 22.08: стилизация надела на клиента ОЧКИ с референса.
+
+    ArcFace дал 0.3928 при планке 0.35 и стенд встал, не потратив денег.
+    Диагноз в отчёте был неверный: не «личность потеряна», а ЛИЦО ЗАКРЫТО —
+    ArcFace опирается на область глаз. Гейт сторожит запрет, а не последствие.
+    """
+
+    def test_the_prompt_forbids_copying_eyewear_from_the_reference(self):
+        built = E.style_prompt("любой.png", card_reader=lambda p: None)
+        # Литералы, а не импорт из проверяемого модуля (Т2).
+        for word in ("eyewear", "accessory", "garment", "pose"):
+            with self.subTest(word=word):
+                self.assertIn(word, built["prompt"])
+
+    def test_the_role_clause_names_what_to_KEEP_not_only_what_to_take(self):
+        built = E.style_prompt("любой.png", card_reader=lambda p: None)
+        for word in ("same clothing", "same pose", "same accessories"):
+            with self.subTest(word=word):
+                self.assertIn(word, built["prompt"])
+
+    def test_the_two_bans_are_separate_constants_with_separate_histories(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ склейки: слипнись они в одну строку, вынуть
+        # можно было бы только обе сразу, и история каждой потерялась бы.
+        self.assertNotEqual(E.NO_BRANDS_CLAUSE, E.NO_LOOK_TRANSFER_CLAUSE)
+        self.assertNotIn(E.NO_BRANDS_CLAUSE, E.NO_LOOK_TRANSFER_CLAUSE)
+
+    def test_removing_the_look_ban_is_visible_in_the_prompt(self):
+        # Мутация в слабую сторону: без запрета промт обязан стать другим.
+        built = E.style_prompt("любой.png", card_reader=lambda p: None)
+        self.assertIn(E.NO_LOOK_TRANSFER_CLAUSE, built["prompt"])

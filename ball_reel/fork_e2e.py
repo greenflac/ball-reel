@@ -170,9 +170,27 @@ NO_BRANDS_CLAUSE = ("no brand names, no logos, no lettering or text on "
 
 #: Роли картинок в `compose`. ИЗМЕРЕНО чужим замером и подтверждено нашим:
 #: модель держит роли, если они названы ПОЗИЦИЕЙ в промте.
+#:
+#: ЧТО ИМЕННО БЕРЁТСЯ ИЗ ВТОРОЙ КАРТИНКИ, названо СПИСКОМ, а не словом
+#: «стиль». Причина ИЗМЕРЕНА боевым прогоном 22.08: стилизация надела на
+#: клиента ОЧКИ со стилевого референса, ArcFace дал 0.3928 при планке 0.35 и
+#: стенд встал. Это не «личность потеряна» — это ЛИЦО ЗАКРЫТО: ArcFace
+#: опирается на область глаз, и любая окклюзия раздувает расстояние даже на
+#: том же человеке. Тот же дефект раньше проявился одеждой и позой
+#: (`gpt-image-2`, забракован владельцем глазами).
 ROLE_CLAUSE = ("keep the person from the FIRST image unchanged — same face, "
-               "same identity; restyle the whole frame in the look of the "
-               "SECOND image")
+               "same identity, same clothing, same pose, same accessories; "
+               "take ONLY the lighting, colour grade, background and "
+               "photographic look from the SECOND image")
+
+#: Запрет протечки внешности из стилевого референса. Отдельной константой от
+#: `NO_BRANDS_CLAUSE`, потому что это РАЗНЫЕ решения с разной историей: бренды
+#: запрещены владельцем как продуктовая позиция, а аксессуары — как ответ на
+#: измеренный дефект. Слипшись в одну строку, они потеряли бы обе истории.
+NO_LOOK_TRANSFER_CLAUSE = ("do not copy any garment, accessory, eyewear, "
+                           "headwear, hairstyle or pose from the second "
+                           "image; the second image is a colour and lighting "
+                           "reference only")
 
 #: Ступени по порядку. Список — это и есть порядок прогона (Е1): печать,
 #: остановка и отчёт берут имена отсюда, а не из своих строк.
@@ -582,7 +600,8 @@ def style_prompt(style_ref, *, card_reader=None) -> dict:
 
     card = fork_style_prompt.from_image(style_ref, reader=card_reader)
     words = card.get("prompt")
-    parts = [ROLE_CLAUSE] + ([words] if words else []) + [NO_BRANDS_CLAUSE]
+    parts = ([ROLE_CLAUSE] + ([words] if words else [])
+             + [NO_LOOK_TRANSFER_CLAUSE, NO_BRANDS_CLAUSE])
     return {"prompt": ", ".join(parts), "card_outcome": card.get("outcome"),
             "card_note": card.get("note"), "words": words}
 
