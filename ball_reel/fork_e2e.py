@@ -1228,7 +1228,31 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                             frames_dir=out / "out_frames", probe=probe,
                             decode=decode, distances=distances, cuts=cuts,
                             operator_ok_identity=operator_ok_identity))
-                        if r6["outcome"] == PASS:
+                        # ПОЧЕМУ ЗДЕСЬ НЕ `== PASS`, В ОТЛИЧИЕ ОТ ВСЕХ
+                        # ОСТАЛЬНЫХ СТУПЕНЕЙ.
+                        #
+                        # Ступень 7 — механическая: обрезка в 9:16 и возврат
+                        # звука. Она НЕ ЗАВИСИТ от того, доказана личность или
+                        # нет; она делает тот самый файл, КОТОРЫМ ОПЕРАТОР И
+                        # СУДИТ. Остановиться перед ней на исходе «не смогли»
+                        # значит заплатить за Kling и не отдать оператору
+                        # предмет суждения — это и был дефект.
+                        #
+                        # ИЗМЕРЕНО, почему «не смогли» здесь — норма, а не
+                        # редкость: приём driving_b4 даёт лицо 31..98 px и 161
+                        # кадр вообще без лица из 450. ArcFace на таком выходе
+                        # физически не судья, и решением владельца от 22.08 это
+                        # ПРЕДУПРЕЖДЕНИЕ, а не брак.
+                        #
+                        # ВЕРДИКТ ПРОГОНА ОТ ЭТОГО НЕ ОТБЕЛИВАЕТСЯ: `stopped`
+                        # уже проставлен ступенью 6, итог остаётся «не смогли»
+                        # и код возврата 2. Мы доделываем работу, а не
+                        # переписываем оценку (Р1).
+                        #
+                        # На `не годно` ступень 7 НЕ идёт: там выход
+                        # горизонтальный или подменена личность, и резать
+                        # заведомый брак незачем.
+                        if r6["outcome"] != FAIL:
                             step(lambda: stage_finish(
                                 produced=r5.get("produced", produced),
                                 driving=driving, out_path=final,
@@ -1277,10 +1301,18 @@ def main(argv=None) -> int:
     ap.add_argument("--driving", required=True)
     ap.add_argument("--window", required=True, help="первый:последний, напр. 100:199")
     ap.add_argument("--out", default="work/e2e")
+    # Канал ОПЕРАТОРСКОГО ВЕРДИКТА по личности. Он существует потому, что на
+    # средней полосе лестницы (между планкой и ступенью «другой человек»)
+    # ArcFace измеряет окклюзию, а не подмену, и решение там принимает глаз.
+    # Флаг ЯВНЫЙ и виден в отчёте строкой «ДОПУЩЕНО ОПЕРАТОРОМ»: молча средняя
+    # полоса не проходится никогда.
+    ap.add_argument("--operator-ok-identity", action="store_true",
+                    help="оператор посмотрел глазами и допустил личность")
     a = ap.parse_args(argv)
     first, last = parse_window(a.window)
     got = run(client_photo=a.client, style_ref=a.style, driving=a.driving,
-              first=first, last=last, out_dir=a.out)
+              first=first, last=last, out_dir=a.out,
+              operator_ok_identity=a.operator_ok_identity)
     return got["exit_code"]
 
 

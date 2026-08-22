@@ -946,3 +946,86 @@ class TheOutputIdentityUsesTheSameLadderAsTheStyledPhoto(unittest.TestCase):
     def test_a_real_swap_is_failed_even_for_the_operator(self):
         self.assertEqual(self._axis(0.90, operator_ok_identity=True)["outcome"],
                          E.FAIL)
+
+
+class TheDeliverableIsBuiltEvenWhenIdentityCannotBeMeasured(unittest.TestCase):
+    """Ступень 7 механическая, и «не смогли» на ступени 6 её НЕ отменяет.
+
+    ЗАЧЕМ СТОРОЖ. Гейт `r6 == PASS` означал: заплатили за Kling, ArcFace не
+    сумел судить мелкое лицо — и оператор не получил файла, КОТОРЫМ он как раз
+    и должен судить. ИЗМЕРЕНО, что это не редкость: приём driving_b4 даёт лицо
+    31..98 px и 161 кадр из 450 вообще без лица.
+    """
+
+    # Прибор личности ОДИН на две ступени: ступень 3 судит стилизованное фото
+    # (один путь), ступень 6 — кадры выхода (много). Подставной прибор обязан
+    # различать их так же, иначе он уронит ступень 3 и до ступени 6 дело не
+    # дойдёт — на этом первая редакция теста и покраснела.
+    @staticmethod
+    def _on_output(median):
+        def distances(frames, anchor, **kw):
+            if len(frames) == 1:                 # стилизованное фото: чисто
+                return {"outcome": PASS, "median": 0.0652, "inside": 1,
+                        "judged": 1, "note": "подставной прибор личности"}
+            return {"outcome": PASS, "median": median, "inside": 0,
+                    "judged": len(frames), "note": "кадры выхода"}
+        return distances
+
+    @property
+    def _band(self):
+        """Средняя полоса лестницы: 0.5109 — БОЕВОЕ измерение 22.08."""
+        return self._on_output(0.5109)
+
+    @property
+    def _swap(self):
+        """Выше ступени «другой человек» 0.7137 — настоящая подмена."""
+        return self._on_output(0.9)
+
+    def test_an_unmeasurable_identity_still_yields_the_final_file(self):
+        log = io.StringIO()
+        with TemporaryDirectory() as td, _no_network():
+            root = Path(td)
+            got = _run(root, log, distances=self._band)
+            final = root / "out" / "final_9x16.mp4"
+            self.assertTrue(final.exists(), "финального файла нет — судить нечем")
+        names = [s["stage"] for s in got["stages"]]
+        self.assertIn(E.STAGES[6], names)
+
+    def test_but_the_verdict_is_NOT_whitewashed_into_good(self):
+        # Вторая сторона: доделали работу — не значит переписали оценку (Р1).
+        log = io.StringIO()
+        with TemporaryDirectory() as td, _no_network():
+            got = _run(Path(td), log, distances=self._band)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["exit_code"], 2)
+        self.assertEqual(got["stopped_at"], E.STAGES[5])
+
+    def test_a_real_swap_still_stops_before_the_finish(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ гейта: на «не годно» ступень 7 обязана НЕ идти,
+        # иначе гейт снят целиком, а не смягчён.
+        log = io.StringIO()
+        with TemporaryDirectory() as td, _no_network():
+            root = Path(td)
+            got = _run(root, log, distances=self._swap)
+            self.assertFalse((root / "out" / "final_9x16.mp4").exists())
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertNotIn(E.STAGES[6], [s["stage"] for s in got["stages"]])
+
+    def test_the_operator_flag_reaches_run_from_the_command_line(self):
+        # Канал операторского вердикта обязан быть ПРОВОДИМ до `run`: флаг,
+        # который разбирается и теряется, выглядит рабочим до первого прогона.
+        seen = {}
+
+        def fake_run(**kw):
+            seen.update(kw)
+            return {"exit_code": 0}
+
+        with mock.patch.object(E, "run", fake_run):
+            E.main(["--client", "c.png", "--style", "s.png", "--driving",
+                    "d.mp4", "--window", "100:199", "--operator-ok-identity"])
+        self.assertIs(seen["operator_ok_identity"], True)
+        seen.clear()
+        with mock.patch.object(E, "run", fake_run):
+            E.main(["--client", "c.png", "--style", "s.png", "--driving",
+                    "d.mp4", "--window", "100:199"])
+        self.assertIs(seen["operator_ok_identity"], False)
