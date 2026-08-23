@@ -110,6 +110,12 @@ def _stylize_ok(*, person, style, prompt, out_path):
     return str(out_path)
 
 
+def _pose_ok(path):
+    """Подставная поза В ПЛАНЕ: тест ступени не про mediapipe (Т4)."""
+    return {"l_shoulder": (0.58, 0.32, 0.99), "r_shoulder": (0.42, 0.32, 0.99),
+            "l_ankle": (0.55, 0.92, 0.96), "r_ankle": (0.45, 0.92, 0.96)}
+
+
 class _PlanOk:
     """Подставной сосед-план: НЕ ХОДИТ НА ДИСК и не тащит PIL (Т4).
 
@@ -131,6 +137,12 @@ class _PlanOk:
                 "unmeasured": 0, "path": str(dst), "extended": True,
                 "note": "подставная дорисовка полей"}
 
+    # Полосы и коробка берутся у НАСТОЯЩЕГО соседа: подставлять сюда свои
+    # числа значило бы сторожить выдуманную полосу вместо отгружаемой (Т2).
+    from ball_reel.fork_plan import (ANKLES_BAND, CENTRE_TOL,  # noqa: E402
+                                     SHOULDERS_BAND, WIDTH_MAX, person_box)
+    person_box = staticmethod(person_box)
+
 
 def _run(root: Path, log, **over):
     f = _files(root)
@@ -140,7 +152,7 @@ def _run(root: Path, log, **over):
               similarity=_similarity_ok, distances=_distances_ok,
               probe=_probe_ok, cutter=_cutter_ok, decode=_decode_ok,
               cuts=_cuts_ok, upload=_upload_ok, kling=_kling_ok,
-              finish=_finish_ok, plan=_PlanOk, log=log)
+              finish=_finish_ok, plan=_PlanOk, pose=_pose_ok, log=log)
     kw.update(over)
     return E.run(**kw)
 
@@ -746,14 +758,14 @@ class BrandBanIsInThePrompt(unittest.TestCase):
         with TemporaryDirectory() as td:
             got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                   out_path=Path(td) / "styled.png",
-                                  stylize=_stylize_ok, plan=_PlanOk,
+                                  stylize=_stylize_ok, plan=_PlanOk, pose=_pose_ok,
                                   prompt="just make it look nice")
             self.assertEqual(got["outcome"], "не годно")
             self.assertEqual(got["checks"][0]["outcome"], "не годно")
             # И вход, на котором сторож обязан молчать (И5).
             ok = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                  out_path=Path(td) / "styled.png",
-                                 stylize=_stylize_ok, plan=_PlanOk,
+                                 stylize=_stylize_ok, plan=_PlanOk, pose=_pose_ok,
                                  prompt="a look, " + E.NO_BRANDS_CLAUSE)
             self.assertEqual(ok["outcome"], "годно")
 
@@ -763,7 +775,7 @@ class BrandBanIsInThePrompt(unittest.TestCase):
             with TemporaryDirectory() as td:
                 got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                       out_path=Path(td) / "styled.png",
-                                      stylize=_stylize_ok, plan=_PlanOk,
+                                      stylize=_stylize_ok, plan=_PlanOk, pose=_pose_ok,
                                       prompt="a look, no brand names, no logos")
         self.assertEqual(got["outcome"], "не годно")
 
@@ -1168,7 +1180,7 @@ class TheStandActuallyCallsItsNeighbours(unittest.TestCase):
         with TemporaryDirectory() as td:
             got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                   out_path=Path(td) / "styled.png",
-                                  stylize=_stylize_ok, plan=_PlanOk,
+                                  stylize=_stylize_ok, plan=_PlanOk, pose=_pose_ok,
                                   prompt="a look, " + E.NO_BRANDS_CLAUSE)
         # ПЕРЕПИСАН: за планом теперь идёт ДОРИСОВКА ПОЛЕЙ, и дальше едет её
         # файл. Сторожим то же самое — что доделка меняет путь, а не считается
@@ -1234,8 +1246,8 @@ class TheGenderGateStopsTheRunBeforeAnyGeneration(unittest.TestCase):
             got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                   out_path=Path(td) / "styled.png",
                                   stylize=counting, plan=_PlanOk,
-                                  aesthetic="y2k", client_gender="m",
-                                  aesthetic_mod=self._A)
+                                  pose=_pose_ok, aesthetic="y2k",
+                                  client_gender="m", aesthetic_mod=self._A)
         self.assertEqual(got["outcome"], FAIL)
         self.assertEqual(seen, [], "стилизатор позван при разъехавшемся поле")
         self.assertIn("генерация не запускалась", got["note"])
@@ -1254,8 +1266,8 @@ class TheGenderGateStopsTheRunBeforeAnyGeneration(unittest.TestCase):
             got = E.stage_stylize(client_photo="c.png", style_ref="ЧУЖОЙ.png",
                                   out_path=Path(td) / "styled.png",
                                   stylize=counting, plan=_PlanOk,
-                                  aesthetic="y2k", client_gender="f",
-                                  aesthetic_mod=self._A)
+                                  pose=_pose_ok, aesthetic="y2k",
+                                  client_gender="f", aesthetic_mod=self._A)
         self.assertEqual(got["outcome"], PASS)
         self.assertIn("y2k_f.png", seen["style"])
         self.assertNotIn("ЧУЖОЙ", seen["style"])
@@ -1313,6 +1325,11 @@ class TheOutpaintFixesTheLetterboxWithoutLosingTheRun(unittest.TestCase):
     """
 
     class _PlanNoExtend:
+        from ball_reel.fork_plan import (ANKLES_BAND, CENTRE_TOL,  # noqa: E402
+                                         SHOULDERS_BAND, WIDTH_MAX,
+                                         person_box)
+        person_box = staticmethod(person_box)
+
         @staticmethod
         def to_plan(src, dst, **kw):
             Path(dst).write_bytes(b"\x00" * 64)
@@ -1332,6 +1349,7 @@ class TheOutpaintFixesTheLetterboxWithoutLosingTheRun(unittest.TestCase):
             got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                   out_path=Path(td) / "styled.png",
                                   stylize=_stylize_ok, plan=self._PlanNoExtend,
+                                  pose=_pose_ok,
                                   prompt="a look, " + E.NO_BRANDS_CLAUSE)
         self.assertEqual(got["outcome"], UNMEASURED)
         self.assertTrue(got["styled"].endswith("_9x16.png"), got["styled"])
@@ -1402,3 +1420,62 @@ class ThePrintedPriceFollowsTheWindowLength(unittest.TestCase):
                                 probe=broken)
         self.assertIsNone(got["numbers"]["seconds"])
         self.assertEqual(got["numbers"]["price_usd"], E.KLING_PRICE_USD)
+
+
+class ThePersonMustBeInPlanNotJustTheCanvas(unittest.TestCase):
+    """Канвас проверялся, а ПОЗА на рефке — ни разу, и это стоило денег.
+
+    ИЗМЕРЕНО 22.08 после первого десятисекундного ролика: все ШЕСТЬ боевых
+    рефок промахнулись мимо полосы щиколоток (0.6064..0.7855 при полосе
+    0.86..0.99) — человек нарисован мельче и выше плана, под ним пустой пол.
+    Драйвинги ставят щиколотки на 0.913..1.037. Kling масштабирует персонажа
+    под скелет драйвинга, и тот уезжает за край кадра.
+
+    Проверка стоит НОЛЬ и идёт ДО денег.
+    """
+
+    from ball_reel import fork_plan as _P
+
+    GOOD = {"l_shoulder": (0.58, 0.32, 0.99), "r_shoulder": (0.42, 0.32, 0.99),
+            "l_wrist": (0.66, 0.62, 0.97), "r_wrist": (0.34, 0.62, 0.97),
+            "l_ankle": (0.55, 0.92, 0.96), "r_ankle": (0.45, 0.92, 0.96)}
+
+    def _check(self, points):
+        return E._person_in_plan("к.png", plan=self._P,
+                                 pose=lambda p: points)
+
+    def test_a_reference_in_plan_passes(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: проверка обязана уметь говорить «годно».
+        self.assertEqual(self._check(self.GOOD)[1], PASS)
+
+    def test_the_measured_y2k_reference_is_caught(self):
+        # Боевые числа y2k: плечи 0.4846, щиколотки 0.7358 — обе оси мимо.
+        bad = dict(self.GOOD,
+                   l_shoulder=(0.58, 0.4846, 0.99), r_shoulder=(0.42, 0.4846, 0.99),
+                   l_ankle=(0.55, 0.7358, 0.96), r_ankle=(0.45, 0.7358, 0.96))
+        name, outcome, note = self._check(bad)
+        self.assertEqual(outcome, FAIL)
+        self.assertIn("0.4846", note)
+        self.assertIn("0.7358", note)
+
+    def test_the_measured_tomatoes_reference_is_caught_on_the_centre(self):
+        # Промт tomatoes ставит человека в ЛЕВУЮ половину: центр 0.2601.
+        bad = {k: (v[0] - 0.24, v[1], v[2]) for k, v in self.GOOD.items()}
+        bad = dict(bad, l_ankle=(0.31, 0.7816, 0.96), r_ankle=(0.21, 0.7816, 0.96))
+        self.assertEqual(self._check(bad)[1], FAIL)
+
+    def test_a_pose_that_will_not_read_is_UNMEASURED_not_failed(self):
+        # Отсутствие прибора не есть брак картинки (Р1).
+        self.assertEqual(self._check({})[1], UNMEASURED)
+
+    def test_a_falling_pose_reader_is_UNMEASURED(self):
+        def broken(_):
+            raise RuntimeError("mediapipe не загрузился")
+
+        self.assertEqual(
+            E._person_in_plan("к.png", plan=self._P, pose=broken)[1], UNMEASURED)
+
+    def test_the_note_says_WHY_it_matters_not_just_that_it_failed(self):
+        # Вердикт без причины оператор не может использовать.
+        bad = dict(self.GOOD, l_ankle=(0.55, 0.70, 0.96), r_ankle=(0.45, 0.70, 0.96))
+        self.assertIn("уедет за край", self._check(bad)[2])

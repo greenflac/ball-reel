@@ -720,10 +720,50 @@ def _default_plan():
     return fork_plan
 
 
+def _person_in_plan(image, *, plan, pose=None) -> tuple:
+    """Попадает ли ЧЕЛОВЕК на картинке в полосы плана. Три исхода.
+
+    Поза — точка внедрения: без неё проверка тащила бы mediapipe в каждый тест.
+    Нет позы — «не смогли», и это НЕ «не годно»: отсутствие прибора не есть
+    брак картинки.
+    """
+    if pose is None:
+        def pose(path):
+            from . import fork_looper                     # noqa: PLC0415
+
+            return (fork_looper.read_pose(str(path)) or {}).get("points") or {}
+    try:
+        points = pose(str(image))
+    except Exception as exc:                              # noqa: BLE001
+        return ("человек в плане", UNMEASURED,
+                f"позу не сняли: {type(exc).__name__}: {exc}")
+    box = plan.person_box(points)
+    if box["outcome"] != PASS:
+        return ("человек в плане", UNMEASURED, str(box.get("note"))[:200])
+    bad = []
+    lo, hi = plan.SHOULDERS_BAND
+    if not lo <= (box["shoulders"] or -1) <= hi:
+        bad.append(f"плечи {box['shoulders']} вне {lo}..{hi}")
+    lo, hi = plan.ANKLES_BAND
+    if not lo <= (box["ankles"] or -1) <= hi:
+        bad.append(f"щиколотки {box['ankles']} вне {lo}..{hi}")
+    if abs(box["centre"] - 0.5) > plan.CENTRE_TOL:
+        bad.append(f"центр {box['centre']} дальше {plan.CENTRE_TOL} от середины")
+    if box["width"] > plan.WIDTH_MAX:
+        bad.append(f"ширина {box['width']} выше {plan.WIDTH_MAX}")
+    tail = (f"плечи {box['shoulders']}, щиколотки {box['ankles']}, центр "
+            f"{box['centre']}, ширина {box['width']}")
+    if bad:
+        return ("человек в плане", FAIL,
+                "; ".join(bad) + f" ({tail}). Kling масштабирует персонажа под "
+                f"скелет драйвинга: рефка не в плане уедет за край кадра")
+    return ("человек в плане", PASS, tail)
+
+
 def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
                   card_reader=None, prompt=None, aesthetic=None,
                   client_gender=None, plan=None, aesthetic_mod=None,
-                  extend=None) -> dict:
+                  extend=None, pose=None) -> dict:
     """Фото клиента + стилевой референс -> стилизованное фото.
 
     `prompt` — точка внедрения и одновременно негативный контроль сторожа
@@ -808,6 +848,17 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
                        str(ext.get("note"))[:200]))
         if ext["outcome"] == PASS:
             made = ext["path"]
+
+        # ГДЕ НА РЕФКЕ СТОИТ ЧЕЛОВЕК. Канвас мы проверяли, а ПОЗУ — ни разу,
+        # и это стоило денег: ИЗМЕРЕНО 22.08, что все шесть боевых рефок
+        # промахнулись мимо полосы щиколоток (0.61..0.79 при полосе
+        # 0.86..0.99), то есть человек нарисован мельче и выше плана, под ним
+        # пустой пол. Драйвинги ставят щиколотки на 0.91..1.04. Kling
+        # масштабирует персонажа под скелет драйвинга, и тот уезжает за край —
+        # ровно то, что владелец увидел на первом десятисекундном ролике.
+        #
+        # ЭТА ПРОВЕРКА СТОИТ НОЛЬ И ИДЁТ ДО ДЕНЕГ.
+        checks.append(_person_in_plan(made, plan=P, pose=pose))
 
     return _result(STAGES[1], checks, styled=made, prompt=prompt,
                    note=str(built["card_note"] or "")[:160])
@@ -1315,7 +1366,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
         upload=None, kling=None, finish=None, card_reader=None,
         driving_frames=None, operator_ok_identity: bool = False,
         aesthetic=None, client_gender=None, plan=None, aesthetic_mod=None,
-        extend=None,
+        extend=None, pose=None,
         orientation: str = CHARACTER_ORIENTATION, endpoint: str = KLING_ENDPOINT,
         log=None) -> dict:
     """Весь путь по ступеням. Печатает КАЖДУЮ сразу и стоит на первой «не годно».
@@ -1363,7 +1414,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                                         aesthetic=aesthetic,
                                         client_gender=client_gender,
                                         plan=plan, aesthetic_mod=aesthetic_mod,
-                                        extend=extend))
+                                        extend=extend, pose=pose))
         if r2["outcome"] == PASS:
             r3 = step(lambda: stage_style_acceptance(
                 styled=r2.get("styled", styled), style_ref=style_ref,
