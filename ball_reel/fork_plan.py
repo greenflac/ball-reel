@@ -303,6 +303,154 @@ def to_plan(src, dst, *, opener=None, filler=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# КАРТОЧКА КОМПОЗИЦИИ: драйвинг задаёт план, эстетика в него генерируется
+# ---------------------------------------------------------------------------
+#
+# АРХИТЕКТУРНОЕ РЕШЕНИЕ ВЛАДЕЛЬЦА 22.08: «нужно архитектурное решение, например
+# композицию кадра драйвинга пробросить в промт эстетики».
+#
+# ЧТО ЭТО МЕНЯЕТ. Раньше план был ГЛОБАЛЬНОЙ КОНСТАНТОЙ (полосы ниже), и под
+# неё не подходил никто: ИЗМЕРЕНО, что все шесть боевых рефок промахнулись мимо
+# полосы щиколоток, а четыре драйвинга сами разъезжаются между собой (щиколотки
+# 0.625..1.037). Константа спорила и с эстетиками, и с материалом.
+#
+# ТЕПЕРЬ ЗАВИСИМОСТЬ ПЕРЕВЁРНУТА В СТОРОНУ, ГДЕ СВОБОДЫ НЕТ. Драйвинг —
+# купленный материал, его композицию не подвинуть. Эстетику мы пишем сами.
+# Значит КАРТОЧКА КОМПОЗИЦИИ снимается с драйвинга, словами уходит в промт
+# эстетики, и той же карточкой потом проверяется результат. Один источник
+# истины вместо трёх спорящих.
+#
+# ДОПУСК НЕ ВЫБИРАЕТСЯ, А ИЗМЕРЯЕТСЯ. Человек в танце двигается, и его
+# щиколотки гуляют от кадра к кадру. Разброс самого драйвинга и есть честный
+# допуск: требовать от эстетики точнее, чем держится сам материал, бессмысленно.
+
+#: ВЫБРАНО 0.05: минимальный допуск. Из чего: даже неподвижный человек даёт
+#: дрожание разметки на пару процентов кадра, и допуск уже этого превратил бы
+#: проверку в генератор ложных тревог.
+CARD_TOL_MIN = 0.05
+
+#: ВЫБРАНО 0.20: потолок допуска. Из чего: полоса шире пятой части кадра
+#: перестаёт что-либо запрещать — в неё влезет и «по пояс», и «в полный рост».
+CARD_TOL_MAX = 0.20
+
+
+def _spread(values):
+    """Половина размаха между 10-м и 90-м процентилями. Края отброшены
+    намеренно: один кадр, где разметка сорвалась, не должен задавать допуск
+    для всей эстетики."""
+    got = sorted(v for v in values if v is not None)
+    if len(got) < 3:
+        return None
+    lo = got[int(0.10 * (len(got) - 1))]
+    hi = got[int(0.90 * (len(got) - 1))]
+    return round((hi - lo) / 2, 4)
+
+
+def composition_card(poses, *, min_visibility: float = MIN_VISIBILITY) -> dict:
+    """Где стоит человек НА ДРАЙВИНГЕ: медианы плюс измеренный разброс.
+
+    `poses` — список разметок кадров (то, что отдаёт `fork_looper.read_pose`
+    в поле `points`). Своего распаковщика и своего детектора здесь нет (Е1).
+
+    Три исхода: `не смогли`, если ни на одном кадре позу не прочитали.
+    """
+    boxes = [person_box(p, min_visibility=min_visibility) for p in (poses or [])]
+    good = [b for b in boxes if b["outcome"] == PASS]
+    if not good:
+        return {**tally(0, 0, 1), "note": (f"позу не прочитали ни на одном "
+                                           f"кадре из {len(boxes)}")}
+
+    def med(key):
+        got = sorted(b[key] for b in good if b.get(key) is not None)
+        return round(got[len(got) // 2], 4) if got else None
+
+    def tol(key):
+        got = _spread([b.get(key) for b in good])
+        if got is None:
+            return CARD_TOL_MIN
+        return round(min(max(got, CARD_TOL_MIN), CARD_TOL_MAX), 4)
+
+    card = {"shoulders": med("shoulders"), "ankles": med("ankles"),
+            "centre": med("centre"), "width": med("width"),
+            "tol_shoulders": tol("shoulders"), "tol_ankles": tol("ankles"),
+            "tol_centre": tol("centre"), "tol_width": tol("width"),
+            "frames": len(good), "of": len(boxes)}
+    return {**tally(len(good), 0, len(boxes) - len(good)), **card,
+            "note": (f"по {len(good)} кадрам из {len(boxes)}: плечи "
+                     f"{card['shoulders']}+-{card['tol_shoulders']}, щиколотки "
+                     f"{card['ankles']}+-{card['tol_ankles']}, центр "
+                     f"{card['centre']}+-{card['tol_centre']}, ширина "
+                     f"{card['width']}+-{card['tol_width']}")}
+
+
+def _height_words(top, bottom) -> str:
+    """Числа -> фотографический язык. Модель понимает «в полный рост, ступни у
+    нижнего края» и НЕ понимает «щиколотки на 0.913»: числа в промте она
+    перечитывает как текст, а не как координаты. Числа остаются в отчёте."""
+    span = None if (top is None or bottom is None) else bottom - top
+    if span is None:
+        return "full-length framing, the whole person inside the frame"
+    if span >= 0.55:
+        shot = ("a full-length shot: the person occupies most of the frame "
+                "height, head near the top and feet near the bottom edge")
+    elif span >= 0.38:
+        shot = ("a full-length shot with air: the whole person is in frame, "
+                "feet in the lower part of the frame, some space above the head")
+    else:
+        shot = ("a wider shot: the person is small in the frame, the whole body "
+                "visible with generous space around")
+    low = ("the feet almost touch the bottom edge" if (bottom or 0) >= 0.90
+           else "the feet sit in the lower third of the frame"
+           if (bottom or 0) >= 0.75 else "the feet sit around mid-frame")
+    return f"{shot}; {low}"
+
+
+def framing_clause(card) -> str:
+    """Карточка композиции -> строка промта. Собирается ОТДЕЛЬНО от вызова:
+    состав промта — решение, и оно обязано краснеть в тесте (Т5)."""
+    if not isinstance(card, dict) or card.get("outcome") != PASS:
+        return ""
+    parts = [_height_words(card.get("shoulders"), card.get("ankles"))]
+    off = abs((card.get("centre") or 0.5) - 0.5)
+    parts.append("the person centred horizontally" if off <= 0.08 else
+                 ("the person placed left of centre" if card["centre"] < 0.5
+                  else "the person placed right of centre"))
+    parts.append("shot on a normal lens with no perspective distortion, the "
+                 "camera at chest height and far enough back to keep the whole "
+                 "body in frame")
+    return ("FRAMING, this outranks any framing described above: "
+            + "; ".join(parts))
+
+
+def in_card(points, card, *, min_visibility: float = MIN_VISIBILITY) -> dict:
+    """Попадает ли поза на картинке в КАРТОЧКУ ДРАЙВИНГА, а не в глобальные
+    полосы. Допуск берётся из самой карточки — он ИЗМЕРЕН по материалу."""
+    if not isinstance(card, dict) or card.get("outcome") != PASS:
+        return {**tally(0, 0, 1),
+                "note": "карточки композиции нет: сверять не с чем"}
+    box = person_box(points, min_visibility=min_visibility)
+    if box["outcome"] != PASS:
+        return {**tally(0, 0, 1), "note": str(box.get("note"))[:200]}
+    bad, seen = [], 0
+    for key, label in (("shoulders", "плечи"), ("ankles", "щиколотки"),
+                       ("centre", "центр"), ("width", "ширина")):
+        want, tol, got = card.get(key), card.get(f"tol_{key}"), box.get(key)
+        if want is None or got is None:
+            continue
+        seen += 1
+        if abs(got - want) > tol:
+            bad.append(f"{label} {got} против {want}+-{tol}")
+    if not seen:
+        return {**tally(0, 0, 1), "note": "ни одну ось сравнить не удалось"}
+    return {**tally(seen, len(bad), 0), "box": box,
+            "note": ("; ".join(bad) + "; Kling масштабирует персонажа под "
+                     "скелет драйвинга, и рефка не в карточке уедет за край"
+                     if bad else
+                     f"совпало по {seen} осям: плечи {box['shoulders']}, "
+                     f"щиколотки {box['ankles']}, центр {box['centre']}")}
+
+
+# ---------------------------------------------------------------------------
 # Поля плана -> продолжение сцены
 # ---------------------------------------------------------------------------
 #

@@ -720,7 +720,7 @@ def _default_plan():
     return fork_plan
 
 
-def _person_in_plan(image, *, plan, pose=None) -> tuple:
+def _person_in_plan(image, *, plan, pose=None, card=None) -> tuple:
     """Попадает ли ЧЕЛОВЕК на картинке в полосы плана. Три исхода.
 
     Поза — точка внедрения: без неё проверка тащила бы mediapipe в каждый тест.
@@ -737,6 +737,13 @@ def _person_in_plan(image, *, plan, pose=None) -> tuple:
     except Exception as exc:                              # noqa: BLE001
         return ("человек в плане", UNMEASURED,
                 f"позу не сняли: {type(exc).__name__}: {exc}")
+    # ЕСТЬ КАРТОЧКА ДРАЙВИНГА — сверяем с НЕЙ, а не с глобальными полосами:
+    # план задаёт МАТЕРИАЛ, а не константа модуля. Полосы остаются запасным
+    # путём для прогонов без драйвинга.
+    if card is not None:
+        got = plan.in_card(points, card)
+        return ("человек в карточке драйвинга", got["outcome"],
+                str(got.get("note"))[:250])
     box = plan.person_box(points)
     if box["outcome"] != PASS:
         return ("человек в плане", UNMEASURED, str(box.get("note"))[:200])
@@ -763,7 +770,7 @@ def _person_in_plan(image, *, plan, pose=None) -> tuple:
 def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
                   card_reader=None, prompt=None, aesthetic=None,
                   client_gender=None, plan=None, aesthetic_mod=None,
-                  extend=None, pose=None) -> dict:
+                  extend=None, pose=None, card=None) -> dict:
     """Фото клиента + стилевой референс -> стилизованное фото.
 
     `prompt` — точка внедрения и одновременно негативный контроль сторожа
@@ -794,8 +801,12 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
             return _result(STAGES[1], checks_pre,
                            note="пол не сошёлся: генерация не запускалась")
         style_ref = str(A.aesthetic_file(aesthetic))
-        prompt = (f"{A.compose(aesthetic)['prompt']}. "
-                  f"{A.assemble_prompt()}")
+        # КАРТОЧКА КОМПОЗИЦИИ ДРАЙВИНГА идёт в ОБА промта: и в описание
+        # эстетики, и в роли сборки. Иначе рефка рисуется по композиции
+        # эстетики, а Kling кладёт на неё скелет драйвинга — и персонаж уезжает
+        # за край (ИЗМЕРЕНО на всех шести рефках).
+        prompt = (f"{A.compose(aesthetic, card=card)['prompt']}. "
+                  f"{A.assemble_prompt(card=card)}")
 
     built = ({"prompt": prompt, "card_note": "промт подан снаружи"}
              if prompt is not None else style_prompt(style_ref,
@@ -858,7 +869,7 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
         # ровно то, что владелец увидел на первом десятисекундном ролике.
         #
         # ЭТА ПРОВЕРКА СТОИТ НОЛЬ И ИДЁТ ДО ДЕНЕГ.
-        checks.append(_person_in_plan(made, plan=P, pose=pose))
+        checks.append(_person_in_plan(made, plan=P, pose=pose, card=card))
 
     return _result(STAGES[1], checks, styled=made, prompt=prompt,
                    note=str(built["card_note"] or "")[:160])
@@ -1366,7 +1377,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
         upload=None, kling=None, finish=None, card_reader=None,
         driving_frames=None, operator_ok_identity: bool = False,
         aesthetic=None, client_gender=None, plan=None, aesthetic_mod=None,
-        extend=None, pose=None,
+        extend=None, pose=None, card=None,
         orientation: str = CHARACTER_ORIENTATION, endpoint: str = KLING_ENDPOINT,
         log=None) -> dict:
     """Весь путь по ступеням. Печатает КАЖДУЮ сразу и стоит на первой «не годно».
@@ -1414,7 +1425,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                                         aesthetic=aesthetic,
                                         client_gender=client_gender,
                                         plan=plan, aesthetic_mod=aesthetic_mod,
-                                        extend=extend, pose=pose))
+                                        extend=extend, pose=pose, card=card))
         if r2["outcome"] == PASS:
             r3 = step(lambda: stage_style_acceptance(
                 styled=r2.get("styled", styled), style_ref=style_ref,

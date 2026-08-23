@@ -1228,11 +1228,14 @@ class TheGenderGateStopsTheRunBeforeAnyGeneration(unittest.TestCase):
             return f"assets/aesthetics/{aid}_f.png"
 
         @staticmethod
-        def compose(aid):
+        def compose(aid, *, card=None):
+            # Сигнатура повторяет НАСТОЯЩУЮ, включая карточку композиции:
+            # подставка с удобной сигнатурой зеленела бы на контракте,
+            # которого нет.
             return {"prompt": "эстетика словами"}
 
         @staticmethod
-        def assemble_prompt():
+        def assemble_prompt(*, card=None):
             return "роли, " + E.NO_BRANDS_CLAUSE
 
     def test_a_mismatched_gender_stops_before_the_styliser_is_called(self):

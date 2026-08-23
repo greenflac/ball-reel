@@ -306,3 +306,90 @@ class TheDiskIsAnInjectionPoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheDrivingDictatesThePlanNotAConstant(unittest.TestCase):
+    """Архитектурное решение владельца 22.08: «композицию кадра драйвинга
+    пробросить в промт эстетики».
+
+    ЗАВИСИМОСТЬ ПЕРЕВЁРНУТА В СТОРОНУ, ГДЕ СВОБОДЫ НЕТ: драйвинг — купленный
+    материал, его композицию не подвинуть; эстетику мы пишем сами. Раньше план
+    был глобальной константой и спорил и с эстетиками, и с материалом —
+    ИЗМЕРЕНО: все шесть рефок мимо полосы щиколоток, четыре драйвинга
+    разъезжаются между собой (0.625..1.037).
+    """
+
+    @staticmethod
+    def poses(ankle=0.92, shoulder=0.32, centre=0.5, jitter=0.01, n=20):
+        return [{"l_shoulder": (centre + 0.08, shoulder + i * jitter, 0.99),
+                 "r_shoulder": (centre - 0.08, shoulder, 0.99),
+                 "l_ankle": (centre + 0.05, ankle + i * jitter, 0.96),
+                 "r_ankle": (centre - 0.05, ankle, 0.96)} for i in range(n)]
+
+    def test_the_card_is_measured_from_the_frames(self):
+        got = P.composition_card(self.poses(ankle=0.90, shoulder=0.40))
+        self.assertEqual(got["outcome"], PASS)
+        # 0.90 + 10 * 0.005: щиколотка усредняется по двум точкам, из которых
+        # едет одна, и медиана двадцати кадров берёт одиннадцатый.
+        self.assertAlmostEqual(got["ankles"], 0.9500, places=3)
+        self.assertEqual(got["frames"], 20)
+
+    def test_the_tolerance_comes_from_the_material_not_from_taste(self):
+        # Спокойный драйвинг даёт узкий допуск, размашистый — широкий.
+        calm = P.composition_card(self.poses(jitter=0.0))
+        wild = P.composition_card(self.poses(jitter=0.02))
+        self.assertEqual(calm["tol_ankles"], P.CARD_TOL_MIN)
+        self.assertGreater(wild["tol_ankles"], calm["tol_ankles"])
+
+    def test_the_tolerance_is_clamped_at_both_ends(self):
+        # Ниже пола проверка стала бы генератором ложных тревог, выше потолка
+        # перестала бы что-либо запрещать.
+        huge = P.composition_card(self.poses(jitter=0.2))
+        self.assertEqual(huge["tol_ankles"], P.CARD_TOL_MAX)
+        self.assertEqual((P.CARD_TOL_MIN, P.CARD_TOL_MAX), (0.05, 0.20))
+
+    def test_no_readable_pose_is_UNMEASURED_not_an_empty_card(self):
+        self.assertEqual(P.composition_card([{}, {}])["outcome"], UNMEASURED)
+        self.assertEqual(P.composition_card([])["outcome"], UNMEASURED)
+
+    def test_the_clause_speaks_photography_not_coordinates(self):
+        # Модель перечитывает «0.913» как текст, а не как координату. Числа
+        # остаются в отчёте, в промт идут слова.
+        card = P.composition_card(self.poses(ankle=0.93, shoulder=0.30))
+        text = P.framing_clause(card)
+        self.assertIn("full-length shot", text)
+        self.assertIn("feet", text)
+        self.assertNotIn("0.9", text)
+
+    def test_the_clause_says_it_outranks_the_aesthetic_framing(self):
+        # Композиция уже описана в промте владельца — у y2k это широкий угол
+        # вплотную. Без этой оговорки наша строка добавила бы противоречие.
+        text = P.framing_clause(P.composition_card(self.poses()))
+        self.assertIn("outranks", text)
+        self.assertIn("no perspective distortion", text)
+
+    def test_an_off_centre_driving_says_so(self):
+        left = P.framing_clause(P.composition_card(self.poses(centre=0.26)))
+        self.assertIn("left of centre", left)
+
+    def test_no_card_means_no_clause_and_NOT_a_guess(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: без измерения промт не дополняется вовсе.
+        self.assertEqual(P.framing_clause(None), "")
+        self.assertEqual(P.framing_clause({"outcome": UNMEASURED}), "")
+
+    def test_a_reference_matching_the_card_passes(self):
+        card = P.composition_card(self.poses(ankle=0.92, shoulder=0.32))
+        got = P.in_card(self.poses()[0], card)
+        self.assertEqual(got["outcome"], PASS)
+
+    def test_the_measured_y2k_miss_is_caught_against_the_b4_card(self):
+        # Боевые числа: карточка b4 щиколотки ~0.913, рефка y2k 0.7358.
+        card = P.composition_card(self.poses(ankle=0.913, shoulder=0.531))
+        miss = self.poses(ankle=0.7358, shoulder=0.4846)[0]
+        got = P.in_card(miss, card)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("щиколотки", got["note"])
+        self.assertIn("уедет за край", got["note"])
+
+    def test_without_a_card_the_check_is_UNMEASURED_not_a_pass(self):
+        self.assertEqual(P.in_card(self.poses()[0], None)["outcome"], UNMEASURED)

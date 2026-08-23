@@ -334,7 +334,7 @@ NEVER_THE_FACE_CLAUSE = (
 )
 
 
-def assemble_prompt(*, legacy: bool = False) -> str:
+def assemble_prompt(*, legacy: bool = False, card=None) -> str:
     """Промт сборки рефки. `legacy=True` даёт СТАРЫЕ строки стенда.
 
     Старый вариант оставлен нарочно и не как совместимость: он НЕГАТИВНЫЙ
@@ -346,7 +346,9 @@ def assemble_prompt(*, legacy: bool = False) -> str:
                                ROLE_CLAUSE)
 
         return f"{ROLE_CLAUSE}. {NO_LOOK_TRANSFER_CLAUSE}. {no_brands_clause()}"
-    return (f"{AESTHETIC_ROLE_CLAUSE}. {NEVER_THE_FACE_CLAUSE}. "
+    framing = framing_clause(card)
+    tail = f" {framing}." if framing else ""
+    return (f"{AESTHETIC_ROLE_CLAUSE}. {NEVER_THE_FACE_CLAUSE}.{tail} "
             f"{no_brands_clause()}")
 
 
@@ -483,7 +485,19 @@ def no_brands_clause() -> str:
     return NO_BRANDS_CLAUSE
 
 
-def compose(aesthetic, *, with_ban: bool = True, cut_body: bool = True) -> dict:
+def framing_clause(card) -> str:
+    """Строка кадрирования из КАРТОЧКИ ДРАЙВИНГА (Е1: она живёт в fork_plan).
+
+    Импорт ленивый: стенд зовёт оба модуля, и связывание на импорте замкнуло бы
+    круг.
+    """
+    from . import fork_plan                               # noqa: PLC0415
+
+    return fork_plan.framing_clause(card)
+
+
+def compose(aesthetic, *, with_ban: bool = True, cut_body: bool = True,
+            card=None) -> dict:
     """Промт эстетики: материал владельца + разрешение конфликта личности.
 
     Порядок ВЫБРАН и не случаен: промт владельца идёт ПЕРВЫМ и целиком, потому
@@ -503,6 +517,14 @@ def compose(aesthetic, *, with_ban: bool = True, cut_body: bool = True) -> dict:
     body = cut["prompt"] if cut and cut["outcome"] == PASS else own
 
     parts = [body, IDENTITY_CLAUSE]
+    # КАДРИРОВАНИЕ ИДЁТ ПОСЛЕДНИМ И ГОВОРИТ, ЧТО ОНО ГЛАВНЕЕ. Композиция уже
+    # описана в промте владельца — у y2k это широкий угол вплотную, — и наша
+    # строка обязана его перебить, иначе она просто добавит противоречие.
+    # Замыкающая позиция ВЫБРАНА: ведущие токены задают тему, замыкающие —
+    # ограничение, а кадрирование здесь именно ограничение.
+    framing = framing_clause(card)
+    if framing:
+        parts.append(framing)
     if with_ban:
         parts.append(no_brands_clause())
     text = ". ".join(parts)
@@ -510,7 +532,7 @@ def compose(aesthetic, *, with_ban: bool = True, cut_body: bool = True) -> dict:
            "промт владельца ДОСЛОВНО (РЕЗ ОТКЛЮЧЁН ЯВНО)")
     return {**tally(1, 0, 0), "prompt": text,
             "id": aesthetic.get("id"), "kind": aesthetic.get("kind"),
-            "words": len(text.split()), "cut": cut,
+            "words": len(text.split()), "cut": cut, "framed": bool(framing),
             "brand_conflict": brand_conflict(aesthetic),
             "note": (f"эстетика {aesthetic.get('id')}: слов {len(text.split())}, "
                      f"{how} + личность"
