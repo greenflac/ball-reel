@@ -110,6 +110,21 @@ def _stylize_ok(*, person, style, prompt, out_path):
     return str(out_path)
 
 
+class _PlanOk:
+    """Подставной сосед-план: НЕ ХОДИТ НА ДИСК и не тащит PIL (Т4).
+
+    Сигнатура повторяет настоящую `fork_plan.to_plan`: подставка с удобной
+    сигнатурой зеленела бы на контракте, которого нет.
+    """
+
+    @staticmethod
+    def to_plan(src, dst, **kw):
+        Path(dst).write_bytes(b"\x00" * 64)
+        return {"outcome": PASS, "checked": 1, "violations": 0,
+                "unmeasured": 0, "path": str(dst),
+                "note": "подставной план 9:16"}
+
+
 def _run(root: Path, log, **over):
     f = _files(root)
     kw = dict(client_photo=f["client"], style_ref=f["style"],
@@ -118,7 +133,7 @@ def _run(root: Path, log, **over):
               similarity=_similarity_ok, distances=_distances_ok,
               probe=_probe_ok, cutter=_cutter_ok, decode=_decode_ok,
               cuts=_cuts_ok, upload=_upload_ok, kling=_kling_ok,
-              finish=_finish_ok, log=log)
+              finish=_finish_ok, plan=_PlanOk, log=log)
     kw.update(over)
     return E.run(**kw)
 
@@ -724,14 +739,14 @@ class BrandBanIsInThePrompt(unittest.TestCase):
         with TemporaryDirectory() as td:
             got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                   out_path=Path(td) / "styled.png",
-                                  stylize=_stylize_ok,
+                                  stylize=_stylize_ok, plan=_PlanOk,
                                   prompt="just make it look nice")
             self.assertEqual(got["outcome"], "не годно")
             self.assertEqual(got["checks"][0]["outcome"], "не годно")
             # И вход, на котором сторож обязан молчать (И5).
             ok = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                  out_path=Path(td) / "styled.png",
-                                 stylize=_stylize_ok,
+                                 stylize=_stylize_ok, plan=_PlanOk,
                                  prompt="a look, " + E.NO_BRANDS_CLAUSE)
             self.assertEqual(ok["outcome"], "годно")
 
@@ -741,7 +756,7 @@ class BrandBanIsInThePrompt(unittest.TestCase):
             with TemporaryDirectory() as td:
                 got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
                                       out_path=Path(td) / "styled.png",
-                                      stylize=_stylize_ok,
+                                      stylize=_stylize_ok, plan=_PlanOk,
                                       prompt="a look, no brand names, no logos")
         self.assertEqual(got["outcome"], "не годно")
 
@@ -1086,7 +1101,7 @@ class TheFramesChannelReachesRunFromTheCommandLine(unittest.TestCase):
         # Каталог с одним отчётом — это ПУСТОЙ каталог кадров, а не каталог
         # с одним кадром: иначе приёмщик получит на вход json.
         with TemporaryDirectory() as td:
-            (Path(td) / "report.json").write_text("{}")
+            (Path(td) / "report.json").write_text("{}", encoding="utf-8")
             with self.assertRaises(ValueError):
                 E.frame_paths(td)
 
@@ -1125,3 +1140,153 @@ class ThePriceIsPerSecondNotPerCall(unittest.TestCase):
         for bad in ("5", None, True):
             with self.subTest(bad=bad), self.assertRaises(TypeError):
                 E.kling_price(bad)
+
+
+class TheStandActuallyCallsItsNeighbours(unittest.TestCase):
+    """Соседи `fork_aesthetic` и `fork_plan` ПОЗВАНЫ, а не просто написаны.
+
+    Репозиторий ловит это отдельным правилом (`test_reachable`), и он прав:
+    модуль, живущий только в справочнике, в конвейере не работает. Здесь —
+    проверка не факта импорта, а того, что вызов ВЛИЯЕТ на исход.
+    """
+
+    def test_the_neighbours_are_imported_for_real_not_by_string(self):
+        # `soft_import` по строке не считается: правило смотрит на настоящий
+        # импорт, и правильно делает — по строке связь не видна ничему.
+        self.assertTrue(hasattr(E._default_aesthetic(), "gender_of"))
+        self.assertTrue(hasattr(E._default_plan(), "to_plan"))
+
+    def test_the_plan_step_changes_which_file_goes_on(self):
+        # Сторож дефекта: план, посчитанный и выброшенный, выглядит рабочим.
+        with TemporaryDirectory() as td:
+            got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
+                                  out_path=Path(td) / "styled.png",
+                                  stylize=_stylize_ok, plan=_PlanOk,
+                                  prompt="a look, " + E.NO_BRANDS_CLAUSE)
+        self.assertTrue(got["styled"].endswith("_9x16.png"), got["styled"])
+
+    def test_a_plan_that_could_not_be_laid_is_UNMEASURED_not_a_defect(self):
+        class Broken:
+            @staticmethod
+            def to_plan(src, dst, **kw):
+                raise OSError("картинка не открылась")
+
+        with TemporaryDirectory() as td:
+            got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
+                                  out_path=Path(td) / "styled.png",
+                                  stylize=_stylize_ok, plan=Broken,
+                                  prompt="a look, " + E.NO_BRANDS_CLAUSE)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        # И файл остаётся ПРЕЖНИЙ, а не выдуманный: врать про путь нельзя.
+        self.assertTrue(got["styled"].endswith("styled.png"))
+
+
+class TheGenderGateStopsTheRunBeforeAnyGeneration(unittest.TestCase):
+    """ИЗМЕРЕНО, чем кончается его отсутствие: клиент-мужчина с женской
+    эстетикой получил юбку, и ВСЕ приборы при этом были зелёными."""
+
+    class _A:
+        """Подставной сосед-эстетика с настоящей сигнатурой."""
+
+        calls = []
+
+        @staticmethod
+        def gender_of(aid):
+            return "f"
+
+        @staticmethod
+        def pair_check(*, client_gender, aesthetic_gender):
+            ok = client_gender == aesthetic_gender
+            return {"outcome": PASS if ok else FAIL, "checked": 1,
+                    "violations": 0 if ok else 1, "unmeasured": 0,
+                    "note": "подставной гейт"}
+
+        @staticmethod
+        def aesthetic_file(aid):
+            return f"assets/aesthetics/{aid}_f.png"
+
+        @staticmethod
+        def compose(aid):
+            return {"prompt": "эстетика словами"}
+
+        @staticmethod
+        def assemble_prompt():
+            return "роли, " + E.NO_BRANDS_CLAUSE
+
+    def test_a_mismatched_gender_stops_before_the_styliser_is_called(self):
+        seen = []
+
+        def counting(**kw):
+            seen.append(kw)
+            return kw["out_path"]
+
+        with TemporaryDirectory() as td:
+            got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
+                                  out_path=Path(td) / "styled.png",
+                                  stylize=counting, plan=_PlanOk,
+                                  aesthetic="y2k", client_gender="m",
+                                  aesthetic_mod=self._A)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertEqual(seen, [], "стилизатор позван при разъехавшемся поле")
+        self.assertIn("генерация не запускалась", got["note"])
+
+    def test_a_matching_gender_goes_through_and_uses_the_aesthetic_file(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ гейта: он обязан уметь пропускать, и вторая
+        # картинка обязана стать ЭСТЕТИКОЙ, а не прежним референсом.
+        seen = {}
+
+        def counting(**kw):
+            seen.update(kw)
+            Path(kw["out_path"]).write_bytes(b"\x00" * 64)
+            return kw["out_path"]
+
+        with TemporaryDirectory() as td:
+            got = E.stage_stylize(client_photo="c.png", style_ref="ЧУЖОЙ.png",
+                                  out_path=Path(td) / "styled.png",
+                                  stylize=counting, plan=_PlanOk,
+                                  aesthetic="y2k", client_gender="f",
+                                  aesthetic_mod=self._A)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertIn("y2k_f.png", seen["style"])
+        self.assertNotIn("ЧУЖОЙ", seen["style"])
+        self.assertIn("эстетика словами", seen["prompt"])
+
+
+class TheTemplateFlagsReachRunFromTheCommandLine(unittest.TestCase):
+    """Флаг, который разбирается и теряется, выглядит рабочим до прогона."""
+
+    def _seen(self, argv):
+        seen = {}
+
+        def fake_run(**kw):
+            seen.update(kw)
+            return {"exit_code": 0}
+
+        with mock.patch.object(E, "run", fake_run):
+            E.main(argv)
+        return seen
+
+    def test_the_aesthetic_and_gender_travel_to_run(self):
+        got = self._seen(["--client", "c.png", "--driving", "d.mp4",
+                          "--window", "100:199", "--aesthetic", "y2k",
+                          "--client-gender", "f"])
+        self.assertEqual(got["aesthetic"], "y2k")
+        self.assertEqual(got["client_gender"], "f")
+
+    def test_an_aesthetic_without_a_gender_is_refused(self):
+        # Пол — гейт, а не удобство: без него шаблон уедет чужому клиенту.
+        with self.assertRaises(SystemExit):
+            self._seen(["--client", "c.png", "--driving", "d.mp4",
+                        "--window", "100:199", "--aesthetic", "y2k"])
+
+    def test_neither_style_nor_aesthetic_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self._seen(["--client", "c.png", "--driving", "d.mp4",
+                        "--window", "100:199"])
+
+    def test_the_old_style_path_still_works_without_an_aesthetic(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: прежний путь не сломан новым флагом.
+        got = self._seen(["--client", "c.png", "--style", "s.png",
+                          "--driving", "d.mp4", "--window", "100:199"])
+        self.assertIsNone(got["aesthetic"])
+        self.assertEqual(got["style_ref"], "s.png")

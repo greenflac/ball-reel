@@ -704,19 +704,63 @@ def style_prompt(style_ref, *, card_reader=None) -> dict:
             "card_note": card.get("note"), "words": words}
 
 
+def _default_aesthetic():
+    """Сосед-эстетика. Импорт настоящий, а не по строке: модуль, позванный
+    только через `soft_import`, репозиторий считает неподключённым — и он прав,
+    такой модуль есть в справочнике, а в конвейере его нет."""
+    from . import fork_aesthetic                         # noqa: PLC0415
+
+    return fork_aesthetic
+
+
+def _default_plan():
+    """Сосед-план. Тот же довод, что и выше."""
+    from . import fork_plan                              # noqa: PLC0415
+
+    return fork_plan
+
+
 def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
-                  card_reader=None, prompt=None) -> dict:
+                  card_reader=None, prompt=None, aesthetic=None,
+                  client_gender=None, plan=None, aesthetic_mod=None) -> dict:
     """Фото клиента + стилевой референс -> стилизованное фото.
 
     `prompt` — точка внедрения и одновременно негативный контроль сторожа
     брендов: подать промт БЕЗ запрета и увидеть красное — единственный способ
     отличить работающую проверку от строки, которая всегда зелена.
+
+    `aesthetic` — ИМЯ ЭСТЕТИКИ. С ним ступень работает по модели шаблонов
+    (решение владельца 22.08): вторая картинка — не чужой референс, а наша
+    эстетика с демо-личностью, промт берётся у соседа `fork_aesthetic`, и
+    ГЕЙТ ПОЛА срабатывает ДО генерации. Без него ступень работает как раньше,
+    и все прежние сторожа остаются в силе.
+
+    ПЛАН НАКЛАДЫВАЕТСЯ ЗДЕСЬ ЖЕ, а не отдельной ступенью: ИЗМЕРЕНО, что
+    маршрут сборки глух к геометрии и всегда отвечает 896x1200 (0.7467), а
+    Kling наследует соотношение от фото. Значит приведение к 9:16 — это
+    доделка стилизации, а не самостоятельный шаг.
     """
+    A = _default_aesthetic() if aesthetic_mod is None else aesthetic_mod
+    checks_pre = []
+    if aesthetic is not None:
+        # ГЕЙТ ПОЛА ДО ДЕНЕГ И ДО ГЕНЕРАЦИИ. ИЗМЕРЕНО, чем кончается его
+        # отсутствие: клиент-мужчина с женской эстетикой получил юбку, и все
+        # приборы при этом были зелёными.
+        gender = A.gender_of(aesthetic)
+        pair = A.pair_check(client_gender=client_gender, aesthetic_gender=gender)
+        checks_pre.append(("пол клиента и шаблона", pair["outcome"], pair["note"]))
+        if pair["outcome"] != PASS:
+            return _result(STAGES[1], checks_pre,
+                           note="пол не сошёлся: генерация не запускалась")
+        style_ref = str(A.aesthetic_file(aesthetic))
+        prompt = (f"{A.compose(aesthetic)['prompt']}. "
+                  f"{A.assemble_prompt()}")
+
     built = ({"prompt": prompt, "card_note": "промт подан снаружи"}
              if prompt is not None else style_prompt(style_ref,
                                                      card_reader=card_reader))
     prompt = built["prompt"]
-    checks = [("запрет брендов в промте",
+    checks = list(checks_pre) + [("запрет брендов в промте",
                PASS if NO_BRANDS_CLAUSE in prompt else FAIL,
                NO_BRANDS_CLAUSE if NO_BRANDS_CLAUSE in prompt
                else "запрет вынули из промта: бренды поедут в кадр")]
@@ -733,8 +777,24 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
                    f"{STYLE_ROUTE}/{STYLE_MODEL}, {STYLE_IMAGES} картинки, "
                    f"{round(time.perf_counter() - t0, 1)} с"))
     checks.append(file_fact(got or out_path, "стилизованное фото"))
-    return _result(STAGES[1], checks, styled=str(got or out_path),
-                   prompt=prompt, note=str(built["card_note"] or "")[:160])
+    made = str(got or out_path)
+
+    # Приведение к плану 9:16. ВСЕГДА ДОПОЛНЕНИЕМ, никогда обрезкой: обрезка
+    # из 896x1200 в 9:16 уносила 24.02% ширины вместе с руками — тот самый
+    # дефект, ради которого сосед `fork_plan` и написан.
+    P = _default_plan() if plan is None else plan
+    planned = Path(str(out_path)).with_name(Path(str(out_path)).stem + "_9x16.png")
+    try:
+        laid = P.to_plan(made, planned)
+    except Exception as exc:                             # noqa: BLE001
+        checks.append(("план 9:16", UNMEASURED, f"{type(exc).__name__}: {exc}"))
+        return _result(STAGES[1], checks, styled=made, prompt=prompt,
+                       note=str(built["card_note"] or "")[:160])
+    checks.append(("план 9:16", laid["outcome"], str(laid.get("note"))[:200]))
+    if laid["outcome"] == PASS:
+        made = laid["path"]
+    return _result(STAGES[1], checks, styled=made, prompt=prompt,
+                   note=str(built["card_note"] or "")[:160])
 
 
 # ---------------------------------------------------------------------------
@@ -1215,6 +1275,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
         distances=None, probe=None, cutter=None, decode=None, cuts=None,
         upload=None, kling=None, finish=None, card_reader=None,
         driving_frames=None, operator_ok_identity: bool = False,
+        aesthetic=None, client_gender=None, plan=None, aesthetic_mod=None,
         orientation: str = CHARACTER_ORIENTATION, endpoint: str = KLING_ENDPOINT,
         log=None) -> dict:
     """Весь путь по ступеням. Печатает КАЖДУЮ сразу и стоит на первой «не годно».
@@ -1257,7 +1318,10 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
     if r1["outcome"] == PASS:
         r2 = step(lambda: stage_stylize(client_photo=client_photo,
                                         style_ref=style_ref, out_path=styled,
-                                        stylize=stylize, card_reader=card_reader))
+                                        stylize=stylize, card_reader=card_reader,
+                                        aesthetic=aesthetic,
+                                        client_gender=client_gender,
+                                        plan=plan, aesthetic_mod=aesthetic_mod))
         if r2["outcome"] == PASS:
             r3 = step(lambda: stage_style_acceptance(
                 styled=r2.get("styled", styled), style_ref=style_ref,
@@ -1368,10 +1432,17 @@ def main(argv=None) -> int:
 
     ap = argparse.ArgumentParser(description="сквозной стенд форка")
     ap.add_argument("--client", required=True)
-    ap.add_argument("--style", required=True)
+    ap.add_argument("--style", default=None,
+                    help="стилевой референс; не нужен при --aesthetic")
     ap.add_argument("--driving", required=True)
     ap.add_argument("--window", required=True, help="первый:последний, напр. 100:199")
     ap.add_argument("--out", default="work/e2e")
+    # Работа ПО ШАБЛОНУ: имя эстетики вместо чужого стилевого референса.
+    # Пол клиента обязателен вместе с ней — гейт роняет пару ДО генерации.
+    ap.add_argument("--aesthetic", default=None,
+                    help="имя эстетики из assets/fork_aesthetics.json")
+    ap.add_argument("--client-gender", default=None, choices=("m", "f"),
+                    help="пол клиента; обязателен вместе с --aesthetic")
     # Кадры драйвинга РАСПАКОВЫВАЕТ `fork_video.frames`, а не мы: второй
     # распаковщик в проекте был бы вторым способом узнать известное (Е1).
     # Без этого канала приёмщик честно отвечает «не смогли» по четырём осям
@@ -1388,10 +1459,16 @@ def main(argv=None) -> int:
     ap.add_argument("--operator-ok-identity", action="store_true",
                     help="оператор посмотрел глазами и допустил личность")
     a = ap.parse_args(argv)
+    if a.aesthetic is None and a.style is None:
+        ap.error("нужен либо --style, либо --aesthetic")
+    if a.aesthetic is not None and a.client_gender is None:
+        # Пол — не удобство, а гейт. Без него шаблон уедет клиенту чужого пола.
+        ap.error("--aesthetic требует --client-gender")
     first, last = parse_window(a.window)
     got = run(client_photo=a.client, style_ref=a.style, driving=a.driving,
               first=first, last=last, out_dir=a.out,
               driving_frames=frame_paths(a.frames),
+              aesthetic=a.aesthetic, client_gender=a.client_gender,
               operator_ok_identity=a.operator_ok_identity)
     return got["exit_code"]
 
