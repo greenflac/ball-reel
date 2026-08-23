@@ -722,7 +722,8 @@ def _default_plan():
 
 def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
                   card_reader=None, prompt=None, aesthetic=None,
-                  client_gender=None, plan=None, aesthetic_mod=None) -> dict:
+                  client_gender=None, plan=None, aesthetic_mod=None,
+                  extend=None) -> dict:
     """Фото клиента + стилевой референс -> стилизованное фото.
 
     `prompt` — точка внедрения и одновременно негативный контроль сторожа
@@ -793,6 +794,21 @@ def stage_stylize(*, client_photo, style_ref, out_path, stylize=None,
     checks.append(("план 9:16", laid["outcome"], str(laid.get("note"))[:200]))
     if laid["outcome"] == PASS:
         made = laid["path"]
+
+        # ДОРИСОВКА ПОЛЕЙ. Канвас уже правильный, а картинка — ещё нет: поля
+        # видны размытыми полосами. ИЗМЕРЕНО, что дорисовка лечит их и не
+        # трогает личность (сдвиг -0.0046 на боевой рефке).
+        #
+        # НЕ РОНЯЕТ ПРОГОН: если дорисовщик не ответил, идём дальше на
+        # картинке с полями. Она хуже, но она есть, а «не смогли дорисовать»
+        # и «рефки нет» — разные события.
+        grown = Path(made).with_name(Path(made).stem + "_full.png")
+        ext = P.extend_to_plan(made, grown, extender=extend)
+        checks.append(("дорисовка полей", ext["outcome"],
+                       str(ext.get("note"))[:200]))
+        if ext["outcome"] == PASS:
+            made = ext["path"]
+
     return _result(STAGES[1], checks, styled=made, prompt=prompt,
                    note=str(built["card_note"] or "")[:160])
 
@@ -1276,6 +1292,7 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
         upload=None, kling=None, finish=None, card_reader=None,
         driving_frames=None, operator_ok_identity: bool = False,
         aesthetic=None, client_gender=None, plan=None, aesthetic_mod=None,
+        extend=None,
         orientation: str = CHARACTER_ORIENTATION, endpoint: str = KLING_ENDPOINT,
         log=None) -> dict:
     """Весь путь по ступеням. Печатает КАЖДУЮ сразу и стоит на первой «не годно».
@@ -1321,7 +1338,8 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                                         stylize=stylize, card_reader=card_reader,
                                         aesthetic=aesthetic,
                                         client_gender=client_gender,
-                                        plan=plan, aesthetic_mod=aesthetic_mod))
+                                        plan=plan, aesthetic_mod=aesthetic_mod,
+                                        extend=extend))
         if r2["outcome"] == PASS:
             r3 = step(lambda: stage_style_acceptance(
                 styled=r2.get("styled", styled), style_ref=style_ref,

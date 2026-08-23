@@ -124,6 +124,13 @@ class _PlanOk:
                 "unmeasured": 0, "path": str(dst),
                 "note": "подставной план 9:16"}
 
+    @staticmethod
+    def extend_to_plan(src, dst, **kw):
+        Path(dst).write_bytes(b"\x00" * 64)
+        return {"outcome": PASS, "checked": 1, "violations": 0,
+                "unmeasured": 0, "path": str(dst), "extended": True,
+                "note": "подставная дорисовка полей"}
+
 
 def _run(root: Path, log, **over):
     f = _files(root)
@@ -1163,7 +1170,10 @@ class TheStandActuallyCallsItsNeighbours(unittest.TestCase):
                                   out_path=Path(td) / "styled.png",
                                   stylize=_stylize_ok, plan=_PlanOk,
                                   prompt="a look, " + E.NO_BRANDS_CLAUSE)
-        self.assertTrue(got["styled"].endswith("_9x16.png"), got["styled"])
+        # ПЕРЕПИСАН: за планом теперь идёт ДОРИСОВКА ПОЛЕЙ, и дальше едет её
+        # файл. Сторожим то же самое — что доделка меняет путь, а не считается
+        # и выбрасывается, — но на конце цепочки, а не на середине.
+        self.assertTrue(got["styled"].endswith("_9x16_full.png"), got["styled"])
 
     def test_a_plan_that_could_not_be_laid_is_UNMEASURED_not_a_defect(self):
         class Broken:
@@ -1290,3 +1300,53 @@ class TheTemplateFlagsReachRunFromTheCommandLine(unittest.TestCase):
                           "--driving", "d.mp4", "--window", "100:199"])
         self.assertIsNone(got["aesthetic"])
         self.assertEqual(got["style_ref"], "s.png")
+
+
+class TheOutpaintFixesTheLetterboxWithoutLosingTheRun(unittest.TestCase):
+    """Поля плана видны полосами. Прибор говорит «годно»: он проверяет
+    соотношение сторон и НЕ МОЖЕТ проверить, выглядит ли дополненная область
+    продолжением. Увидел глаз.
+
+    ЦЕНА ИЗМЕРЕНА НА ЧЕТЫРЁХ ТОЧКАХ, и первая была выбросом: -0.0046, потом
+    +0.0636, +0.0659, +0.0786. Дорисовка стоит около +0.065 расстояния до
+    клиента. По одному замеру было записано «не трогает» — неверно.
+    """
+
+    class _PlanNoExtend:
+        @staticmethod
+        def to_plan(src, dst, **kw):
+            Path(dst).write_bytes(b"\x00" * 64)
+            return {"outcome": PASS, "checked": 1, "violations": 0,
+                    "unmeasured": 0, "path": str(dst), "note": "план"}
+
+        @staticmethod
+        def extend_to_plan(src, dst, *, extender=None, **kw):
+            return {"outcome": UNMEASURED, "checked": 0, "violations": 0,
+                    "unmeasured": 1, "path": str(src), "extended": False,
+                    "note": "дорисовщик не ответил"}
+
+    def test_a_failed_outpaint_does_NOT_sink_the_stage(self):
+        # «Не смогли дорисовать» и «рефки нет» — разные события. Картинка с
+        # полями хуже, но она есть, и прогон обязан идти на ней.
+        with TemporaryDirectory() as td:
+            got = E.stage_stylize(client_photo="c.png", style_ref="s.png",
+                                  out_path=Path(td) / "styled.png",
+                                  stylize=_stylize_ok, plan=self._PlanNoExtend,
+                                  prompt="a look, " + E.NO_BRANDS_CLAUSE)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertTrue(got["styled"].endswith("_9x16.png"), got["styled"])
+
+    def test_the_extend_prompt_forbids_redrawing_the_person(self):
+        # Сторож ГЛАВНОЙ строки: без неё модель понимает «дорисуй кадр» как
+        # «нарисуй заново», и личность уезжает вместе с фоном.
+        from ball_reel import fork_plan
+
+        self.assertIn("do not move, rescale, recrop or alter the person",
+                      fork_plan.extend_prompt())
+        self.assertIn("no logo", fork_plan.extend_prompt())
+
+    def test_removing_the_keep_clause_is_visible_in_the_prompt(self):
+        from ball_reel import fork_plan
+
+        with mock.patch.object(fork_plan, "KEEP_SUBJECT_CLAUSE", ""):
+            self.assertNotIn("alter the person", fork_plan.extend_prompt())

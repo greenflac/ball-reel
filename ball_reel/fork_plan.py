@@ -303,6 +303,92 @@ def to_plan(src, dst, *, opener=None, filler=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Поля плана -> продолжение сцены
+# ---------------------------------------------------------------------------
+#
+# ЗАЧЕМ. `to_plan` даёт правильный КАНВАС, но не правильную КАРТИНКУ: поля
+# видны размытыми полосами, и на рефке `country` это читалось как чистый
+# леттербокс. Прибор при этом говорил «годно» — он проверяет соотношение
+# сторон и не может проверить, выглядит ли дополненная область продолжением.
+# Увидел глаз.
+#
+# ИЗМЕРЕНО, что дорисовка лечит поля: 896x1594 -> 1536x2752 на всех шести
+# боевых рефках.
+#
+# ЦЕНА ЛИЧНОСТИ — И ЗДЕСЬ ИСПРАВЛЕНИЕ СОБСТВЕННОГО ВЫВОДА. Первый замер дал
+# -0.0046 (0.4799 -> 0.4753), и по нему было записано «личность не трогает».
+# ОДНОГО ЗАМЕРА НЕ ХВАТИЛО: три следующих дали +0.0786, +0.0659, +0.0636.
+# Четыре точки вместе: -0.0046, +0.0636, +0.0659, +0.0786 — то есть дорисовка
+# СТОИТ примерно +0.065 расстояния до клиента, а первый результат был выбросом.
+#
+# ЧТО ЭТО ЗНАЧИТ НА ДЕЛЕ: цена умеренная и укладывается в среднюю полосу, где
+# судит глаз, но обещать «не трогает» нельзя. Полосы уходят, лицо чуть едет.
+
+#: Промт дорисовки. Собирается ОТДЕЛЬНО от вызова: состав промта — решение, и
+#: оно обязано краснеть в тесте, а не только в прогоне (Т5).
+EXTEND_CLAUSE = (
+    "extend this image so it fills the whole vertical frame edge to edge: the "
+    "blurred bands at the top and bottom must become a natural continuation of "
+    "the same scene — same background, same lighting, same perspective, same "
+    "colour grade — as if the photograph had always been this tall"
+)
+
+#: ГЛАВНАЯ строка дорисовки. Без неё модель перерисовывает кадр целиком, и
+#: личность уезжает вместе с фоном.
+KEEP_SUBJECT_CLAUSE = (
+    "do not move, rescale, recrop or alter the person in any way; keep the "
+    "same face and the same composition of the subject"
+)
+
+
+def extend_prompt(*, extra: str = "") -> str:
+    """Промт дорисовки полей плюс запрет надписей (Е1: запрет один на проект)."""
+    parts = [EXTEND_CLAUSE, KEEP_SUBJECT_CLAUSE, no_brands_clause()]
+    if extra:
+        parts.append(extra.strip())
+    return ". ".join(parts)
+
+
+def extend_to_plan(src, dst, *, extender=None, sizer=None) -> dict:
+    """Превратить поля плана в продолжение сцены.
+
+    Три исхода: `не смогли`, если дорисовщик не ответил — и это НЕ «не годно»:
+    картинка с полями хуже, но она есть, и прогон обязан идти дальше на ней.
+
+    ЛИЧНОСТЬ ЗДЕСЬ НЕ МЕРЯЕТСЯ НАРОЧНО. Прибор личности живёт у вызывающего, и
+    второй его экземпляр здесь был бы вторым способом узнать известное (Е1).
+    """
+    if extender is None:
+        def extender(prompt, source, out_path):
+            from . import pollinations                   # noqa: PLC0415
+
+            return pollinations.images_edit(prompt, source, out_path,
+                                            model="nanobanana-2")
+    prompt = extend_prompt()
+    try:
+        extender(prompt, str(src), str(dst))
+    except Exception as exc:                             # noqa: BLE001
+        return {**tally(0, 0, 1), "path": str(src), "extended": False,
+                "note": (f"дорисовщик не ответил: {type(exc).__name__}: {exc}. "
+                         f"Идём дальше НА КАРТИНКЕ С ПОЛЯМИ — она хуже, но она "
+                         f"есть")}
+    if sizer is None:
+        def sizer(path):
+            from PIL import Image                        # noqa: PLC0415
+
+            return Image.open(path).size
+    try:
+        w, h = sizer(str(dst))
+    except Exception as exc:                             # noqa: BLE001
+        return {**tally(0, 0, 1), "path": str(dst), "extended": True,
+                "note": f"размер дорисованного не снят: {type(exc).__name__}: {exc}"}
+    got = ratio_axis(w, h)
+    return {**tally(1, got["violations"], 0), "path": str(dst),
+            "extended": True, "width": w, "height": h,
+            "note": f"дорисовано до {w}x{h}; {got['note']}"}
+
+
+# ---------------------------------------------------------------------------
 # Промт: портрет клиента -> полный рост
 # ---------------------------------------------------------------------------
 
