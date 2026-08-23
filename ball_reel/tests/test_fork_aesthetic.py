@@ -473,3 +473,73 @@ class TheLeakIsMeasuredFromBOTHSides(unittest.TestCase):
                              distances=broken)
         self.assertEqual(got["outcome"], UNMEASURED)
         self.assertIn("RuntimeError", got["note"])
+
+
+class TheGenderPairIsAMachineGateNotANote(unittest.TestCase):
+    """Решение владельца 22.08: «верно, эстетики по полу».
+
+    Правило, записанное словами, живёт до первой спешки (Ц7). Здесь оно
+    роняет пару в «не годно» ДО всякой генерации.
+    """
+
+    def test_both_demos_are_the_universal_plan_assets(self):
+        self.assertEqual(sorted(A.GENDERS), ["f", "m"])
+        self.assertEqual(A.demo_for("m"), "assets/fork_plan_man_fullbody.png")
+        self.assertEqual(A.demo_for("f"), "assets/fork_plan_woman_fullbody.png")
+
+    def test_an_unknown_gender_is_refused_not_defaulted(self):
+        # Молчаливое умолчание подсунуло бы женскую эстетику мужчине — ровно
+        # тот дефект, ради которого правило заведено.
+        for bad in ("", "ж", None, "x"):
+            with self.subTest(bad=bad), self.assertRaises(KeyError):
+                A.demo_for(bad)
+
+    def test_the_gender_lives_in_the_file_name(self):
+        # Реестр на стороне может отстать от файла; имя — не может.
+        self.assertTrue(str(A.aesthetic_file("y2k", "m")).endswith("y2k_m.png"))
+        self.assertTrue(str(A.aesthetic_file("y2k", "f")).endswith("y2k_f.png"))
+
+    def test_a_matching_pair_passes(self):
+        got = A.pair_check(client_gender="m", aesthetic_gender="m")
+        self.assertEqual(got["outcome"], PASS)
+
+    def test_a_mismatched_pair_is_a_REAL_defect(self):
+        got = A.pair_check(client_gender="m", aesthetic_gender="f")
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("РАЗЪЕХАЛСЯ", got["note"])
+
+    def test_an_unnamed_gender_is_NOT_permission_to_continue(self):
+        got = A.pair_check(client_gender="", aesthetic_gender="m")
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("НЕ разрешение", got["note"])
+
+    def test_the_gate_is_case_and_space_insensitive(self):
+        self.assertEqual(
+            A.pair_check(client_gender=" M ", aesthetic_gender="m")["outcome"],
+            PASS)
+
+
+class TheGenderSplitDidNotFixTheWardrobeAndItIsRecorded(unittest.TestCase):
+    """ИЗМЕРЕННЫЙ ОТРИЦАТЕЛЬНЫЙ РЕЗУЛЬТАТ (И6), а не забытая догадка.
+
+    Разделение эстетик по полу СДЕЛАНО и работает как гейт, но заявленную
+    задачу НЕ РЕШИЛО: y2k на мужской демо-личности всё равно надел на мужчину
+    мини-юбку. Причина: юбка стоит В САМОМ ПРОМТЕ владельца, а не в демо, и
+    пол демо на гардероб не влияет.
+
+    Сторож стоит здесь, чтобы следующая сессия не переставила ту же ручку.
+    """
+
+    def test_the_owner_prompt_itself_names_the_gendered_garment(self):
+        prompt = A.load("y2k")["prompt"]
+        self.assertIn("denim mini skirt", prompt)
+        # И он переживает рез антропометрии — потому что одежда НЕ
+        # антропометрия и уноситься не должна.
+        self.assertIn("denim mini skirt", A.compose("y2k")["prompt"])
+
+    def test_the_cut_deliberately_leaves_the_wardrobe_alone(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ ошибочной догадки: если бы гардероб резался,
+        # эстетика перестала бы быть шаблоном.
+        got = A.strip_anthropometry(A.load("y2k")["prompt"])
+        self.assertIn("sweatshirt", got["prompt"])
+        self.assertIn("mini skirt", got["prompt"])
