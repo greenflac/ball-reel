@@ -1014,7 +1014,22 @@ def kling_payload(*, video_url: str, image_url: str,
             "character_orientation": character_orientation}
 
 
+def _window_seconds(window, *, prober=None) -> float | None:
+    """Длина куска драйвинга в секундах, или None. Догадку не подставляем:
+    цена без длины — величина без смысла, и лучше сказать «не знаем»."""
+    prober = _default_probe() if prober is None else prober
+    try:
+        info = prober(str(window))
+    except Exception:                                    # noqa: BLE001
+        return None
+    frames, fps = info.get("frames"), info.get("fps")
+    if not frames or not fps:
+        return None
+    return round(frames / fps, 3)
+
+
 def stage_kling(*, styled, window, out_path, upload=None, kling=None,
+                probe=None,
                 endpoint: str = KLING_ENDPOINT,
                 orientation: str = CHARACTER_ORIENTATION) -> dict:
     """Две загрузки и один платный вызов. Любой отказ — «не смогли», не «не годно».
@@ -1024,7 +1039,15 @@ def stage_kling(*, styled, window, out_path, upload=None, kling=None,
     брак там, где не было измерения, и снять это тем же способом, что и
     настоящий брак (Р1).
     """
-    checks, numbers = [], {"endpoint": endpoint, "price_usd": KLING_PRICE_USD}
+    # ЦЕНА СЧИТАЕТСЯ ПО ДЛИНЕ ОКНА, а не берётся константой. ИЗМЕРЕНО, зачем:
+    # на десятисекундном прогоне 22.08 стенд напечатал «$0.35», а счёт списал
+    # $0.70 (баланс 10.1490375 -> 9.4490375). Константа была зашита под пять
+    # секунд и на другой длине СОВРАЛА — а цифра в отчёте, которой нельзя
+    # верить, хуже отсутствующей.
+    seconds = _window_seconds(window, prober=probe)
+    price = KLING_PRICE_USD if seconds is None else kling_price(seconds)
+    checks, numbers = [], {"endpoint": endpoint, "price_usd": price,
+                           "seconds": seconds}
     try:
         refuse_pro(endpoint)
         checks.append(("сторож pro", PASS, f"{endpoint}: тарифов "
@@ -1075,7 +1098,7 @@ def stage_kling(*, styled, window, out_path, upload=None, kling=None,
     lo, hi = KLING_LATENCY_S
     checks.append(("вызов Kling", PASS,
                    f"{spent} с (измеренная полоса {lo}..{hi} с), "
-                   f"${KLING_PRICE_USD}"))
+                   f"${price}"))
     checks.append(file_fact(got or out_path, "выход Kling"))
     return _result(STAGES[4], checks, numbers=numbers,
                    produced=str(got or out_path))
@@ -1306,7 +1329,8 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     say(f"стенд: {len(STAGES)} ступеней, останов на первой «{FAIL}»; "
-        f"платный вызов ровно один (${KLING_PRICE_USD})", log=log)
+        f"платный вызов ровно один (${KLING_PRICE_USD} за "
+        f"{PRODUCT_SECONDS:g} с, {KLING_PRICE_PER_SECOND_USD}/с)", log=log)
 
     styled = out / "styled.png"
     window = out / "window.mp4"
@@ -1353,8 +1377,8 @@ def run(*, client_photo, style_ref, driving, first: int, last: int,
                     r5 = step(lambda: stage_kling(
                         styled=r2.get("styled", styled),
                         window=r4.get("window", window), out_path=produced,
-                        upload=upload, kling=kling, endpoint=endpoint,
-                        orientation=orientation))
+                        upload=upload, kling=kling, probe=probe,
+                        endpoint=endpoint, orientation=orientation))
                     if r5["outcome"] == PASS:
                         r6 = step(lambda: stage_output_acceptance(
                             produced=r5.get("produced", produced),

@@ -1350,3 +1350,55 @@ class TheOutpaintFixesTheLetterboxWithoutLosingTheRun(unittest.TestCase):
 
         with mock.patch.object(fork_plan, "KEEP_SUBJECT_CLAUSE", ""):
             self.assertNotIn("alter the person", fork_plan.extend_prompt())
+
+
+class ThePrintedPriceFollowsTheWindowLength(unittest.TestCase):
+    """ИЗМЕРЕНО 22.08: на десятисекундном прогоне стенд напечатал «$0.35», а
+    счёт списал $0.70 (баланс 10.1490375 -> 9.4490375). Константа была зашита
+    под пять секунд и на другой длине соврала.
+
+    Цифра в отчёте, которой нельзя верить, ХУЖЕ отсутствующей: по ней принимают
+    решения о батче.
+    """
+
+    @staticmethod
+    def _probe(frames, fps):
+        def prober(path):
+            return {"width": 816, "height": 1104, "fps": fps, "frames": frames,
+                    "note": "подставной опрос"}
+        return prober
+
+    def test_ten_seconds_is_seventy_cents(self):
+        self.assertEqual(E._window_seconds("w.mp4",
+                                           prober=self._probe(300, 30)), 10.0)
+        self.assertEqual(E.kling_price(10.0), 0.7)
+
+    def test_five_seconds_is_thirty_five_cents(self):
+        self.assertEqual(E._window_seconds("w.mp4",
+                                           prober=self._probe(150, 30)), 5.0)
+        self.assertEqual(E.kling_price(5.0), 0.35)
+
+    def test_the_stage_prints_the_price_it_will_actually_cost(self):
+        with TemporaryDirectory() as td:
+            got = E.stage_kling(styled="s.png", window="w.mp4",
+                                out_path=Path(td) / "out.mp4",
+                                upload=_upload_ok, kling=_kling_ok,
+                                probe=self._probe(300, 30))
+        self.assertEqual(got["numbers"]["price_usd"], 0.7)
+        self.assertEqual(got["numbers"]["seconds"], 10.0)
+        self.assertTrue(any("$0.7" in str(c["note"]) for c in got["checks"]),
+                        [c["note"] for c in got["checks"]])
+
+    def test_an_unmeasurable_window_falls_back_and_does_NOT_guess(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ: без длины цена неизвестна, и подставлять догадку
+        # нельзя — печатается продуктовая ставка, а длина честно None.
+        def broken(path):
+            raise OSError("файла нет")
+
+        with TemporaryDirectory() as td:
+            got = E.stage_kling(styled="s.png", window="w.mp4",
+                                out_path=Path(td) / "out.mp4",
+                                upload=_upload_ok, kling=_kling_ok,
+                                probe=broken)
+        self.assertIsNone(got["numbers"]["seconds"])
+        self.assertEqual(got["numbers"]["price_usd"], E.KLING_PRICE_USD)
