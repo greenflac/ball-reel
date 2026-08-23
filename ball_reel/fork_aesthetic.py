@@ -245,11 +245,33 @@ def demo_for(gender: str):
     return DEMOS[key]
 
 
-def aesthetic_file(aesthetic_id: str, gender: str, *, root=None) -> Path:
-    """Путь эстетики. Пол в имени, чтобы пара не могла разъехаться молча."""
-    demo_for(gender)                        # проверка пола до склейки имени
+def gender_of(aesthetic) -> str:
+    """Пол ШАБЛОНА. Он же пол эстетики: решение владельца 22.08 — «какая
+    стилевая рефка по полу такой и пол шаблона».
+
+    Читается ИЗ БАЗЫ, а не выводится из промта машиной: гардероб называет
+    владелец, и «мини-юбка» против «tailored bottoms» — его выбор, а не вывод
+    регулярного выражения. Отсутствие поля — исключение, а не умолчание:
+    молчаливое умолчание подсунуло бы клиенту шаблон чужого пола.
+    """
+    if isinstance(aesthetic, str):
+        aesthetic = load(aesthetic)
+    got = (aesthetic or {}).get("demo")
+    if str(got).strip().lower() not in DEMOS:
+        raise KeyError(f"у эстетики {(aesthetic or {}).get('id')!r} не назван "
+                       f"пол (поле «demo» из {GENDERS}), получено {got!r}")
+    return str(got).strip().lower()
+
+
+def aesthetic_file(aesthetic_id: str, gender: str | None = None, *,
+                   root=None) -> Path:
+    """Путь эстетики. Пол В ИМЕНИ ФАЙЛА, а не только в базе: имя едет вместе с
+    файлом и не может от него отстать. По умолчанию берётся ИЗ БАЗЫ.
+    """
+    g = gender_of(aesthetic_id) if gender is None else str(gender).strip().lower()
+    demo_for(g)                             # проверка пола до склейки имени
     base = AESTHETIC_DIR if root is None else Path(root)
-    return base / f"{aesthetic_id}_{str(gender).strip().lower()}.png"
+    return base / f"{aesthetic_id}_{g}.png"
 
 
 def pair_check(*, client_gender: str, aesthetic_gender: str) -> dict:
@@ -427,22 +449,27 @@ def load(aesthetic_id: str, path=None) -> dict:
 
 
 def brand_conflict(aesthetic: dict) -> dict:
-    """Называет ли промт владельца бренд. НЕ ПРАВИТ и НЕ РОНЯЕТ — сообщает.
+    """Какие марки названы в промте. СПРАВКА, а не гейт.
 
-    Три исхода честные: `не годно` было бы неправдой (промт рабочий), `годно`
-    — тоже (запрет проекта нарушен). Поэтому «не смогли решить»: решает
-    владелец, а прибор его об этом извещает.
+    БЫЛО: третий исход «решает владелец» — промты называли «Adidas» и
+    «Balenciaga», а запрет проекта запрещал названия марок.
+    СТАЛО: владелец решил 22.08 — «бренды пусть остаются, просто добавляем no
+    logo во все промты стилей». Конфликта больше нет.
+
+    ПОЧЕМУ ФУНКЦИЯ РАЗЖАЛОВАНА, А НЕ УДАЛЕНА. Список марок остаётся полезным
+    составителю. Но исход теперь всегда `годно`: гейт, докладывающий о решённом
+    как о нерешённом, — ложная тревога, и она обесценивает настоящие.
     """
     text = str(aesthetic.get("prompt", ""))
     hits = [w for w in ("Adidas", "Balenciaga", "Nike", "Gucci", "Prada",
                         "Zara", "Levi's", "Chanel") if w.lower() in text.lower()]
     if not hits:
         return {**tally(1, 0, 0), "brands": [],
-                "note": "брендов в промте не названо"}
-    return {**tally(0, 0, 1), "brands": hits,
-            "note": (f"промт называет бренды {hits}, а запрет проекта гласит "
-                     f"«no brand names, no logos». Промт владельца НЕ ПРАВЛЕН; "
-                     f"решает владелец")}
+                "note": "марок в промте не названо"}
+    return {**tally(1, 0, 0), "brands": hits,
+            "note": (f"промт называет марки {hits} — РАЗРЕШЕНО решением "
+                     f"владельца 22.08; запрещён только нарисованный знак, и "
+                     f"его отсутствие СУДИТ ГЛАЗ: прибора для надписей нет")}
 
 
 # ---------------------------------------------------------------------------

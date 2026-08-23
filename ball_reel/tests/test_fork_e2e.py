@@ -697,7 +697,11 @@ class IntakeSeam(unittest.TestCase):
 class BrandBanIsInThePrompt(unittest.TestCase):
     def test_the_prompt_carries_the_ban_and_the_roles(self):
         built = E.style_prompt("style.png", card_reader=lambda p: {})
-        self.assertIn("no brand names, no logos", built["prompt"])
+        # ПЕРЕПИСАН 22.08: владелец разрешил называть марки словами и оставил
+        # запрет только на НАРИСОВАННЫЙ знак. Прежний литерал сторожил решение,
+        # которого больше нет.
+        self.assertIn("no logo", built["prompt"])
+        self.assertNotIn("no brand names", built["prompt"])
         self.assertIn("FIRST image", built["prompt"])
         self.assertIn("SECOND image", built["prompt"])
 
@@ -709,7 +713,11 @@ class BrandBanIsInThePrompt(unittest.TestCase):
                 "texture": "clean flat surfaces"}
         built = E.style_prompt("style.png", card_reader=lambda p: card)
         self.assertIn("sky blue", built["prompt"])
-        self.assertIn("no brand names, no logos", built["prompt"])
+        # ПЕРЕПИСАН 22.08: владелец разрешил называть марки словами и оставил
+        # запрет только на НАРИСОВАННЫЙ знак. Прежний литерал сторожил решение,
+        # которого больше нет.
+        self.assertIn("no logo", built["prompt"])
+        self.assertNotIn("no brand names", built["prompt"])
 
     def test_a_prompt_without_the_ban_reddens_the_stage(self):
         """Негативный контроль сторожа: без него проверка всегда зелена."""

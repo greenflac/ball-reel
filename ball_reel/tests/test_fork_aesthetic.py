@@ -60,14 +60,24 @@ class TheOwnersBaseIsShippedWhole(unittest.TestCase):
                 A.load_base(p)
 
 
-class TheBrandConflictIsReportedNotResolved(unittest.TestCase):
-    """Владелец назвал бренды в своих промтах, а проект их запрещает."""
+class TheBrandListIsASpravkaNotAGate(unittest.TestCase):
+    """ПЕРЕПИСАН 22.08: владелец решил — «бренды пусть остаются». Конфликта
+    больше нет, и прибор разжалован из гейта в справку.
 
-    def test_a_branded_prompt_is_the_THIRD_outcome_not_a_defect(self):
-        # Ни «годно» (запрет нарушен), ни «не годно» (промт рабочий).
+    Гейт, докладывающий о решённом как о нерешённом, — ложная тревога, и она
+    обесценивает настоящие.
+    """
+
+    def test_a_branded_prompt_is_no_longer_a_third_outcome(self):
         got = A.brand_conflict(BRANDED)
-        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertEqual(got["outcome"], PASS)
         self.assertEqual(sorted(got["brands"]), ["Adidas", "Balenciaga"])
+        self.assertIn("РАЗРЕШЕНО", got["note"])
+
+    def test_the_note_says_out_loud_that_the_mark_is_judged_by_eye(self):
+        # Прибора, читающего надпись НА КАРТИНКЕ, у нас нет, и молчать об
+        # этом значило бы выдать справку за проверку.
+        self.assertIn("СУДИТ ГЛАЗ", A.brand_conflict(BRANDED)["note"])
 
     def test_a_clean_prompt_is_NOT_accused(self):
         # НЕГАТИВНЫЙ КОНТРОЛЬ: прибор, кричащий всегда, не значит ничего.
@@ -543,3 +553,79 @@ class TheGenderSplitDidNotFixTheWardrobeAndItIsRecorded(unittest.TestCase):
         got = A.strip_anthropometry(A.load("y2k")["prompt"])
         self.assertIn("sweatshirt", got["prompt"])
         self.assertIn("mini skirt", got["prompt"])
+
+
+class TheTemplateGenderIsTheAestheticGender(unittest.TestCase):
+    """Решение владельца 22.08: «не меняем пол в промтах, просто сами шаблоны
+    собираем в соответствии с полом; какая стилевая рефка по полу такой и пол
+    шаблона».
+
+    ЭТО ОТМЕНЯЕТ прежнюю попытку собирать каждую эстетику в двух полах: она
+    ИЗМЕРЕНО не работала — y2k на мужской демо-личности всё равно надел на
+    мужчину мини-юбку, потому что юбка стоит в промте. Теперь y2k просто
+    ЖЕНСКИЙ шаблон, и мужчине он не подаётся вовсе.
+    """
+
+    def test_every_shipped_aesthetic_names_its_gender(self):
+        # Без этого поля клиенту можно подсунуть шаблон чужого пола.
+        for aid in A.ids():
+            with self.subTest(aid=aid):
+                self.assertIn(A.gender_of(aid), A.GENDERS)
+
+    def test_the_shipped_assignment_is_the_one_chosen(self):
+        # Литералы (Т2): происхождение каждого — гардероб в промте владельца.
+        self.assertEqual(A.gender_of("y2k"), "f")          # мини-юбка, блеск
+        self.assertEqual(A.gender_of("midcentury"), "f")   # юбка, сапоги
+        self.assertEqual(A.gender_of("fisheye"), "m")      # тренч, нейтрален
+        self.assertEqual(A.gender_of("tomatoes"), "m")     # transform
+
+    def test_an_aesthetic_without_a_gender_is_refused_not_defaulted(self):
+        with self.assertRaises(KeyError) as e:
+            A.gender_of({"id": "безпола", "prompt": "x"})
+        self.assertIn("безпола", str(e.exception))
+
+    def test_the_file_name_follows_the_base_without_being_told(self):
+        self.assertTrue(str(A.aesthetic_file("y2k")).endswith("y2k_f.png"))
+        self.assertTrue(str(A.aesthetic_file("fisheye")).endswith("fisheye_m.png"))
+
+    def test_a_client_of_the_other_gender_is_stopped_before_generation(self):
+        # Гейт, ради которого всё: мужчина и женский шаблон не встречаются.
+        got = A.pair_check(client_gender="m",
+                           aesthetic_gender=A.gender_of("y2k"))
+        self.assertEqual(got["outcome"], FAIL)
+
+    def test_a_client_of_the_same_gender_passes(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ гейта: он обязан уметь пропускать.
+        got = A.pair_check(client_gender="m",
+                           aesthetic_gender=A.gender_of("fisheye"))
+        self.assertEqual(got["outcome"], PASS)
+
+
+class TheBrandBanWasNarrowedByTheOwner(unittest.TestCase):
+    """«Бренды пусть остаются, просто добавляем no logo во все промты стилей».
+
+    Прежняя редакция запрещала НАЗВАНИЯ МАРОК и этим воевала с промтами самого
+    владельца. ИЗМЕРЕНО, чем кончалась война: на y2k_f знака не было, на y2k_m
+    проступил читаемый «adidas» — исход решался случаем, а не запретом.
+    """
+
+    def test_the_ban_forbids_the_drawn_mark_not_the_word(self):
+        from ball_reel import fork_e2e
+
+        ban = fork_e2e.NO_BRANDS_CLAUSE
+        self.assertIn("no logo", ban)
+        self.assertIn("no lettering", ban)
+        self.assertNotIn("no brand names", ban)
+
+    def test_the_owners_own_brand_words_now_survive_into_the_prompt(self):
+        # Ровно то, ради чего правка: промт владельца больше не спорит сам с
+        # собой в одной строке.
+        built = A.compose("y2k")["prompt"]
+        self.assertIn("Adidas", built)
+        self.assertIn("no logo", built)
+
+    def test_the_ban_reaches_every_aesthetic_prompt(self):
+        # «Во все промты стилей» — проверяем ВСЕ, а не один.
+        for aid in A.ids():
+            with self.subTest(aid=aid):
+                self.assertIn("no logo", A.compose(aid)["prompt"])
