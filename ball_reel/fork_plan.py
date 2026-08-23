@@ -384,25 +384,26 @@ def composition_card(poses, *, min_visibility: float = MIN_VISIBILITY) -> dict:
 
 
 def _height_words(top, bottom) -> str:
-    """Числа -> фотографический язык. Модель понимает «в полный рост, ступни у
-    нижнего края» и НЕ понимает «щиколотки на 0.913»: числа в промте она
-    перечитывает как текст, а не как координаты. Числа остаются в отчёте."""
+    """Числа -> фотографический язык. Модель понимает «в полный рост» и НЕ
+    понимает «щиколотки на 0.913»: числа в промте она перечитывает как текст,
+    а не как координаты. Числа остаются в отчёте.
+
+    РЕШЕНИЕ ВЛАДЕЛЬЦА 22.08: «обрезку щиколоток переносить не надо, держим
+    только композицию». Директива про ступни у нижнего края УБРАНА. Остаётся
+    крупность — сколько кадра занимает человек, — и это композиция, а не
+    кадрирование по линии.
+    """
     span = None if (top is None or bottom is None) else bottom - top
     if span is None:
         return "full-length framing, the whole person inside the frame"
     if span >= 0.55:
-        shot = ("a full-length shot: the person occupies most of the frame "
-                "height, head near the top and feet near the bottom edge")
-    elif span >= 0.38:
-        shot = ("a full-length shot with air: the whole person is in frame, "
-                "feet in the lower part of the frame, some space above the head")
-    else:
-        shot = ("a wider shot: the person is small in the frame, the whole body "
-                "visible with generous space around")
-    low = ("the feet almost touch the bottom edge" if (bottom or 0) >= 0.90
-           else "the feet sit in the lower third of the frame"
-           if (bottom or 0) >= 0.75 else "the feet sit around mid-frame")
-    return f"{shot}; {low}"
+        return ("a full-length shot: the person occupies most of the frame "
+                "height, the whole body inside the frame")
+    if span >= 0.38:
+        return ("a full-length shot with air: the whole person is in frame "
+                "with some space above and below")
+    return ("a wider shot: the person is small in the frame, the whole body "
+            "visible with generous space around")
 
 
 def framing_clause(card) -> str:
@@ -431,9 +432,20 @@ def in_card(points, card, *, min_visibility: float = MIN_VISIBILITY) -> dict:
     box = person_box(points, min_visibility=min_visibility)
     if box["outcome"] != PASS:
         return {**tally(0, 0, 1), "note": str(box.get("note"))[:200]}
+    # СУДИМ ТОЛЬКО ОСИ КОМПОЗИЦИИ. Решение владельца 22.08: «обрезку щиколоток
+    # переносить не надо, держим только композицию».
+    #
+    # ПОЧЕМУ ЭТО НЕ ОСЛАБЛЕНИЕ ГЕЙТА, А ИСПРАВЛЕНИЕ ЕГО ПРЕДМЕТА. Линия плеч и
+    # линия щиколоток — это КАДРИРОВАНИЕ: где именно проходит обрез. Центр и
+    # ширина — это КОМПОЗИЦИЯ: где человек стоит и сколько кадра занимает.
+    # Переносить с драйвинга надо второе; первое у эстетики своё, и ИЗМЕРЕНО,
+    # что словами оно всё равно не переносится (щиколотки 0.7816 -> 0.8862 при
+    # цели 1.0282). Ось, которую невозможно выполнить, — не гейт, а тормоз.
+    #
+    # Числа плеч и щиколоток ОСТАЮТСЯ в карточке и в отчёте: перестать судить
+    # не значит перестать мерить.
     bad, seen = [], 0
-    for key, label in (("shoulders", "плечи"), ("ankles", "щиколотки"),
-                       ("centre", "центр"), ("width", "ширина")):
+    for key, label in (("centre", "центр"), ("width", "ширина")):
         want, tol, got = card.get(key), card.get(f"tol_{key}"), box.get(key)
         if want is None or got is None:
             continue
@@ -444,10 +456,11 @@ def in_card(points, card, *, min_visibility: float = MIN_VISIBILITY) -> dict:
         return {**tally(0, 0, 1), "note": "ни одну ось сравнить не удалось"}
     return {**tally(seen, len(bad), 0), "box": box,
             "note": ("; ".join(bad) + "; Kling масштабирует персонажа под "
-                     "скелет драйвинга, и рефка не в карточке уедет за край"
+                     "скелет драйвинга, и рефка мимо композиции уедет за край"
                      if bad else
-                     f"совпало по {seen} осям: плечи {box['shoulders']}, "
-                     f"щиколотки {box['ankles']}, центр {box['centre']}")}
+                     f"композиция совпала по {seen} осям: центр {box['centre']}, "
+                     f"ширина {box['width']} (плечи {box['shoulders']} и "
+                     f"щиколотки {box['ankles']} измерены, но НЕ СУДЯТСЯ)")}
 
 
 # ---------------------------------------------------------------------------

@@ -358,8 +358,21 @@ class TheDrivingDictatesThePlanNotAConstant(unittest.TestCase):
         card = P.composition_card(self.poses(ankle=0.93, shoulder=0.30))
         text = P.framing_clause(card)
         self.assertIn("full-length shot", text)
-        self.assertIn("feet", text)
         self.assertNotIn("0.9", text)
+
+    def test_the_clause_does_NOT_dictate_where_the_feet_are_cut(self):
+        """ПЕРЕПИСАН 22.08 под решение владельца: «обрезку щиколоток
+        переносить не надо, держим только композицию».
+
+        ИЗМЕРЕНО, почему директива всё равно была бесполезна: щиколотки на
+        эстетике сдвинулись 0.7816 -> 0.8862 при цели 1.0282. Ось, которую
+        невозможно выполнить, — не гейт, а тормоз.
+        """
+        text = P.framing_clause(P.composition_card(self.poses(ankle=0.95)))
+        self.assertNotIn("bottom edge", text)
+        self.assertNotIn("feet", text)
+        # А крупность остаётся: это композиция, а не линия обреза.
+        self.assertIn("full-length", text)
 
     def test_the_clause_says_it_outranks_the_aesthetic_framing(self):
         # Композиция уже описана в промте владельца — у y2k это широкий угол
@@ -382,13 +395,32 @@ class TheDrivingDictatesThePlanNotAConstant(unittest.TestCase):
         got = P.in_card(self.poses()[0], card)
         self.assertEqual(got["outcome"], PASS)
 
-    def test_the_measured_y2k_miss_is_caught_against_the_b4_card(self):
-        # Боевые числа: карточка b4 щиколотки ~0.913, рефка y2k 0.7358.
+    def test_a_different_ankle_line_is_NOT_a_defect_any_more(self):
+        """ПЕРЕПИСАН 22.08: судятся только оси КОМПОЗИЦИИ — центр и ширина.
+
+        Линия плеч и линия щиколоток — это кадрирование, где именно проходит
+        обрез; у эстетики оно своё. Раньше здесь стоял сторож на боевом
+        промахе y2k (щиколотки 0.7358 против 0.913) — правило отменено
+        владельцем, и сторож переписан под новое.
+        """
         card = P.composition_card(self.poses(ankle=0.913, shoulder=0.531))
         miss = self.poses(ankle=0.7358, shoulder=0.4846)[0]
-        got = P.in_card(miss, card)
+        self.assertEqual(P.in_card(miss, card)["outcome"], PASS)
+
+    def test_the_numbers_are_still_MEASURED_even_though_not_judged(self):
+        # Перестать судить не значит перестать мерить: числа нужны в отчёте.
+        card = P.composition_card(self.poses(ankle=0.913, shoulder=0.531))
+        self.assertAlmostEqual(card["shoulders"], 0.5810, places=3)
+        got = P.in_card(self.poses(ankle=0.7358)[0], card)
+        self.assertIn("НЕ СУДЯТСЯ", got["note"])
+
+    def test_an_off_centre_reference_is_STILL_a_defect(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ сужения: композиция по-прежнему сторожится.
+        # Боевой случай — tomatoes, центр 0.2601 при центре драйвинга 0.5114.
+        card = P.composition_card(self.poses(centre=0.5114))
+        got = P.in_card(self.poses(centre=0.2601)[0], card)
         self.assertEqual(got["outcome"], FAIL)
-        self.assertIn("щиколотки", got["note"])
+        self.assertIn("центр", got["note"])
         self.assertIn("уедет за край", got["note"])
 
     def test_without_a_card_the_check_is_UNMEASURED_not_a_pass(self):
