@@ -203,6 +203,103 @@ def strip_anthropometry(prompt: str) -> dict:
                      f"{len(prompt.split())}, стало {len(text.split())}")}
 
 
+# ---------------------------------------------------------------------------
+# СОБРАННАЯ РЕФКА: фото клиента + эстетика -> вход Kling
+# ---------------------------------------------------------------------------
+#
+# РОЛЕВАЯ СТРОКА ЗДЕСЬ ОБРАТНА ТОЙ, ЧТО В СТЕНДЕ, и это не небрежность.
+# `fork_e2e.NO_LOOK_TRANSFER_CLAUSE` запрещает брать со второй картинки одежду,
+# оправу, причёску и позу — он писался, когда второй картинкой была ЧУЖАЯ
+# фотография и всё это было заразой. Эстетика — наш собственный кадр, и всё
+# перечисленное в ней и есть шаблон, за который платит клиент.
+#
+# ЧТО ОСТАЁТСЯ ЗАПРЕЩЁННЫМ НАВСЕГДА: лицо. Это единственная ось, где цена
+# ошибки — чужой человек в ролике клиента, и единственная, которую мы умеем
+# мерить с ДВУХ сторон сразу: против клиента и против демо.
+
+#: Роли под эстетику. Порядок картинок тот же, что в стенде: первая —
+#: личность, вторая — эстетика (ИЗМЕРЕНО: роли держатся, когда названы
+#: позицией).
+AESTHETIC_ROLE_CLAUSE = (
+    "keep the FACE and identity of the person from the FIRST image completely "
+    "unchanged — same face, same facial features, same skin tone, same hair "
+    "colour, same body; take the wardrobe, styling, accessories, hairstyling, "
+    "pose, framing, lens, lighting, colour grade and setting from the SECOND "
+    "image"
+)
+
+#: Единственный запрет, переживший смену модели. Он ИМЕННО про лицо: всё
+#: остальное со второй картинки теперь берётся намеренно.
+NEVER_THE_FACE_CLAUSE = (
+    "never copy the face, facial features or identity of the person in the "
+    "SECOND image; that person is a wardrobe and styling reference only, and "
+    "must not appear in the result"
+)
+
+
+def assemble_prompt(*, legacy: bool = False) -> str:
+    """Промт сборки рефки. `legacy=True` даёт СТАРЫЕ строки стенда.
+
+    Старый вариант оставлен нарочно и не как совместимость: он НЕГАТИВНЫЙ
+    КОНТРОЛЬ новых строк. Если обе редакции дают один результат, значит роли
+    вообще не работают, и «мы поменяли строку» ничего не значит.
+    """
+    if legacy:
+        from .fork_e2e import (NO_LOOK_TRANSFER_CLAUSE,     # noqa: PLC0415
+                               ROLE_CLAUSE)
+
+        return f"{ROLE_CLAUSE}. {NO_LOOK_TRANSFER_CLAUSE}. {no_brands_clause()}"
+    return (f"{AESTHETIC_ROLE_CLAUSE}. {NEVER_THE_FACE_CLAUSE}. "
+            f"{no_brands_clause()}")
+
+
+def leak_verdict(*, made, client, demo, distances=None) -> dict:
+    """ДВУСТОРОННИЙ замер: кто на собранной рефке — клиент или демо.
+
+    Одностороннего замера здесь мало, и это главный урок проекта: мера
+    похожести умеет сказать «похоже», но не умеет сказать «похоже на ЭТОГО, а
+    не на ТОГО». Поэтому меряем оба расстояния и смотрим на РАЗНОСТЬ.
+
+    Четыре исхода сворачиваются в три:
+      клиент близко, демо далеко  -> годно
+      демо ближе клиента          -> НЕ ГОДНО: личность протекла, это брак
+                                     с ценой «чужой человек в ролике»
+      оба далеко или оба близко   -> не смогли: прибор не различает, судит глаз
+    """
+    t0 = time.perf_counter()
+    if distances is None:
+        from . import fork_identity                       # noqa: PLC0415
+
+        distances = fork_identity.distances
+    out = {"seconds": None, "to_client": None, "to_demo": None, "gap": None}
+    try:
+        c = distances([str(made)], str(client))
+        d = distances([str(made)], str(demo))
+    except Exception as exc:                              # noqa: BLE001
+        return {**tally(0, 0, 1), **out,
+                "note": f"прибор упал: {type(exc).__name__}: {exc}"}
+    to_client, to_demo = c.get("median"), d.get("median")
+    out.update({"to_client": to_client, "to_demo": to_demo,
+                "seconds": round(time.perf_counter() - t0, 3)})
+    if to_client is None or to_demo is None:
+        return {**tally(0, 0, 1), **out,
+                "note": (f"одно из расстояний не снято: до клиента "
+                         f"{to_client}, до демо {to_demo}")}
+    gap = round(to_demo - to_client, 4)
+    out["gap"] = gap
+    tail = (f"до клиента {to_client}, до демо {to_demo}, разность {gap} "
+            f"(планка «тот же человек» {SAME_PERSON_MAX})")
+    if to_demo < to_client:
+        return {**tally(1, 1, 0), **out,
+                "note": f"ЛИЧНОСТЬ ПРОТЕКЛА: демо БЛИЖЕ клиента; {tail}"}
+    if to_client <= SAME_PERSON_MAX < to_demo:
+        return {**tally(1, 0, 0), **out,
+                "note": f"клиент на месте, демо не протекла; {tail}"}
+    return {**tally(0, 0, 1), **out,
+            "note": (f"прибор не различает: ни одно расстояние не по разные "
+                     f"стороны планки; {tail}. СУДИТ ОПЕРАТОР ГЛАЗАМИ")}
+
+
 #: Три исхода вместо двух живут и здесь: «эстетика не собралась» и «эстетика
 #: плохая» — разные события, и путать их дорого.
 PLAN_NOTE = ("план 9:16 на эстетике НЕ ТРЕБУЕТСЯ: план навязывается на "

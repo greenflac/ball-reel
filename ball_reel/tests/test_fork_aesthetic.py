@@ -372,3 +372,104 @@ class TheCutIsWiredIntoTheComposedPrompt(unittest.TestCase):
         got = A.compose("y2k")
         self.assertEqual(len(got["cut"]["dropped"]), 2)
         self.assertIn("оборотов унесено 2", got["note"])
+
+
+class TheAssembledReferenceTakesTheLookButNeverTheFace(unittest.TestCase):
+    """Ролевая строка под эстетику ОБРАТНА строке стенда, и это намеренно."""
+
+    def test_the_new_clause_asks_for_the_wardrobe_the_old_one_forbade(self):
+        new = A.assemble_prompt()
+        self.assertIn("take the wardrobe", new)
+        self.assertIn("accessories", new)
+        self.assertIn("pose", new)
+
+    def test_the_face_stays_forbidden_in_BOTH_editions(self):
+        # Единственная ось, пережившая смену модели: лицо со второй картинки
+        # нельзя никогда, потому что цена ошибки — чужой человек в ролике.
+        self.assertIn("never copy the face", A.assemble_prompt())
+        self.assertIn("same face", A.assemble_prompt(legacy=True))
+
+    def test_the_legacy_clause_is_the_stand_one_and_not_a_copy(self):
+        # Е1 плюс негативный контроль: старый вариант обязан БЫТЬ старым.
+        from ball_reel import fork_e2e
+
+        legacy = A.assemble_prompt(legacy=True)
+        self.assertIn(fork_e2e.ROLE_CLAUSE, legacy)
+        self.assertIn(fork_e2e.NO_LOOK_TRANSFER_CLAUSE, legacy)
+
+    def test_the_two_editions_really_differ(self):
+        # Иначе «мы поменяли строку» — слова о правке, а не правка.
+        self.assertNotEqual(A.assemble_prompt(), A.assemble_prompt(legacy=True))
+
+
+class TheLeakIsMeasuredFromBOTHSides(unittest.TestCase):
+    """Мера похожести умеет сказать «похоже», но не «похоже на ЭТОГО».
+
+    Поэтому меряются оба расстояния сразу — до клиента и до демо, — и судит
+    их взаимное положение, а не одно число.
+    """
+
+    CLIENT = "assets/fork_plan_man_fullbody.png"
+    DEMO_W = "assets/fork_plan_woman_fullbody.png"
+
+    @classmethod
+    def _pair(cls, to_client, to_demo):
+        # Различаем якоря ПОЛНЫМ ПУТЁМ, а не подстрокой. Первая редакция
+        # подставки писала `"man" in anchor` и падала на том, что «woman»
+        # содержит «man»: подставной прибор отвечал за клиента на оба вопроса.
+        def distances(frames, anchor, **kw):
+            median = {cls.CLIENT: to_client, cls.DEMO_W: to_demo}[str(anchor)]
+            return {"outcome": PASS, "median": median, "inside": 1,
+                    "judged": 1, "note": "подставной прибор"}
+        return distances
+
+    def _run(self, to_client, to_demo):
+        return A.leak_verdict(made="р.png", client=self.CLIENT,
+                              demo=self.DEMO_W,
+                              distances=self._pair(to_client, to_demo))
+
+    def test_the_measured_good_case_is_good(self):
+        # ИЗМЕРЕНО 22.08 на старых ролях: 0.2506 против 0.9436.
+        got = self._run(0.2506, 0.9436)
+        self.assertEqual(got["outcome"], PASS)
+        self.assertEqual(got["gap"], 0.693)
+
+    def test_a_leaked_demo_is_a_REAL_defect_not_a_third_outcome(self):
+        # Единственный случай на проекте, где «не годно» стоит без колебаний:
+        # цена — чужой человек в ролике клиента.
+        got = self._run(0.8, 0.1)
+        self.assertEqual(got["outcome"], FAIL)
+        self.assertIn("ПРОТЕКЛА", got["note"])
+        self.assertEqual(got["gap"], -0.7)
+
+    def test_the_measured_middle_case_is_UNMEASURED(self):
+        # ИЗМЕРЕНО 22.08 на новых ролях: 0.3727 против 0.9258 — клиент за
+        # планкой, хотя глазом это он. Прибор честно говорит «не различаю».
+        got = self._run(0.3727, 0.9258)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("СУДИТ ОПЕРАТОР", got["note"])
+
+    def test_both_close_is_UNMEASURED_because_the_gap_means_nothing_then(self):
+        # НЕГАТИВНЫЙ КОНТРОЛЬ разности: она значима, только когда стороны
+        # планки разные. Два близких числа — это «прибор не различает».
+        got = self._run(0.20, 0.30)
+        self.assertEqual(got["outcome"], UNMEASURED)
+
+    def test_a_missing_distance_is_UNMEASURED_not_a_pass(self):
+        def half(frames, anchor, **kw):
+            return {"outcome": PASS,
+                    "median": None if str(anchor) == self.DEMO_W else 0.2,
+                    "inside": 1, "judged": 1, "note": "полприбора"}
+
+        got = A.leak_verdict(made="р.png", client=self.CLIENT,
+                             demo=self.DEMO_W, distances=half)
+        self.assertEqual(got["outcome"], UNMEASURED)
+
+    def test_an_instrument_that_fell_is_UNMEASURED(self):
+        def broken(*a, **k):
+            raise RuntimeError("модель не загрузилась")
+
+        got = A.leak_verdict(made="р.png", client="м.png", demo="ж.png",
+                             distances=broken)
+        self.assertEqual(got["outcome"], UNMEASURED)
+        self.assertIn("RuntimeError", got["note"])
