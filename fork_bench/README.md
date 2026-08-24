@@ -1,7 +1,7 @@
 # `fork_bench` — приборы сравнения с рынком
 
-Результаты и вердикты — `docs/FORK_BENCHMARK_RESULTS.md`. Методология —
-`docs/FORK_BENCHMARK_MANUAL.md`. Здесь только как запускать.
+Результаты и вердикты — `docs/internal/FORK_BENCHMARK_RESULTS.md`. Методология —
+`docs/internal/FORK_BENCHMARK_MANUAL.md`. Здесь только как запускать.
 
 **Существующие модули `ball_reel/*` не правятся.** Заменитель `ffprobe`
 подаётся через объявленную точку внедрения `prober=`, а не правкой модуля (Ц2).

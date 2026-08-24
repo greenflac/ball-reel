@@ -1,7 +1,7 @@
-"""Пересчёт всех чисел из `docs/FORK_HARDWARE.md`. Не модуль пакета: скрипт.
+"""Пересчёт всех чисел из `docs/internal/FORK_HARDWARE.md`. Не модуль пакета: скрипт.
 
-    python3 docs/measure_hardware.py            # всё
-    python3 docs/measure_hardware.py --offline   # только арифметика, без сети
+    python3 docs/internal/measure_hardware.py            # всё
+    python3 docs/internal/measure_hardware.py --offline   # только арифметика, без сети
 
 Существует потому, что число без команды устаревает молча. В первой редакции
 плана стояла «рекомендация 48 ГБ VRAM» — она была выведена из размера файла

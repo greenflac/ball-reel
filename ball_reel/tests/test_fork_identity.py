@@ -899,7 +899,7 @@ class TheMeasuredRowsAreReproduced(unittest.TestCase):
                          "ACCEPTANCE_ROWS больше не то, что даёт прогон")
         self.assertLess(got["median"], 0.96,
                         "контроль дотянул до записанной полосы — обновить "
-                        "docs/FORK_NUMBERS.md и снять эту оговорку")
+                        "docs/internal/FORK_NUMBERS.md и снять эту оговорку")
 
     def test_the_recorded_control_row_equals_what_the_run_gives(self):
         got = fi.distances(self.generated, self.ALIEN)

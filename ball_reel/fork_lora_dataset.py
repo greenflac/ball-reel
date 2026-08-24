@@ -94,7 +94,7 @@ LoRA, обученная на изображениях «женщин за 40»,
 ЧИСЛО. `DEFAULT_RANK = 16`, и оно ВЫБРАНО, а не измерено. Опорная точка,
 прочитанная из файла тренера, а не по памяти: у `DiffSynth-Studio`
 `examples/wanvideo/model_training/train.py:15` умолчание `lora_rank=32`
-(команда — в `docs/FORK_LORA.md`). Берём вдвое ниже умолчания, потому что
+(команда — в `docs/internal/FORK_LORA.md`). Берём вдвое ниже умолчания, потому что
 умолчание рассчитано на задачу «выучить облик», а наша — «выучить сложение»,
 и ёмкость здесь ограничивают нарочно. Двигать это число можно только замером
 `d_raw` с LoRA и без.
@@ -114,7 +114,7 @@ LoRA.
 подан кадр с лицом актёра — обязана сработать; подано чужое лицо — обязана
 молчать. Оба случая в тестах, живьём на пикселях.
 
-Тренер LoRA выбран не здесь: `docs/FORK_LORA.md` §1 (DiffSynth-Studio —
+Тренер LoRA выбран не здесь: `docs/internal/FORK_LORA.md` §1 (DiffSynth-Studio —
 единственный из четырёх, кто вообще называет Animate: 36 упоминаний против 0).
 
 ---
@@ -562,7 +562,7 @@ def build(frame_paths, out_dir: str | Path, *, build_type: str,
         "build_type": build_type, "domain": domain, "rank": rank,
         "framing": framing, "from_driving": from_driving,
         "trainer_default_rank": TRAINER_DEFAULT_RANK,
-        "trainer": ("DiffSynth-Studio — docs/FORK_LORA.md §1: единственный из "
+        "trainer": ("DiffSynth-Studio — docs/internal/FORK_LORA.md §1: единственный из "
                     "четырёх, кто называет Animate"),
         "samples": len(kept), "from_frames": total,
         "face_rejected": rejected, "too_small": len(too_small),

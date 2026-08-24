@@ -356,7 +356,8 @@ def verdict(measured: dict, bar) -> dict:
 #: Кадры, снятые камерой и прошедшие пайплайн ЦЕЛИКОМ: шва в них нет ПО
 #: ПОСТРОЕНИЮ, никакая их область не порождена отдельно от остальных. Поэтому
 #: любое отклонение отношения от 1.0 здесь — собственный шум оси, а не шов.
-SEAMLESS_SOURCES = ("chain_frames/*.png", "veoprobe/f_1080p/*.png",
+SEAMLESS_SOURCES = ("experiments/chain_frames/*.png",
+                    "experiments/veoprobe/f_1080p/*.png",
                     "demo/kit/driving/*.jpg", "demo/hero.png")
 
 

@@ -293,7 +293,7 @@ class OnRealPhotographs(unittest.TestCase):
         self.assertIsNotNone(got["value"])
 
     def test_the_measured_value_matches_what_was_recorded(self):
-        """Т2: 1.5511 снято прогоном, команда в docs/FORK_LORA.md."""
+        """Т2: 1.5511 снято прогоном, команда в docs/internal/FORK_LORA.md."""
         got = fbr.route(HERO)
         self.assertAlmostEqual(got["value"], 1.5511, places=3)
 

@@ -252,7 +252,7 @@ class TheAcceptanceCriterionIsPerTemplate(unittest.TestCase):
 class TheRankIsBelowTheTrainersDefaultAndSaysWhy(unittest.TestCase):
 
     def test_our_rank_is_half_the_trainer_default(self):
-        """Т2: литералы. 32 прочитано из train.py:15, команда в docs/FORK_LORA.md."""
+        """Т2: литералы. 32 прочитано из train.py:15, команда в docs/internal/FORK_LORA.md."""
         self.assertEqual(fld.TRAINER_DEFAULT_RANK, 32)
         self.assertEqual(fld.DEFAULT_RANK, 16)
         self.assertLess(fld.DEFAULT_RANK, fld.TRAINER_DEFAULT_RANK)
