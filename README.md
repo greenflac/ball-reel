@@ -1,3 +1,122 @@
+# Lip-sync templates
+
+The user uploads an ordinary selfie and picks a template. Out comes a vertical
+video with sound, and the person in the frame is them.
+
+![Client photo, template aesthetic, result frame](docs/img/triptych.png)
+
+<sub>Left to right: client photo · template aesthetic · frame of the finished
+video.</sub>
+
+---
+
+This is two things, not one.
+
+**A generation pipeline** — eight stages from selfie to finished video. Seven
+are free and stand before the paid one, so a defect is caught on a still for a
+fraction of a cent instead of on a video for a dollar.
+
+**An instrument for assembling templates** — the author writes a prompt, feeds
+in a demo identity, and gets an aesthetic ready to sell. A new template takes a
+run, not a sprint.
+
+![Six templates of the family](docs/img/family.png)
+
+<sub>Six templates of the first batch. One identity, six aesthetics, four
+different drivings.</sub>
+
+---
+
+## Numbers
+
+| | |
+|---|---|
+| `$0.70` | a 10-second video; the `$0.07/s` rate confirmed by four balance measurements |
+| `720×1280` | exactly 9:16 out of the model, 0% of the area lost to cropping in assembly |
+| `300 frames` | exactly 10.0 seconds on all six, with no spread |
+| `0 cuts` | edit seams in frame, on all six |
+
+---
+
+## How it works
+
+```
+1  driving intake        seams, scene length, window        free
+2  aesthetic             prompt + demo identity             cents
+3  aesthetic acceptance  demo identity in place             free
+4  reference assembly    client photo + aesthetic           cents
+5  reference acceptance  leak, plan, composition            free
+6  video generation      Kling Motion Control               $0.07/s
+7  assembly              9:16, sound, length                free
+8  video acceptance      by eye                             free
+```
+
+Every check answers with one of **three** outcomes — `pass`, `fail`,
+`could not measure` — and the third collapses into neither of the first two.
+Numbers always stand next to the verdict: checked N, violations M, could not
+measure K.
+
+Zero violations out of zero checks is not a success, and the code prints that
+literally.
+
+## How to integrate
+
+The pipeline's logic depends on neither the backend nor the model.
+
+Every outward call is a parameter, not a hard reference: the model, the
+storage and the queue are all swappable. That is why the tests run the whole
+path without touching the network.
+
+The acceptance layer does not know who generated its input. It can be placed in
+front of any existing pipeline as a separate quality control.
+
+Changing the video model is one call. Kling's limits (a three-second minimum,
+unstable frame-by-frame output) are properties of the model, not of the
+approach: they lift by moving to another model over the API, or to open source
+on your own GPUs.
+
+## Driving requirements
+
+The only input that is bought rather than drawn. That is why its requirements
+live in a section of their own — this is a purchasing checklist, not a setting.
+
+- **Face larger than 100 px.** Below that there is nothing to measure the
+  identity with, and the model transfers it uncertainly. Measured: drivings
+  with a face of 34–56 px produced a drifting face; those with 85–139 px held
+  it.
+- **One scene, zero edit seams.** A seam inside the window produces a change of
+  plan in the finished video.
+- **Scene longer than the product length.** The window is cut from the middle
+  of the longest scene with equal margins.
+- **The person does not leave the frame.** The driving's composition is carried
+  into the aesthetic prompt: the model lays the pose from the video.
+
+Lip-sync is the heaviest material, and heaviest of all is the kind where the
+character **turns around**: on the turn the face leaves the frame entirely.
+
+## Tests
+
+```
+python -m unittest discover -s ball_reel/tests -p "test_fork_*.py"
+```
+
+More than four hundred guards. Each guards a defect that was actually found,
+not a line of code, and its docstring says which one. Thresholds are mutated in
+both directions: if a bar guards nothing, the test will not go red.
+
+## Licence
+
+The sources are open to read and to audit, but this is **not** open source:
+using, copying and embedding require an agreement. Details in
+[LICENSE](LICENSE).
+
+Separately: some of the measuring components used during development are
+licensed for non-commercial use only. This is accounted for and described in
+the documents.
+
+---
+---
+
 # Липсинк-шаблоны
 
 Пользователь грузит обычное селфи и выбирает шаблон. На выходе — вертикальный
