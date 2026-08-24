@@ -648,11 +648,11 @@ CONTROL_SETS = (
     ("wiretest — ГЕНЕРАЦИЯ, худи и шорты",
      "wiretest/frames_00_loop/*.png", "matches"),
     ("startopt — ГЕНЕРАЦИЯ, спортивный топ", (
-        "startopt/plain_1.png", "startopt/plain_2.png", "startopt/role_0.png",
-        "startopt/role_1.png", "startopt/role_2.png"), "matches"),
+        "experiments/startopt/plain_1.png", "experiments/startopt/plain_2.png", "experiments/startopt/role_0.png",
+        "experiments/startopt/role_1.png", "experiments/startopt/role_2.png"), "matches"),
     ("startopt — ГЕНЕРАЦИЯ, БАЛЬНОЕ ПЛАТЬЕ", (
-        "startopt/face_first_0.png", "startopt/face_first_1.png",
-        "startopt/face_first_2.png", "startopt/plain_0.png"), "mismatched"),
+        "experiments/startopt/face_first_0.png", "experiments/startopt/face_first_1.png",
+        "experiments/startopt/face_first_2.png", "experiments/startopt/plain_0.png"), "mismatched"),
     ("kit/face.jpg — портрет, одежды в кадре нет", ("kit/face.jpg",),
      "mismatched"),
     ("kit/conditions — скелет ControlNet", "kit/conditions/*.png",

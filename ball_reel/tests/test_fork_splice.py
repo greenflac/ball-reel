@@ -1,0 +1,876 @@
+"""Склейка петли: стыковой кадр не дублируется, длина ложится на шаг, три исхода.
+
+ПОЧЕМУ ЗДЕСЬ НЕТ КАРТИНОК И FFMPEG (Т4). Склейка не смотрит внутрь кадра: она
+раскладывает ФАЙЛЫ по порядку. Поэтому «кадр» здесь — текстовый файл с
+расширением `.png`, в котором лежит собственный номер, и порядок склейки
+проверяется ЧТЕНИЕМ СОДЕРЖИМОГО, а не длиной списка: список нужной длины можно
+получить и перепутав порядок. Пиксельная проверка стыка на боевом материале —
+дело прогона (П3), и её числа лежат в отчёте смены, а не здесь.
+
+ОЖИДАЕМОЕ — ЛИТЕРАЛ (Т2). Ни одно число и ни одна строка вердикта не берутся
+из проверяемого модуля: 145 написано цифрами, «годно» написано словом. Импорт
+`fork_splice.LENGTH_SLACK` в ожидание поехал бы вместе с константой и промолчал
+ровно тогда, когда её и надо сторожить.
+
+НЕГАТИВНЫЙ КОНТРОЛЬ С ОБЕИХ СТОРОН (И5) у каждого прибора: вход, где он обязан
+сказать «не годно» (петля за краем материала, петля из одного кадра, длина не
+набирается), и вход, где он обязан пропустить (боевая петля 49 кадров на 24 к/с).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from .. import fork_splice as fs
+
+# Боевые числа материала (`assets/README.md`), проставлены руками:
+# 720x1278, 24 к/с, 362 кадра; лучшая петля 114..162 — 49 кадров.
+DRIVING_FPS = 24
+DRIVING_FRAMES = 362
+LOOP_I, LOOP_J = 114, 162
+
+
+
+def fake_prober(fps, *, frames=DRIVING_FRAMES, w=720, h=1278):
+    """Подставной ffprobe: тест не имеет права звать настоящий (Т4)."""
+    payload = json.dumps({"streams": [{"codec_type": "video",
+                                       "r_frame_rate": f"{int(fps)}/1",
+                                       "nb_frames": str(frames),
+                                       "width": w, "height": h,
+                                       "codec_name": "h264"}],
+                          "format": {"duration": str(frames / fps)}})
+    return lambda path: {"ran": True, "code": 0, "out": payload, "err": "",
+                         "why": ""}
+
+
+def make_frames(root, n, *, start=0):
+    """`n` файлов-кадров; в каждом лежит его собственный номер."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    out = []
+    for k in range(start, start + n):
+        p = root / f"{k:05d}.png"
+        p.write_text(f"кадр {k}", encoding="utf-8")
+        out.append(p)
+    return out
+
+
+def read_written(out_dir):
+    """Что реально легло, по порядку имён: список исходных номеров."""
+    return [int(p.read_text(encoding="utf-8").split()[1])
+            for p in sorted(Path(out_dir).glob("*.png"))]
+
+
+class TheSeamFrameIsNeverDuplicated(unittest.TestCase):
+    """N*(L-1)+1, а не N*L. Дубль — заедание на каждом стыке."""
+
+    def test_the_battle_loop_of_49_frames_gives_145_and_not_147(self):
+        got = fs.sequence_indices(LOOP_I, LOOP_J, 3)
+        self.assertEqual(len(got), 145)
+        self.assertNotEqual(len(got), 147)   # 3*49 — цена дубля, в кадрах
+
+    def test_the_order_is_spelled_out_frame_by_frame(self):
+        # Петля [0..4] — пять кадров, шаг склейки четыре. Кадр 4 — тот же
+        # момент, что кадр 0, поэтому в теле его нет, а в конце он один.
+        self.assertEqual(fs.sequence_indices(0, 4, 2),
+                         [0, 1, 2, 3, 0, 1, 2, 3, 4])
+        self.assertEqual(fs.sequence_indices(0, 4, 1), [0, 1, 2, 3, 4])
+
+    def test_no_two_neighbours_are_the_same_frame(self):
+        seq = fs.sequence_indices(LOOP_I, LOOP_J, 4)
+        self.assertEqual([k for k in range(len(seq) - 1)
+                          if seq[k] == seq[k + 1]], [])
+
+    def test_the_closing_frame_appears_exactly_once(self):
+        seq = fs.sequence_indices(LOOP_I, LOOP_J, 3)
+        self.assertEqual(seq.count(LOOP_J), 1)
+        self.assertEqual(seq.count(LOOP_I), 3)   # ровно по разу на повтор
+
+    def test_one_repeat_is_the_loop_itself(self):
+        self.assertEqual(len(fs.sequence_indices(LOOP_I, LOOP_J, 1)), 49)
+
+    def test_nonsense_arguments_are_refused_not_guessed(self):
+        for args in [(0, 0, 1), (5, 3, 1), (-1, 4, 1)]:
+            with self.assertRaises(ValueError):
+                fs.sequence_indices(*args)
+        with self.assertRaises(ValueError):
+            fs.sequence_indices(0, 4, 0)
+        with self.assertRaises(TypeError):
+            fs.sequence_indices(0, 4, True)
+
+
+class TheLoopMustLieInsideTheMaterial(unittest.TestCase):
+    def test_the_battle_loop_passes(self):
+        got = fs.loop_bounds_ok(LOOP_I, LOOP_J, DRIVING_FRAMES)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["frames"], 49)
+
+    def test_the_last_frame_of_the_material_is_still_inside(self):
+        self.assertEqual(fs.loop_bounds_ok(0, 361, 362)["outcome"], "годно")
+
+    def test_one_frame_past_the_end_is_refused_with_the_number(self):
+        got = fs.loop_bounds_ok(320, 362, DRIVING_FRAMES)
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertIn("362", got["note"])
+
+    def test_a_loop_longer_than_the_material_is_refused(self):
+        self.assertEqual(fs.loop_bounds_ok(0, 500, 100)["outcome"], "не годно")
+
+    def test_a_loop_of_one_frame_is_not_a_loop(self):
+        got = fs.loop_bounds_ok(7, 7, 100)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_a_loop_of_two_frames_is_admitted_by_bounds(self):
+        # Границы её пропускают: годность по ДЛИНЕ судит план повторов, и
+        # свернуть два разных вердикта в один значило бы потерять причину.
+        self.assertEqual(fs.loop_bounds_ok(7, 8, 100)["outcome"], "годно")
+
+
+class SecondsAreCountedAtTheSourceRate(unittest.TestCase):
+    """145 кадров — это 6.04 с на 24 к/с и 4.83 на 30. Разница в четверть."""
+
+    def test_twenty_four_is_inherited(self):
+        got = fs.playback_fps(24)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["fps"], 24)
+
+    def test_thirty_is_ours_and_passes(self):
+        self.assertEqual(fs.playback_fps(30)["outcome"], "годно")
+
+    def test_sixty_is_refused_and_sends_to_the_decoder(self):
+        got = fs.playback_fps(60)
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertIn("fork_video", got["note"])
+
+    def test_unknown_rate_is_the_third_outcome_not_thirty(self):
+        got = fs.playback_fps(None)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIsNone(got["fps"])
+
+    def test_zero_and_text_are_reported_not_raised(self):
+        for bad in (0, -24, "24"):
+            got = fs.playback_fps(bad)
+            self.assertEqual(got["outcome"], "не годно")
+
+    def test_the_plan_of_the_battle_loop_is_six_oh_four_not_four_eight_three(self):
+        got = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["plan"]["seconds"], 6.04)
+        self.assertNotEqual(got["plan"]["seconds"], 4.83)
+
+
+class TheLengthMustLandOnTheWrapperStep(unittest.TestCase):
+    """Прижатие вниз молчит, и прижатая склейка обрывает последний повтор."""
+
+    def test_the_battle_loop_loses_nothing_to_the_step(self):
+        got = fs.admissible_plans(49, fps=24)
+        self.assertEqual([p["frames"] for p in got["kept"]], [145, 193])
+        self.assertEqual(got["dropped_step"], [])
+
+    def test_a_loop_of_43_frames_loses_the_odd_repeats(self):
+        # Шаг склейки 42: длина 4k+1 выходит только при ЧЁТНОМ числе повторов.
+        got = fs.admissible_plans(43, fps=24)
+        self.assertEqual([p["frames"] for p in got["kept"]], [169])
+        self.assertEqual([p["frames"] for p in got["dropped_step"]], [127, 211])
+
+    def test_every_kept_length_is_of_the_form_four_k_plus_one(self):
+        for length in (41, 43, 45, 49, 53, 61):
+            for p in fs.admissible_plans(length, fps=24)["kept"]:
+                self.assertEqual((p["frames"] - 1) % 4, 0,
+                                 f"петля {length}: {p['frames']} не 4k+1")
+
+
+class TheOrderIsEitherFilledOrRefusedWithNumbers(unittest.TestCase):
+    def test_six_oh_four_out_of_the_battle_loop_is_three_repeats(self):
+        got = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["plan"]["repeats"], 3)
+        self.assertEqual(got["plan"]["frames"], 145)
+
+    def test_eight_seconds_is_four_repeats(self):
+        got = fs.choose_repeats(49, 8.04, fps=24)
+        self.assertEqual(got["plan"]["repeats"], 4)
+        self.assertEqual(got["plan"]["frames"], 193)
+
+    def test_ten_seconds_out_of_a_two_second_loop_is_not_filled_silently(self):
+        # Пятый повтор — 241 кадр, 10.04 с, за потолком. Ближайшее 8.04 с.
+        got = fs.choose_repeats(49, 10.0, fps=24)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIsNone(got["plan"])
+        self.assertIn("193", got["note"])
+        self.assertIn("8.04", got["note"])
+
+    def test_a_reachable_order_from_the_43_frame_loop_is_filled(self):
+        got = fs.choose_repeats(43, 7.0, fps=24)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["plan"]["frames"], 169)
+
+    def test_an_unreachable_order_from_the_43_frame_loop_says_what_is_reachable(self):
+        got = fs.choose_repeats(43, 5.3, fps=24)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIn("169", got["note"])
+
+    def test_the_slack_is_four_frames_and_it_is_a_boundary(self):
+        # ОБЕ СТОРОНЫ ГРАНИЦЫ, а не одна (И5), и шаг между ними ровно четыре:
+        # заказ и склейка оба лежат на сетке 4k+1, поэтому промах всегда
+        # кратен четырём, и допуск в 4 кадра — это «ровно один шаг обёртки».
+        # 7.00 с при 24 к/с = 168 кадров, обёртка прижмёт к 165; 169-165 = +4:
+        self.assertEqual(fs.choose_repeats(43, 7.0, fps=24)["outcome"], "годно")
+        # 7.40 с = 178 -> 177; 169-177 = -8, два шага — это уже другая длина:
+        self.assertEqual(fs.choose_repeats(43, 7.4, fps=24)["outcome"],
+                         "не смогли проверить")
+        # 5.30 с = 127 -> 125; ближайшее 169, промах +44 — далеко за допуском.
+        self.assertEqual(fs.choose_repeats(43, 5.3, fps=24)["outcome"],
+                         "не смогли проверить")
+
+    def test_a_rate_we_do_not_know_gives_no_plan(self):
+        got = fs.choose_repeats(49, 6.04, fps=None)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+
+    def test_a_loop_of_one_frame_gives_no_plan(self):
+        got = fs.choose_repeats(1, 6.0, fps=24)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_an_order_outside_the_product_band_is_refused(self):
+        for seconds in (4.0, 11.0, 0.0):
+            got = fs.choose_repeats(49, seconds, fps=24)
+            self.assertEqual(got["outcome"], "не годно", seconds)
+
+    def test_a_loop_whose_every_length_is_off_the_step_gives_nothing(self):
+        # Петля 200 кадров при 24 к/с: один повтор — 200 кадров (8.33 с), в
+        # полосе, но обёртка прижмёт к 197; два повтора — 399 кадров (16.6 с),
+        # за потолком. Не остаётся НИ ОДНОЙ длины, и это третий исход.
+        got = fs.choose_repeats(200, 6.0, fps=24)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIn("5.0-10.0", got["note"])
+        self.assertIn("197", got["note"])
+
+    def test_the_same_loop_at_a_slower_rate_is_filled(self):
+        # Негативный контроль к предыдущему (И5): прибор обязан шевельнуться.
+        # 200 кадров при 30 к/с — 6.67 с, и уже два повтора влезают: 399/30.
+        self.assertEqual(fs.choose_repeats(201, 6.7, fps=30)["outcome"], "годно")
+
+
+class TheTwoPlacesThatKnowTheLengthAreCompared(unittest.TestCase):
+    """Е1: расхождение формулы и построения ловит машина, а не глаз."""
+
+    def test_agreeing_plan_returns_the_length(self):
+        self.assertEqual(fs._agree({"repeats": 3, "frames": 145}, 114, 162), 145)
+
+    def test_a_plan_that_says_147_falls(self):
+        with self.assertRaises(AssertionError):
+            fs._agree({"repeats": 3, "frames": 147}, 114, 162)
+
+
+class FramesArePlacedWithoutCopyingBytes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.src = make_frames(self.root / "src", 10)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_hard_link_is_the_same_inode(self):
+        dst = self.root / "one.png"
+        mode = fs.place(self.src[3], dst, prefer="жёсткая ссылка")
+        self.assertEqual(mode, "жёсткая ссылка")
+        self.assertEqual(os.stat(dst).st_ino, os.stat(self.src[3]).st_ino)
+
+    def test_a_copy_is_a_different_inode(self):
+        dst = self.root / "two.png"
+        mode = fs.place(self.src[3], dst, prefer="копия")
+        self.assertEqual(mode, "копия")
+        self.assertNotEqual(os.stat(dst).st_ino, os.stat(self.src[3]).st_ino)
+        self.assertEqual(dst.read_text(encoding="utf-8"), "кадр 3")
+
+    def test_when_the_hard_link_is_impossible_it_falls_back_and_says_so(self):
+        real = os.link
+
+        def refuse(*a, **k):
+            raise OSError("разные файловые системы")
+
+        os.link = refuse
+        try:
+            mode = fs.place(self.src[3], self.root / "three.png")
+        finally:
+            os.link = real
+        self.assertEqual(mode, "символическая")
+
+    def test_the_sequence_lands_in_the_right_order(self):
+        out = self.root / "out"
+        got = fs.write_sequence(self.src, fs.sequence_indices(0, 4, 2), out)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["written"], 9)
+        self.assertEqual(read_written(out), [0, 1, 2, 3, 0, 1, 2, 3, 4])
+
+    def test_the_names_are_the_ones_the_decoder_writes(self):
+        out = self.root / "out"
+        fs.write_sequence(self.src, [0, 1, 2], out)
+        self.assertEqual([p.name for p in sorted(out.glob("*.png"))],
+                         ["00001.png", "00002.png", "00003.png"])
+
+    def test_hard_links_cost_no_bytes_and_copies_do(self):
+        linked = fs.write_sequence(self.src, [0, 1, 2], self.root / "a")
+        copied = fs.write_sequence(self.src, [0, 1, 2], self.root / "b",
+                                   prefer="копия")
+        self.assertEqual(linked["bytes"], 0)
+        self.assertGreater(copied["bytes"], 0)
+
+    def test_a_busy_directory_is_not_overwritten_silently(self):
+        out = self.root / "out"
+        fs.write_sequence(self.src, [0, 1, 2], out)
+        again = fs.write_sequence(self.src, [4, 5], out)
+        self.assertEqual(again["outcome"], "не смогли проверить")
+        self.assertEqual(read_written(out), [0, 1, 2])
+
+    def test_overwrite_leaves_no_foreign_frames_behind(self):
+        out = self.root / "out"
+        fs.write_sequence(self.src, [0, 1, 2, 3, 4], out)
+        fs.write_sequence(self.src, [7, 8], out, overwrite=True)
+        self.assertEqual(read_written(out), [7, 8])
+
+    def test_a_file_in_place_of_the_directory_is_refused(self):
+        busy = self.root / "busy.png"
+        busy.write_text("не каталог", encoding="utf-8")
+        got = fs.write_sequence(self.src, [0], busy)
+        self.assertEqual(got["outcome"], "не годно")
+
+
+class TheWholeSpliceOnADirectoryOfFrames(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        make_frames(self.root / "src", DRIVING_FRAMES)
+        self.addCleanup(self.tmp.cleanup)
+
+    def splice(self, **kw):
+        kw.setdefault("fps", DRIVING_FPS)
+        return fs.splice(self.root / "src", (LOOP_I, LOOP_J), kw.pop("seconds", 6.04),
+                         self.root / "out", **kw)
+
+    def test_the_battle_order_lands_as_145_frames_of_6_04_seconds(self):
+        rep = self.splice()
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["frames"], 145)
+        self.assertEqual(rep["repeats"], 3)
+        self.assertEqual(rep["seconds"], 6.04)
+        self.assertEqual(len(list((self.root / "out").glob("*.png"))), 145)
+
+    def test_what_landed_is_the_loop_repeated_without_the_duplicate(self):
+        self.splice()
+        got = read_written(self.root / "out")
+        body = list(range(LOOP_I, LOOP_J))
+        self.assertEqual(got, body * 3 + [LOOP_J])
+        self.assertEqual(got[47], 161)
+        self.assertEqual(got[48], 114)   # стык: не 162, иначе дубль момента
+
+    def test_the_steps_are_named_and_ordered_cheap_first(self):
+        rep = self.splice()
+        # Частота стоит ПЕРВОЙ намеренно: отказ по ней не должен стоить ни
+        # одного распакованного кадра. ИЗМЕРЕНО до перестановки: отказ на mp4
+        # 60 к/с печатался после 180 кадров, 728 КБ в out/src.
+        self.assertEqual([s["step"] for s in rep["steps"]],
+                         ["частота", "кадры", "петля", "план", "запись"])
+
+    def test_a_loop_outside_the_material_writes_nothing(self):
+        rep = fs.splice(self.root / "src", (350, 400), 6.04, self.root / "out",
+                        fps=DRIVING_FPS)
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertFalse((self.root / "out").exists())
+
+    def test_an_unreachable_length_writes_nothing(self):
+        rep = self.splice(seconds=10.0)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+        self.assertFalse((self.root / "out").exists())
+
+    def test_an_unknown_rate_writes_nothing(self):
+        rep = fs.splice(self.root / "src", (LOOP_I, LOOP_J), 6.04,
+                        self.root / "out", fps=None)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+        self.assertFalse((self.root / "out").exists())
+
+    def test_an_empty_source_is_refused(self):
+        (self.root / "empty").mkdir()
+        rep = fs.splice(self.root / "empty", (0, 4), 6.04, self.root / "out",
+                        fps=24)
+        self.assertEqual(rep["outcome"], "не годно")
+
+    def test_a_source_that_is_neither_directory_nor_file(self):
+        rep = fs.splice(self.root / "нет-такого", (0, 4), 6.04,
+                        self.root / "out", fps=24)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+
+    def test_a_video_source_is_decoded_by_the_injected_decoder(self):
+        video = self.root / "driving.mp4"
+        video.write_text("не видео, но файл", encoding="utf-8")
+        paths = sorted((self.root / "src").glob("*.png"))
+
+        def decoder(src, dst, **kw):
+            return {"outcome": "годно", "paths": paths, "fps_in": 24.0,
+                    "fps_out": 24.0, "note": "подменённый раскодировщик"}
+
+        rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
+                        decode=decoder, prober=fake_prober(24))
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["frames"], 145)
+        self.assertEqual(rep["fps"], 24.0)   # снята с файла, а не наша 30
+
+    def test_a_decoder_that_failed_stops_the_run(self):
+        video = self.root / "driving.mp4"
+        video.write_text("не видео", encoding="utf-8")
+
+        def decoder(src, dst, **kw):
+            return {"outcome": "не годно", "paths": [],
+                    "note": "файл не видео"}
+
+        rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
+                        decode=decoder, prober=fake_prober(24))
+        self.assertEqual(rep["outcome"], "не годно")
+
+
+class TheEntryPoint(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        make_frames(self.root / "src", DRIVING_FRAMES)
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_main(self, argv):
+        """Точка входа печатает — в тесте её вывод ловится, а не льётся."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = fs.main(argv)
+        return code, buf.getvalue()
+
+    def test_the_loop_argument_is_parsed(self):
+        self.assertEqual(fs.parse_loop("114..162"), (114, 162))
+
+    def test_a_broken_loop_argument_is_refused(self):
+        for bad in ("114-162", "114..", "..", "a..b", "114..162..3"):
+            with self.assertRaises(ValueError):
+                fs.parse_loop(bad)
+
+    def test_the_command_returns_zero_on_the_battle_order(self):
+        code, text = self.run_main(
+            [str(self.root / "src"), "--loop", "114..162", "--seconds", "6.04",
+             "--out", str(self.root / "out"), "--fps", "24"])
+        self.assertEqual(code, 0)
+        self.assertIn("145", text)
+        self.assertIn("6.04", text)
+        self.assertEqual(len(list((self.root / "out").glob("*.png"))), 145)
+
+    def test_the_command_returns_one_on_a_loop_outside_the_material(self):
+        code, _ = self.run_main(
+            [str(self.root / "src"), "--loop", "350..400", "--seconds", "6.04",
+             "--out", str(self.root / "out"), "--fps", "24"])
+        self.assertEqual(code, 1)
+
+    def test_the_command_returns_two_when_the_length_is_unreachable(self):
+        code, _ = self.run_main(
+            [str(self.root / "src"), "--loop", "114..162", "--seconds", "10",
+             "--out", str(self.root / "out"), "--fps", "24"])
+        self.assertEqual(code, 2)
+
+    def test_the_command_returns_one_on_a_broken_loop_argument(self):
+        code, _ = self.run_main(
+            [str(self.root / "src"), "--loop", "114-162", "--seconds", "6.04",
+             "--out", str(self.root / "out")])
+        self.assertEqual(code, 1)
+
+    def test_the_three_exit_codes_are_distinct(self):
+        self.assertEqual(sorted(fs.EXIT_BY_OUTCOME.values()), [0, 1, 2])
+
+
+class TheCycleLayoutPlaysTheIntroOnceAndTheLoopForever(unittest.TestCase):
+    """Продуктовая раскладка: подводка один раз, дальше круг бесконечно.
+
+    Решение владельца 20.08. Подводка — кадры НЕПОСРЕДСТВЕННО перед петлёй,
+    поэтому стык «подводка -> круг» бесшовен по построению: в снятом
+    материале эти кадры идут подряд. Мост во всём ролике ОДИН, в конце круга.
+
+    Числа боевые: петля 114..162 в ролике из 362 кадров, мост 4 кадра.
+    Ожидаемое написано литералами (Т2): 101, 49, 52 — цифрами, не формулой.
+    """
+
+    def test_the_battle_layout_is_a_hundred_and_one_frames(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["total"], 101)
+
+    def test_the_loop_starts_where_the_intro_ends(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["loop_start"], 49)
+        self.assertEqual(got["frames"][49], ("кадр", 114))
+
+    def test_the_intro_is_the_frames_immediately_before_the_loop(self):
+        # Ради этого всё и затевалось: 113 и 114 идут подряд в материале,
+        # поэтому лечить стык подводки не надо.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["frames"][0], ("кадр", 65))
+        self.assertEqual(got["frames"][48], ("кадр", 113))
+
+    def test_the_joint_frame_is_never_laid_down(self):
+        # Кадр j — тот же момент, что кадр i. Положить оба значит получить
+        # два одинаковых кадра подряд на КАЖДОМ круге.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        real = [n for kind, n in got["frames"] if kind == "кадр"]
+        self.assertNotIn(162, real)
+        self.assertEqual(max(real), 161)
+
+    def test_the_bridge_frames_come_last_and_are_counted(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362)
+        self.assertEqual(got["frames"][-4:],
+                         [("мост", 1), ("мост", 2), ("мост", 3), ("мост", 4)])
+
+    def test_the_length_always_lands_on_the_wrapper_step(self):
+        # Обёртка прижимает длину ВНИЗ молча, и прижатый круг обрывается
+        # посередине движения. Проверяется на всей полосе мостов, а не в точке.
+        for bridge in range(0, 14):
+            with self.subTest(bridge=bridge):
+                got = fs.cycle_plan(114, 162, bridge=bridge, n_frames=362)
+                self.assertEqual(got["outcome"], "годно")
+                self.assertEqual(got["total"] % 4, 1)
+
+    def test_a_loop_too_close_to_the_start_has_no_intro(self):
+        # Третий исход, и он не отказ: круг без подводки — годный товар.
+        got = fs.cycle_plan(10, 58, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertIn("10", got["note"])
+
+    def test_a_much_shorter_intro_is_never_silently_substituted(self):
+        """Мутация `INTRO_SNAP_REACH = 20` пережила первый заход сьюта.
+
+        Смысл дефекта: материала перед петлёй 35 кадров при заказе 49, и при
+        широком поиске модуль ТИХО отдаёт подводку в 33 кадра — то есть другой
+        товар под именем заказанного. Подгонка на шаг обёртки и «взять что
+        найдётся» — разные вещи, и вторая здесь запрещена.
+        """
+        got = fs.cycle_plan(35, 83, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не смогли проверить")
+        self.assertEqual(got["loop_start"], 0)
+
+    def test_a_cut_inside_the_intro_is_a_finding(self):
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362, cuts=[80])
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertIn("рез", got["note"])
+
+    def test_a_cut_outside_the_intro_is_not(self):
+        # Негативный контроль (И5): прибор обязан молчать, когда рез не мешает.
+        got = fs.cycle_plan(114, 162, bridge=4, n_frames=362, cuts=[20, 300])
+        self.assertEqual(got["outcome"], "годно")
+
+    def test_a_loop_of_one_frame_is_refused(self):
+        got = fs.cycle_plan(114, 114, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_a_loop_outside_the_material_is_refused(self):
+        got = fs.cycle_plan(114, 400, bridge=4, n_frames=362)
+        self.assertEqual(got["outcome"], "не годно")
+
+    def test_the_cycle_is_the_body_plus_the_bridge(self):
+        # Литералы (Т2): петля 114..162 — это 49 кадров, тело 48, мост 4.
+        self.assertEqual(fs.cycle_frames(49, 4), 52)
+        self.assertEqual(fs.cycle_frames(49, 0), 48)
+
+    def test_the_intro_never_shrinks_the_loop_to_fit_the_step(self):
+        # Подгоняется ПОДВОДКА, не петля и не мост: петлю выбрал прибор,
+        # мост продиктован измеренным стыком.
+        for bridge in range(0, 14):
+            with self.subTest(bridge=bridge):
+                got = fs.cycle_plan(114, 162, bridge=bridge, n_frames=362)
+                self.assertEqual(got["cycle"], 48 + bridge)
+                self.assertEqual(
+                    sum(1 for kind, _ in got["frames"] if kind == "мост"),
+                    bridge)
+
+
+class TheKeyNeverOverridesWhatWasMeasured(unittest.TestCase):
+    """Е2: при расхождении ключа и файла верим файлу, и это «не годно».
+
+    ВОСПРОИЗВЕДЕНО до починки на настоящем mp4 60 к/с с `--fps 30`:
+    «годно, 161 кадр = 5.37 с» при том, что движения в этих кадрах 2.68 с —
+    ошибка ровно вдвое, и отчёт сходился сам с собой.
+    """
+
+    def test_a_key_that_disagrees_with_the_file_is_refused(self):
+        rep = fs.source_fps(30.0, 60.0)
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertIsNone(rep["fps"])
+
+    def test_the_refusal_names_both_numbers(self):
+        rep = fs.source_fps(30.0, 60.0)
+        self.assertIn("30.0", rep["note"])
+        self.assertIn("60.0", rep["note"])
+
+    def test_the_measured_value_wins_when_no_key_is_given(self):
+        self.assertEqual(fs.source_fps(None, 60.0)["fps"], 60.0)
+
+    def test_a_key_that_agrees_passes(self):
+        # Негативный контроль (И5): совпадение обязано проходить молча.
+        rep = fs.source_fps(24.0, 24.0)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["fps"], 24.0)
+
+    def test_a_directory_of_frames_has_nothing_to_measure(self):
+        rep = fs.source_fps(24.0, None)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["fps"], 24.0)
+
+
+class TheFpsRefusalCostsNoDecodedFrames(unittest.TestCase):
+    """П2: отказ по частоте — до раскодирования, а не после.
+
+    ИЗМЕРЕНО до перестановки на mp4 60 к/с: отказ печатался после 180
+    распакованных кадров, 728 КБ в out/src. На боевом драйвинге это минуты и
+    гигабайты, которые остаются лежать.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_decoder_is_never_called_when_the_key_disagrees(self):
+        video = self.root / "driving.mp4"
+        video.write_text("не видео", encoding="utf-8")
+        called = []
+
+        def decoder(src, dst, **kw):
+            called.append(src)
+            return {"outcome": "годно", "paths": [], "note": "не должен звучать"}
+
+        rep = fs.splice(video, (0, 40), 5.4, self.root / "out", fps=30,
+                        decode=decoder, prober=fake_prober(60, frames=120))
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertEqual(called, [])
+
+    def test_the_decoder_is_called_when_the_frequency_is_good(self):
+        # Негативный контроль (И5): при годной частоте раскодировщик обязан
+        # быть позван, иначе тест выше проходил бы и на сломанном модуле.
+        video = self.root / "driving.mp4"
+        video.write_text("не видео", encoding="utf-8")
+        paths = make_frames(self.root / "src", 200)
+        called = []
+
+        def decoder(src, dst, **kw):
+            called.append(src)
+            return {"outcome": "годно", "paths": paths, "note": "подставной"}
+
+        rep = fs.splice(video, (LOOP_I, LOOP_J), 6.04, self.root / "out",
+                        decode=decoder, prober=fake_prober(24))
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(len(called), 1)
+
+
+class TheToleranceIsAsymmetricAndAgreesWithTheNextInstrument(unittest.TestCase):
+    """Недостача кадров запрещена, избыток в пределах шага — разрешён.
+
+    ИЗМЕРЕНО на сетке 3 частоты x 118 длин петли x 6 заказов (2124 входа):
+    при прежнем симметричном допуске 4 склейка говорила «годно» 322 раза, и
+    137 из них (43%) следующий прибор `fork_run.length_fits_driving` называл
+    «не смогли, не хватает». После починки: «годно» 237 раз, расхождений 0.
+    """
+
+    def test_a_short_plan_is_refused_even_by_one_frame(self):
+        # L=6, 24 к/с, заказ 7.0 с: набирается 161 кадр против нужных 165.
+        rep = fs.choose_repeats(6, 7.0, fps=24)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+
+    def test_a_plan_longer_than_the_upper_tolerance_is_refused(self):
+        # L=6, заказ 7.0 с: ближайшее сверху 181 кадр — на 16 больше 165.
+        rep = fs.choose_repeats(6, 7.0, fps=24)
+        self.assertIn("допуске сверху", rep["note"])
+
+    def test_the_refusal_names_how_many_frames_are_missing(self):
+        # Ветка недостачи: из петли не набирается НИ ОДНА длина >= заказа.
+        # L=4, 24 к/с, заказ 10.0 с — 237 кадров, а полоса даёт максимум 217.
+        rep = fs.choose_repeats(4, 10.0, fps=24)
+        self.assertEqual(rep["outcome"], "не смогли проверить")
+        self.assertIn("НЕ ХВАТАЕТ", rep["note"])
+
+    def test_an_exact_plan_passes(self):
+        # Негативный контроль (И5): боевая петля 49 кадров на 6.04 с.
+        rep = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["plan"]["frames"], 145)
+
+    def test_a_plan_is_never_shorter_than_the_order(self):
+        # Литералы, не импорт (Т2): заказ 6.04 с при 24 к/с — это 145 кадров.
+        rep = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertGreaterEqual(rep["plan"]["frames"], 145)
+
+    def test_the_chosen_plan_never_contradicts_the_next_instrument(self):
+        # Е1 машиной, а не глазами: два прибора на одном входе.
+        from .. import fork_run
+        checked = wrong = 0
+        for fps in (24, 25, 30):
+            for length in range(2, 60):
+                for order in (5.0, 6.04, 7.0, 8.5, 10.0):
+                    got = fs.choose_repeats(length, order, fps=fps)
+                    if got["outcome"] != "годно":
+                        continue
+                    checked += 1
+                    after = fork_run.length_fits_driving(
+                        got["plan"]["frames"], seconds=order, fps=fps)
+                    if after["outcome"] != "годно":
+                        wrong += 1
+        self.assertGreater(checked, 0, "негативный контроль: сетка пуста")
+        self.assertEqual(wrong, 0, f"проверено {checked}, расхождений {wrong}")
+
+
+class TheCycleIsMaterialisedWithItsBridge(unittest.TestCase):
+    """Раскладка превращается в кадры: снятые ссылками, мост построенный.
+
+    ИЗМЕРЕНО на боевом материале (петля 114..162, мост 2, 101 кадр):
+    замыкание круга 1.24 уровня против обычного шага внутри круга 1.65-1.71,
+    без моста было бы 2.88. То есть стык стал ГЛАДЧЕ обычного перехода, и
+    одинаковых соседних кадров в круге ноль.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.src = make_frames(self.root / "src", 200)
+
+    def fake_bridge(self, outcome="годно", count=None):
+        made = []
+
+        def build(paths, j, i, k, out_dir, **kw):
+            n = k if count is None else count
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            made[:] = [Path(out_dir) / f"b{t}.png" for t in range(n)]
+            for t, path in enumerate(made):
+                path.write_text(f"мост {t}", encoding="utf-8")
+            return {"outcome": outcome, "paths": made, "note": "подставной мост"}
+
+        return build
+
+    def test_the_cycle_lands_on_disk_with_its_bridge(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge())
+        self.assertEqual(got["outcome"], "годно")
+        self.assertEqual(got["written"], 101)
+        self.assertEqual(got["bridge"], 2)
+
+    def test_the_report_says_where_the_loop_starts(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge())
+        self.assertEqual(got["loop_start"], 51)
+        self.assertIn("играется один раз", got["note"])
+
+    def test_the_order_is_the_order_of_the_plan(self):
+        # Кадры собираются дальше `sorted(glob)`, и перепутанный порядок дал бы
+        # каталог нужной длины и правдоподобного вида.
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        fs.write_cycle(self.src, plan, self.root / "out",
+                       bridge_build=self.fake_bridge())
+        laid = sorted((self.root / "out").glob("*.png"))
+        self.assertEqual(laid[0].read_text(encoding="utf-8"), "кадр 63")
+        # Граница круга пиннится с ОБЕИХ сторон: 50-й — последний кадр
+        # подводки, 51-й — первый кадр круга. Одна сторона пропустила бы
+        # сдвиг на кадр, а он и есть самая дорогая ошибка раскладки.
+        self.assertEqual(laid[50].read_text(encoding="utf-8"), "кадр 113")
+        self.assertEqual(laid[51].read_text(encoding="utf-8"), "кадр 114")
+        self.assertEqual(laid[-1].read_text(encoding="utf-8"), "мост 1")
+
+    def test_a_bridge_that_failed_stops_the_whole_layout(self):
+        # Круг без моста не замыкается, а положить на его место лишний снятый
+        # кадр значит подменить измеренный переход выдуманным.
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge(outcome="не годно"))
+        self.assertEqual(got["outcome"], "не годно")
+        self.assertEqual(got["written"], 0)
+
+    def test_a_bridge_that_built_the_wrong_count_is_unmeasured(self):
+        plan = fs.cycle_plan(114, 162, bridge=2, n_frames=200)
+        got = fs.write_cycle(self.src, plan, self.root / "out",
+                             bridge_build=self.fake_bridge(count=1))
+        self.assertEqual(got["outcome"], "не смогли проверить")
+
+    def test_a_cycle_without_a_bridge_never_calls_the_builder(self):
+        # Негативный контроль (И5): мост в ноль кадров — законный случай, и
+        # звать ради него производителя незачем.
+        called = []
+        plan = fs.cycle_plan(114, 162, bridge=0, n_frames=200)
+        fs.write_cycle(self.src, plan, self.root / "out",
+                       bridge_build=lambda *a, **k: called.append(a) or {})
+        self.assertEqual(called, [])
+
+    def test_an_empty_plan_is_refused(self):
+        got = fs.write_cycle(self.src, {"frames": [], "loop_start": None},
+                             self.root / "out")
+        self.assertEqual(got["outcome"], "не годно")
+
+
+class WritingNeverEatsTheSource(unittest.TestCase):
+    """Дефект, найденный прогоном: назначение = источник -> материала нет.
+
+    ИЗМЕРЕНО до починки на 6 кадрах: остаётся 121 файл, читается 0, вердикт
+    «годно», код 0, в отчёте «своих байт на диске 0» — читается как экономия
+    на жёстких ссылках. Стирание идёт ДО чтения источника, а `os.symlink`
+    удаётся на несуществующую цель, поэтому склейка ещё и рапортует «легло».
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_the_source_directory_is_refused_as_destination(self):
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1, 2, 0], self.root / "src",
+                                overwrite=True)
+        self.assertEqual(rep["outcome"], "не годно")
+        self.assertEqual(rep["written"], 0)
+
+    def test_the_source_frames_are_still_on_disk_and_readable(self):
+        src = make_frames(self.root / "src", 6)
+        before = [Path(p).read_text(encoding="utf-8") for p in src]
+        fs.write_sequence(src, [0, 1, 2, 0], self.root / "src", overwrite=True)
+        after = sorted((self.root / "src").glob("*.png"))
+        self.assertEqual(len(after), 6)
+        self.assertEqual([p.read_text(encoding="utf-8") for p in after],
+                         before)
+
+    def test_the_refusal_names_how_many_frames_clashed(self):
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1], self.root / "src", overwrite=True)
+        self.assertIn("6 из 6", rep["note"])
+
+    def test_a_different_directory_still_writes(self):
+        # Негативный контроль (И5): проверка обязана пропускать нормальный ход.
+        src = make_frames(self.root / "src", 6)
+        rep = fs.write_sequence(src, [0, 1, 2, 0], self.root / "out")
+        self.assertEqual(rep["outcome"], "годно")
+        self.assertEqual(rep["written"], 4)
+
+    def test_a_dangling_symlink_is_not_reported_as_placed(self):
+        # Е2: отчёт о том, что ИСПОЛНИЛОСЬ. Ссылка на несуществующий файл
+        # создаётся успешно; «символическая» про неё — ложь в вердикте.
+        missing = self.root / "нет-такого.png"
+        dst = self.root / "куда.png"
+        with self.assertRaises(OSError):
+            fs.place(missing, dst, prefer="символическая")
+        self.assertFalse(dst.is_symlink())
+        self.assertFalse(dst.exists())
+
+
+class TheModuleDoesNotPromiseSeamlessness(unittest.TestCase):
+    """Слова, которых у склейки нет права говорить: она не судит стык."""
+
+    def test_no_verdict_calls_the_seam_seamless(self):
+        rep = fs.choose_repeats(49, 6.04, fps=24)
+        self.assertNotIn("бесшов", rep["note"].lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

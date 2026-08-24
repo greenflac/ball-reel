@@ -22,7 +22,7 @@ try:
 except ImportError:
     HAVE_NUMPY = False
 
-FRAME = Path(__file__).resolve().parents[2] / "marktest_ref.png"
+FRAME = Path(__file__).resolve().parents[2] / "experiments" / "marktest_ref.png"
 
 
 def _mask(size=100, skin_box=None):

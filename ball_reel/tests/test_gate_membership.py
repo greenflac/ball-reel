@@ -77,7 +77,7 @@ class TheLocalGateHasExactlyTheseAxes(unittest.TestCase):
         """`доводка лица` и `апскейл` возвращаются ОТДЕЛЬНЫМИ ключами.
 
         Если их однажды добавят в `rows`, они начнут ронять прогон, и таблица
-        «в вердикте» в `docs/REPORT.md` разойдётся с кодом молча.
+        «в вердикте» в `docs/internal/REPORT.md` разойдётся с кодом молча.
         """
         import inspect
 
@@ -90,7 +90,7 @@ class TheLocalGateHasExactlyTheseAxes(unittest.TestCase):
             with self.subTest(row=name):
                 self.assertNotIn(f"rows.append({name})", src,
                                  f"{name} попал в вердикт — тогда таблица "
-                                 f"«в вердикте» в docs/REPORT.md устарела")
+                                 f"«в вердикте» в docs/internal/REPORT.md устарела")
         self.assertIn('"refine": refine_row', src)
         self.assertIn('"upscale": up_row', src)
 
@@ -112,7 +112,7 @@ class TheLocalGateHasExactlyTheseAxes(unittest.TestCase):
 class TwoUncalibratedInstrumentsDoFailTheRun(unittest.TestCase):
     """РАСХОЖДЕНИЕ ДОК/КОД, зафиксированное как есть, а не заглаженное.
 
-    `docs/GUIDE.md` утверждал про `прилегание` и `мимику`: «печатают число, но
+    `docs/internal/GUIDE.md` утверждал про `прилегание` и `мимику`: «печатают число, но
     **не останавливают** прогон», с обоснованием — бар на непроверенном приборе
     не должен браковать оплаченный результат. **Код делает обратное.** Обе
     строки кладутся в общий список `rows` (`wardrobe_rows`), а `run_verdict`
@@ -120,7 +120,7 @@ class TwoUncalibratedInstrumentsDoFailTheRun(unittest.TestCase):
 
     Прав по существу документ, и по правилу самого проекта: у мимики полосы
     СОМКНУЛИСЬ на калибровке — свои p90 0.0355 против чужих p10 0.0352
-    (`docs/REPORT.md` §2), — а `bar_from_pairs` при перекрытии облаков
+    (`docs/internal/REPORT.md` §2), — а `bar_from_pairs` при перекрытии облаков
     отказывается выводить порог. Прилегание мерено только на живой съёмке и ни
     разу на генерации.
 
@@ -160,10 +160,10 @@ class TwoUncalibratedInstrumentsDoFailTheRun(unittest.TestCase):
         src = inspect.getsource(run_local.wardrobe_rows)
         self.assertNotIn("blocking", src,
                          "у строк появился признак «справочная» — тогда правь "
-                         "docs/REPORT.md §2 и docs/GUIDE.md вместе с кодом")
+                         "docs/internal/REPORT.md §2 и docs/internal/GUIDE.md вместе с кодом")
 
     def test_the_docs_admit_the_disagreement_instead_of_hiding_it(self):
-        guide = (ROOT / "docs" / "GUIDE.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "internal" / "GUIDE.md").read_text(encoding="utf-8")
         self.assertIn("НЕ СООТВЕТСТВУЕТ КОДУ", guide,
                       "GUIDE снова заявляет, что эти оси не останавливают "
                       "прогон, не отметив, что код делает иначе")
@@ -188,7 +188,7 @@ class TheTwoGatesAreNotTheSameGate(unittest.TestCase):
 
         `run_local` не вызывает `semantic`: ось «та ли одежда заказана» на
         локальном пути не считается вовсе. Если её подключат — тест покраснеет,
-        и вместе с кодом придётся поправить README и `docs/REPORT.md`.
+        и вместе с кодом придётся поправить README и `docs/internal/REPORT.md`.
         """
         src = (ROOT / "ball_reel" / "run_local.py").read_text(encoding="utf-8")
         self.assertNotIn("from .semantic import", src)
@@ -231,7 +231,7 @@ class WhatIsMeasuredButNotWired(unittest.TestCase):
                     self._importers(name), [],
                     f"`{name}` кто-то подключил — это хорошо, но тогда его "
                     f"надо перенести из «считается» в «останавливает» в "
-                    f"README и docs/REPORT.md, иначе документ разойдётся с "
+                    f"README и docs/internal/REPORT.md, иначе документ разойдётся с "
                     f"кодом")
 
     def test_marks_are_transferred_but_judge_nothing(self):
@@ -247,20 +247,25 @@ class TheReadmeSaysTheSameThing(unittest.TestCase):
     """Документ, разошедшийся с кодом, — дефект. Сверяется автоматически."""
 
     def setUp(self):
-        self.text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.text = (ROOT / "docs" / "internal" / "REPORT.md").read_text(encoding="utf-8")
 
     def test_it_admits_there_are_two_gates(self):
         self.assertIn("Гейтов два", self.text,
-                      "README снова описывает гейт как один список")
+                      "REPORT.md снова описывает гейт как один список")
 
     def test_it_marks_semantic_as_not_wired_locally(self):
         self.assertIn("НЕ ПОДКЛЮЧЕНА", self.text,
-                      "README перестал говорить, что семантики нет в "
+                      "REPORT.md перестал говорить, что семантики нет в "
                       "локальном пути — а её там по-прежнему нет")
 
     def test_it_no_longer_lists_fluid_as_a_gate_axis(self):
-        """`жидкость` стояла в рамке гейта, не будучи подключена никуда."""
-        frame = self.text[self.text.index("ГЕЙТ"):]
+        """`жидкость` стояла в рамке гейта, не будучи подключена никуда.
+
+        Диаграмма гейта живёт в GUIDE.md, а не в REPORT.md — это другой
+        документ, поэтому здесь читается отдельно от self.text.
+        """
+        guide = (ROOT / "docs" / "internal" / "GUIDE.md").read_text(encoding="utf-8")
+        frame = guide[guide.index("ГЕЙТ"):]
         frame = frame[:frame.index("```")]
         self.assertNotIn("жидкость", frame)
         self.assertNotIn("объект", frame)

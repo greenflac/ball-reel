@@ -416,9 +416,9 @@ class WithTheRealWeights(unittest.TestCase):
         """Тот самый кадр: `startopt/face_first_0.png`, дрейф лица 0.2124."""
         import os
 
-        if not os.path.exists("startopt/face_first_0.png"):
+        if not os.path.exists("experiments/startopt/face_first_0.png"):
             self.skipTest("кадра нет в этом рабочем каталоге")
-        got = self.s.semantic_match(["startopt/face_first_0.png"])
+        got = self.s.semantic_match(["experiments/startopt/face_first_0.png"])
         self.assertEqual(got["verdict"], "mismatched", got)
         self.assertLess(got["margin"], -0.05, got)
 

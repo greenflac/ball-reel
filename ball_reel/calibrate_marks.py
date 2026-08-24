@@ -176,9 +176,9 @@ class Sample:
 DEFAULT_SAMPLES = (
     ("kit/face.jpg", "l_upperarm"),
     ("kit/face.jpg", "l_forearm"),
-    ("marktest_ref.png", "l_forearm"),
-    ("marktest_ref.png", "l_upperarm"),
-    ("marktest_ref.png", "r_shin"),
+    ("experiments/marktest_ref.png", "l_forearm"),
+    ("experiments/marktest_ref.png", "l_upperarm"),
+    ("experiments/marktest_ref.png", "r_shin"),
     ("attrtest/bodyref.png", "l_shin"),
     ("attrtest/bodyref.png", "l_upperarm"),
     ("attrtest/bodyref.png", "r_upperarm"),
@@ -208,7 +208,7 @@ DEFAULT_RECIPES = (
 #: Настоящий рисунок, которым ставился первоначальный ручной эксперимент. Он не
 #: заменяет процедурные образцы (у них задан диапазон, а у него — одна точка),
 #: но связывает стенд с теми семью числами, ради которых он написан.
-DEFAULT_ART = "marktest/dragon_raw.png"
+DEFAULT_ART = "experiments/marktest/dragon_raw.png"
 
 
 def default_recipes(root=None):

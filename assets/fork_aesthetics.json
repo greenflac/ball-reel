@@ -1,0 +1,59 @@
+{
+  "_": "БАЗА ЭСТЕТИК. Промты даны ВЛАДЕЛЬЦЕМ 22.08 дословно и НЕ ПРАВЯТСЯ здесь: это его материал, он составитель шаблонов. Всё, что добавляет конвейер, живёт в fork_aesthetic.py отдельными строками и видно в отчёте.",
+  "_kinds": {
+    "scene": "промт описывает сцену целиком",
+    "transform": "промт сам велит анализировать поданную картинку"
+  },
+  "_brand_conflict": "СНЯТО 22.08 решением владельца: «бренды пусть остаются, просто добавляем no logo во все промты стилей». Названия марок словами разрешены, запрет оставлен только на нарисованный знак и надпись.",
+  "aesthetics": [
+    {
+      "id": "y2k",
+      "name": "Y2K",
+      "kind": "scene",
+      "prompt": "High-Quality Photograph, strong wide-angle fashion portrait with an exaggerated perspective, camera positioned slightly above and very close to the subject creating a head-and-hands enlarged foreground while legs recede into the distance, the woman leaning forward toward the camera in a dynamic candid pose, one hand raised near her lips holding a lip gloss applicator, the other hand holding the gloss bottle, gaze softly focused on the applicator rather than directly at the camera, natural non-posed moment, her posture slightly bent forward with weight shifted, legs extending away in perspective, she has warm tanned skin with visible freckles, green eyes, brunette hair styled in a messy bun with loose strands and soft bangs framing the face, she wears leopard-print eyeglasses with clear lenses, nails neatly manicured in a soft square shape, outfit consists of a relaxed white and pale pink sweatshirt, a light blue denim mini skirt, clean white socks and classic old-school white Adidas sneakers, styling fresh and modern casual, background is a smooth seamless studio gradient transitioning from white to soft banana yellow, lighting clean studio light with gentle shadows and crisp highlights, high contrast yet natural skin texture, emphasizing depth and perspective distortion, highly detailed textures of fabric skin and accessories, contemporary editorial aesthetic with a playful fashion-forward mood",
+      "demo": "f",
+      "demo_why": "мини-юбка и блеск для губ названы в промте"
+    },
+    {
+      "id": "country",
+      "name": "Country fashion",
+      "kind": "scene",
+      "prompt": "High-Quality Photograph of an extremely beautiful woman seated in a minimal armchair placed in a vast Scottish landscape with grazing cows and distant hills under dramatic clouds, ultra wide-angle lens, camera almost touching the ground very close to the foreground near her foot, extreme low-angle perspective with ultra exaggerated depth scaling, one leg fully extended straight toward the camera while the second leg is slightly bent and relaxed creating an elegant asymmetrical line, one boot dominating the foreground and appearing very large while the legs are visually elongated, upper body receding naturally, refined modern tailored outfit in clean neutral tones, supermodel-level beauty with flawless skin and sharp facial features, calm confident posture with hands resting on the armrests and direct gaze, cinematic natural lighting, ultra-realistic high-fashion editorial aesthetic",
+      "demo": "f",
+      "demo_why": "промт писался под женский образ, гардероб нейтрален — пол сменить одним словом"
+    },
+    {
+      "id": "midcentury",
+      "name": "Vintage mid-century",
+      "kind": "scene",
+      "prompt": "High-Quality Photograph of a stylish woman standing casually in a warm minimal interior, leaning lightly against a mid-century wooden sideboard, composition centered and full-body, one leg crossed over the other creating a relaxed elegant stance, she holds a large glossy fashion magazine slightly lowered so her face is partially visible, revealing sharp cat-eye sunglasses with pointed edges and dark lenses, confident subtle expression, outfit reinterpreted with a vibrant saturated orange knit sweater replacing red, paired with a crisp white shirt hem peeking underneath and a short skirt or tailored bottoms, knee-high boots in a rich warm tone harmonizing with the palette, scene styled with a curated arrangement on the sideboard: trailing green houseplants, minimal ceramics, a few editorial objects placed with intention and clean spacing, color palette warm and punchy with orange as the key accent balanced by natural wood, deep green foliage and neutral walls, lighting soft but directional with a slight flash-like contrast creating crisp shadows and a polished editorial feel, textures of fabric, wood and leaves clearly defined, overall aesthetic modern fashion editorial with a subtle retro touch, maintaining the mood and color richness while avoiding direct repetition of the original composition",
+      "demo": "f",
+      "demo_why": "короткая юбка и сапоги до колена названы в промте"
+    },
+    {
+      "id": "fisheye",
+      "name": "Фишай портрет",
+      "kind": "scene",
+      "prompt": "Editorial wide-angle distorted portrait, Sony A7R IV with 14mm lens. Slavic woman with sleek platinum hair, wearing Balenciaga futuristic trench, hand raised behind her head in elegant gesture, face warped slightly toward the camera with confident expression. Background: surreal cloudy sky with lavender and golden hues, HDR glossy textures.",
+      "demo": "m",
+      "demo_why": "тренч и жест — гардероб нейтрален, берём мужскую"
+    },
+    {
+      "id": "tomatoes",
+      "name": "Креативные помидоры",
+      "kind": "transform",
+      "prompt": "Analyze the uploaded image and determine the dominant color based on clothing and overall scene perception; select exactly one highly recognizable natural food type that matches this color in a visually natural and aesthetically correct way; recompose the image so the subject is clearly positioned on the left side, visually occupying about half of the frame while remaining fully visible and unobstructed; generate a dense mass of large-scale food objects on the right side that expands naturally into the frame with an irregular, organic edge instead of a straight vertical division; avoid any clean split or hard boundary and ensure the transition between subject space and food space is uneven and natural; ensure the food never overlaps or touches the subject, keeping a subtle but clear separation gap; use multiple large objects with variation in scale and depth, overlapping each other to create a rich, layered, volumetric cluster rather than a flat or patterned arrangement; ensure the food is realistic, natural, and clearly identifiable, using only one type of food with no mixing; scale the objects large and immersive with partial cropping at the outer edges; maintain strong and correct color harmony so the food visually complements the subject’s palette; produce a high-end editorial composition where the subject dominates the left side and the food forms a dynamic organic mass on the right without any artificial symmetry or straight dividing line.",
+      "demo": "m",
+      "demo_why": "промт вида transform, гардероб приходит с фото"
+    },
+    {
+      "id": "icecream",
+      "name": "Креативное мороженое",
+      "kind": "transform",
+      "prompt": "Analyze the input image and transform the scene into a high-end surreal food-fashion composition where the person is realistically scaled down to appear small relative to a large ice cream scoop stack in a waffle cone, ensure correct human proportions with fully visible legs, feet or shoes clearly defined and naturally positioned, avoid cropped or missing limbs, create a relaxed natural sitting pose with slight asymmetry so the body feels candid and not staged, ensure believable weight interaction where the body subtly presses into the ice cream surface creating small deformations and contact shadows, maintain accurate perspective so the person clearly appears smaller than the ice cream, use one or two ice cream colors maximum with realistic texture including micro-details, soft irregular edges, slight melting and natural variation, avoid artificial smooth or plastic appearance, ensure strong color harmony by selecting ice cream and background tones that complement but do not match the outfit, keep clear visual separation between subject, ice cream, and background, use a clean vertical gradient background from pure white at the top to a distinct contrasting color at the bottom, frame the composition vertically with the cone partially cropped at the bottom while keeping the subject and scoops fully visible and centered, apply soft diffused studio lighting with realistic shadows and depth, preserve sharp facial and skin detail, introduce subtle natural imperfections to avoid a staged look, and maintain a premium editorial photography style with believable materials and balanced composition.",
+      "demo": "f",
+      "demo_why": "промт вида transform, гардероб приходит с фото"
+    }
+  ],
+  "_demo": "ПОЛ ШАБЛОНА = ПОЛ ЕГО ЭСТЕТИКИ. Решение владельца 22.08: «не меняем пол в промтах, просто сами шаблоны собираем в соответствии с полом; какая стилевая рефка по полу такой и пол шаблона». Клиенту подаётся шаблон ЕГО пола, и это сторожит fork_aesthetic.pair_check ДО генерации."
+}
