@@ -3,10 +3,11 @@
 The user uploads an ordinary selfie and picks a template. Out comes a vertical
 video with sound, and the person in the frame is them.
 
-![Client photo, template aesthetic, result frame](docs/img/triptych.png)
+![Client selfie, driving footage, finished video](docs/img/showcase_icecream.gif)
 
-<sub>Left to right: client photo · template aesthetic · frame of the finished
-video.</sub>
+<sub>Left to right: the client's selfie · the bought driving footage · the
+finished video. One template ("Ice cream"), 10 seconds, nothing sped up. The
+same clip **with sound**: [showcase_icecream.mp4](docs/video/showcase_icecream.mp4).</sub>
 
 ---
 
@@ -24,6 +25,9 @@ run, not a sprint.
 
 <sub>Six templates of the first batch. One identity, six aesthetics, four
 different drivings.</sub>
+
+**Presentation:** [English (PDF)](docs/deck/lipsync_en.pdf) ·
+[по-русски (PDF)](docs/deck/lipsync_ru.pdf)
 
 ---
 
@@ -122,9 +126,11 @@ the documents.
 Пользователь грузит обычное селфи и выбирает шаблон. На выходе — вертикальный
 ролик со звуком, где в кадре он сам.
 
-![Фото клиента, эстетика шаблона, кадр результата](docs/img/triptych.png)
+![Селфи клиента, драйвинг, готовый ролик](docs/img/showcase_icecream.gif)
 
-<sub>Слева направо: фото клиента · эстетика шаблона · кадр готового ролика.</sub>
+<sub>Слева направо: селфи клиента · купленный драйвинг · готовый ролик. Один
+шаблон («Мороженое»), 10 секунд, ничего не ускорено. Тот же ролик **со
+звуком**: [showcase_icecream.mp4](docs/video/showcase_icecream.mp4).</sub>
 
 ---
 
@@ -142,6 +148,9 @@ the documents.
 
 <sub>Шесть шаблонов первого батча. Одна личность, шесть эстетик, четыре разных
 драйвинга.</sub>
+
+**Презентация:** [по-русски (PDF)](docs/deck/lipsync_ru.pdf) ·
+[English (PDF)](docs/deck/lipsync_en.pdf)
 
 ---
 
